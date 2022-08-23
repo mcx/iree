@@ -31,6 +31,7 @@
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
+#include "mlir/Dialect/Tensor/IR/TensorTilingInterfaceImpl.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Dialect.h"
@@ -67,6 +68,7 @@ inline void registerMlirDialects(DialectRegistry &registry) {
                   shape::ShapeDialect>();
   // clang-format on
   tensor::registerInferTypeOpInterfaceExternalModels(registry);
+  tensor::registerTilingOpInterfaceExternalModels(registry);
 
 #ifdef IREE_HAVE_C_OUTPUT_FORMAT
   registry.insert<emitc::EmitCDialect>();
