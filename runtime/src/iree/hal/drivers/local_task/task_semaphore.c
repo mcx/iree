@@ -13,11 +13,7 @@
 
 #include "iree/base/internal/synchronization.h"
 #include "iree/base/internal/wait_handle.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/utils/semaphore_base.h"
-
-// Sentinel used the semaphore has failed and an error status is set.
-#define IREE_HAL_TASK_SEMAPHORE_FAILURE_VALUE UINT64_MAX
 
 //===----------------------------------------------------------------------===//
 // iree_hal_task_timepoint_t
@@ -60,7 +56,7 @@ typedef struct iree_hal_task_semaphore_t {
   // than trying to make the entire structure lock-free.
   iree_slim_mutex_t mutex;
 
-  // Current signaled value. May be IREE_HAL_TASK_SEMAPHORE_FAILURE_VALUE to
+  // Current signaled value. May be IREE_HAL_SEMAPHORE_FAILURE_VALUE to
   // indicate that the semaphore has been signaled for failure and
   // |failure_status| contains the error.
   uint64_t current_value;
@@ -136,7 +132,7 @@ static iree_status_t iree_hal_task_semaphore_query(
   *out_value = semaphore->current_value;
 
   iree_status_t status = iree_ok_status();
-  if (*out_value >= IREE_HAL_TASK_SEMAPHORE_FAILURE_VALUE) {
+  if (*out_value >= IREE_HAL_SEMAPHORE_FAILURE_VALUE) {
     status = iree_status_clone(semaphore->failure_status);
   }
 
@@ -190,14 +186,14 @@ static void iree_hal_task_semaphore_fail(iree_hal_semaphore_t* base_semaphore,
   }
 
   // Signal to our failure sentinel value.
-  semaphore->current_value = IREE_HAL_TASK_SEMAPHORE_FAILURE_VALUE;
+  semaphore->current_value = IREE_HAL_SEMAPHORE_FAILURE_VALUE;
   semaphore->failure_status = status;
 
   iree_slim_mutex_unlock(&semaphore->mutex);
 
   // Notify timepoints - note that this must happen outside the lock.
-  iree_hal_semaphore_notify(&semaphore->base,
-                            IREE_HAL_TASK_SEMAPHORE_FAILURE_VALUE, status_code);
+  iree_hal_semaphore_notify(&semaphore->base, IREE_HAL_SEMAPHORE_FAILURE_VALUE,
+                            status_code);
 }
 
 // Acquires a timepoint waiting for the given value.
@@ -356,16 +352,24 @@ iree_status_t iree_hal_task_semaphore_multi_wait(
   iree_hal_task_timepoint_t* timepoints = NULL;
   iree_host_size_t total_timepoint_size =
       semaphore_list.count * sizeof(timepoints[0]);
+  bool needs_wait = true;
   status =
       iree_arena_allocate(&arena, total_timepoint_size, (void**)&timepoints);
   if (iree_status_is_ok(status)) {
     memset(timepoints, 0, total_timepoint_size);
-    for (iree_host_size_t i = 0; i < semaphore_list.count; ++i) {
+    for (iree_host_size_t i = 0; i < semaphore_list.count && needs_wait; ++i) {
       iree_hal_task_semaphore_t* semaphore =
           iree_hal_task_semaphore_cast(semaphore_list.semaphores[i]);
       iree_slim_mutex_lock(&semaphore->mutex);
       if (semaphore->current_value >= semaphore_list.payload_values[i]) {
         // Fast path: already satisfied.
+        // If in ANY wait mode, this is sufficient and we don't actually need
+        // to wait. This also skips acquiring timepoints for any remaining
+        // semaphores. We still exit normally otherwise so as to cleanup
+        // any timepoints already acquired.
+        if (wait_mode == IREE_HAL_WAIT_MODE_ANY) {
+          needs_wait = false;
+        }
       } else {
         // Slow path: get a native wait handle for the timepoint.
         iree_hal_task_timepoint_t* timepoint = &timepoints[timepoint_count++];
@@ -381,7 +385,7 @@ iree_status_t iree_hal_task_semaphore_multi_wait(
   }
 
   // Perform the wait.
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) && needs_wait) {
     if (wait_mode == IREE_HAL_WAIT_MODE_ANY) {
       status = iree_wait_any(wait_set, deadline_ns, /*out_wake_handle=*/NULL);
     } else {

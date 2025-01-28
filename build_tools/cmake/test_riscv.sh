@@ -18,7 +18,6 @@ set -xeuo pipefail
 BUILD_DIR="${1:-${IREE_TARGET_BUILD_DIR:-build-riscv}}"
 RISCV_PLATFORM="${IREE_TARGET_PLATFORM:-linux}"
 RISCV_ARCH="${IREE_TARGET_ARCH:-riscv_64}"
-BUILD_PRESET="${BUILD_PRESET:-test}"
 
 # Environment variable used by the emulator.
 export RISCV_TOOLCHAIN_ROOT="${RISCV_RV64_LINUX_TOOLCHAIN_ROOT}"
@@ -32,33 +31,21 @@ ctest_args=(
 )
 
 declare -a label_exclude_args=(
-  "^nokokoro$"
+  "^nodocker$"
   "^driver=vulkan$"
+  "^driver=metal$"
   "^driver=cuda$"
+  "^driver=hip$"
   "^vulkan_uses_vk_khr_shader_float16_int8$"
   "^requires-filesystem$"
   "^requires-dtz$"
+  "^noriscv$"
 )
 
-# Excluding mobilebert, fp16, and lowering_config regression
-# tests for now.
 # TODO(#10462): Investigate the lowering_config test issue.
 declare -a test_exclude_args=(
-  "bert"
-  "fp16"
   "regression_llvm-cpu_lowering_config"
 )
-
-if [[ "${BUILD_PRESET}" == "benchmark-suite-test" ]]; then
-  declare -a label_args=(
-    "^test-type=run-module-test$"
-  )
-  label_include_regex="($(IFS="|" ; echo "${label_args[*]}"))"
-  echo "******** Running run-module CTest ********"
-  ctest --test-dir ${BUILD_DIR} ${ctest_args[@]} \
-    --label-regex ${label_include_regex}
-  exit 0
-fi
 
 # Test runtime unit tests
 runtime_label_exclude_regex="($(IFS="|" ; echo "${label_exclude_args[*]}"))"
@@ -70,19 +57,11 @@ runtime_ctest_args=(
 echo "******** Running runtime CTest ********"
 ctest ${runtime_ctest_args[@]}
 
-tools_ctest_args=(
-  "--test-dir ${BUILD_DIR}/tools/test"
-  ${ctest_args[@]}
-  "--label-exclude ${runtime_label_exclude_regex}"
-)
-echo "******** Running tools CTest ********"
-ctest ${tools_ctest_args[@]}
-
 if [[ "${RISCV_PLATFORM}-${RISCV_ARCH}" == "linux-riscv_32" ]]; then
-  # mhlo.power is also disabled because musl math library is not compiled for
+  # stablehlo.power is also disabled because musl math library is not compiled for
   # 32-bit.
   test_exclude_args+=(
-    "xla.*llvm-cpu.*pow"
+    "stablehlo.*llvm-cpu.*pow"
   )
 fi
 

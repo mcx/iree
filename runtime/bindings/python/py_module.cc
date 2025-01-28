@@ -7,6 +7,7 @@
 #include "./py_module.h"
 
 #include <string_view>
+#include <unordered_map>
 
 #include "./vm.h"
 
@@ -39,6 +40,7 @@ class PyModuleInterface {
     interface_.lookup_function = &PyModuleInterface::ModuleLookupFunction;
     interface_.alloc_state = &PyModuleInterface::ModuleAllocState;
     interface_.free_state = &PyModuleInterface::ModuleFreeState;
+    interface_.fork_state = &PyModuleInterface::ModuleForkState;
     interface_.resolve_import = &PyModuleInterface::ModuleResolveImport;
     interface_.notify = &PyModuleInterface::ModuleNotify;
     interface_.begin_call = &PyModuleInterface::ModuleBeginCall;
@@ -58,7 +60,8 @@ class PyModuleInterface {
 
   static iree_string_view_t ModuleName(void* vself) {
     auto self = AsSelf(vself);
-    return {self->module_name_.data(), self->module_name_.size()};
+    return {self->module_name_.data(),
+            static_cast<iree_host_size_t>(self->module_name_.size())};
   }
 
   static iree_vm_module_signature_t ModuleSignature(void* vself) {
@@ -84,7 +87,8 @@ class PyModuleInterface {
       iree_vm_function_t* out_function, iree_string_view_t* out_name,
       iree_vm_function_signature_t* out_signature) {
     auto self = AsSelf(vself);
-    if (IREE_LIKELY(linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT)) {
+    if (IREE_LIKELY(linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT ||
+                    linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL)) {
       if (IREE_LIKELY(ordinal < self->export_functions_.size())) {
         std::unique_ptr<PyFunction>& f = self->export_functions_[ordinal];
         if (IREE_LIKELY(out_function)) {
@@ -93,11 +97,12 @@ class PyModuleInterface {
           out_function->ordinal = ordinal;
         }
         if (IREE_LIKELY(out_name)) {
-          *out_name = {f->name.data(), f->name.size()};
+          *out_name = {f->name.data(),
+                       static_cast<iree_host_size_t>(f->name.size())};
         }
         if (IREE_LIKELY(out_signature)) {
-          out_signature->calling_convention = {f->cconv.data(),
-                                               f->cconv.size()};
+          out_signature->calling_convention = {
+              f->cconv.data(), static_cast<iree_host_size_t>(f->cconv.size())};
         }
         return iree_ok_status();
       }
@@ -105,13 +110,14 @@ class PyModuleInterface {
     return iree_make_status(IREE_STATUS_NOT_FOUND);
   }
 
-  static iree_status_t ModuleLookupFunction(void* vself,
-                                            iree_vm_function_linkage_t linkage,
-                                            iree_string_view_t name,
-                                            iree_vm_function_t* out_function) {
+  static iree_status_t ModuleLookupFunction(
+      void* vself, iree_vm_function_linkage_t linkage, iree_string_view_t name,
+      const iree_vm_function_signature_t* expected_signature,
+      iree_vm_function_t* out_function) {
     auto self = AsSelf(vself);
     std::string_view name_cpp(name.data, name.size);
-    if (linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT) {
+    if (linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT ||
+        linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL) {
       auto found_it = self->export_name_to_ordinals_.find(name_cpp);
       if (found_it != self->export_name_to_ordinals_.end()) {
         out_function->linkage = linkage;
@@ -151,6 +157,15 @@ class PyModuleInterface {
     auto retained_handle =
         py::handle(reinterpret_cast<PyObject*>(module_state));
     retained_handle.dec_ref();
+  }
+
+  static iree_status_t ModuleForkState(
+      void* self, iree_vm_module_state_t* parent_state,
+      iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+    // TODO: call into python to clone the state (mostly what ctor_ is doing
+    // but each module will want to handle things differently).
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "python module fork not supported");
   }
 
   static iree_status_t ModuleResolveImport(
@@ -239,9 +254,11 @@ class PyModuleInterface {
         std::move(name), std::move(cconv), std::move(callable));
     exports_.push_back({});
     iree_vm_native_export_descriptor_t& d = exports_.back();
-    d.local_name = {py_function->name.data(), py_function->name.size()};
-    d.calling_convention = {py_function->cconv.data(),
-                            py_function->cconv.size()};
+    d.local_name = {py_function->name.data(),
+                    static_cast<iree_host_size_t>(py_function->name.size())};
+    d.calling_convention = {
+        py_function->cconv.data(),
+        static_cast<iree_host_size_t>(py_function->cconv.size())};
     d.attr_count = 0;
     d.attrs = nullptr;
     std::string& alloced_name = py_function->name;
@@ -261,7 +278,8 @@ class PyModuleInterface {
     AssertMutable();
     initialized_ = true;
     memset(&descriptor_, 0, sizeof(descriptor_));
-    descriptor_.name = {module_name_.data(), module_name_.size()};
+    descriptor_.name = {module_name_.data(),
+                        static_cast<iree_host_size_t>(module_name_.size())};
     descriptor_.version = version_;
     descriptor_.attr_count = attrs_.size();
     descriptor_.attrs = attrs_.empty() ? nullptr : attrs_.data();
@@ -298,7 +316,8 @@ class PyModuleInterface {
     iree_status_t ParseCconv() {
       iree_vm_function_signature_t signature;
       memset(&signature, 0, sizeof(signature));
-      signature.calling_convention = {cconv.data(), cconv.size()};
+      signature.calling_convention = {
+          cconv.data(), static_cast<iree_host_size_t>(cconv.size())};
       IREE_RETURN_IF_ERROR(iree_vm_function_call_get_cconv_fragments(
           &signature, &cconv_arguments, &cconv_results));
 
@@ -324,10 +343,11 @@ class PyModuleInterface {
         &packed_arguments_required_size));
     if (IREE_UNLIKELY(packed_arguments_required_size !=
                       call.arguments.data_length)) {
-      return iree_make_status(
-          IREE_STATUS_INVALID_ARGUMENT,
-          "mismatched packed argument size: actual=%zu, required=%zu",
-          call.arguments.data_length, packed_arguments_required_size);
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "mismatched packed argument size: actual=%" PRIhsz
+                              ", required=%" PRIhsz,
+                              call.arguments.data_length,
+                              packed_arguments_required_size);
     }
 
     // Unpack arguments.
@@ -363,7 +383,7 @@ class PyModuleInterface {
           // count.
           VmRef py_ref;
           iree_vm_ref_retain(&ref, &py_ref.ref());
-          arguments.append(py::cast(py_ref, py::return_value_policy::move));
+          arguments.append(py::cast(py_ref, py::rv_policy::move));
           packed_arguments += sizeof(iree_vm_ref_t);
           break;
         }
@@ -464,13 +484,13 @@ class PyModuleInterface {
   py::object retained_self_ref_;
 };
 
-void SetupPyModuleBindings(py::module& m) {
+void SetupPyModuleBindings(py::module_& m) {
   py::class_<PyModuleInterface>(m, "PyModuleInterface")
       .def(py::init<std::string, py::object>(), py::arg("module_name"),
            py::arg("ctor"))
       .def("__str__", &PyModuleInterface::ToString)
-      .def_property_readonly("initialized", &PyModuleInterface::initialized)
-      .def_property_readonly("destroyed", &PyModuleInterface::destroyed)
+      .def_prop_ro("initialized", &PyModuleInterface::initialized)
+      .def_prop_ro("destroyed", &PyModuleInterface::destroyed)
       .def("create", &PyModuleInterface::Create)
       .def("export", &PyModuleInterface::ExportFunction, py::arg("name"),
            py::arg("cconv"), py::arg("callable"));

@@ -5,43 +5,38 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Dialect/Flow/Conversion/TensorToFlow/Patterns.h"
-#include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-using namespace mlir;
-using namespace mlir::iree_compiler;
-using namespace mlir::iree_compiler::IREE;
+namespace mlir::iree_compiler::IREE::Flow {
+
+#define GEN_PASS_DEF_CONVERTTOFLOWPASS
+#include "iree/compiler/Dialect/Flow/Transforms/Passes.h.inc"
 
 namespace {
-// Pass to test conversion to flow patterns.
-struct ConvertToFlowPass : public Flow::ConvertToFlowBase<ConvertToFlowPass> {
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<AffineDialect, IREE::Flow::FlowDialect, linalg::LinalgDialect,
-                scf::SCFDialect, tensor::TensorDialect>();
-  }
 
+// Pass to test conversion to flow patterns.
+struct ConvertToFlowPass
+    : public IREE::Flow::impl::ConvertToFlowPassBase<ConvertToFlowPass> {
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet convertToFlowPatterns(context);
-    Flow::populateTensorToFlowConversionPatterns(context,
-                                                 convertToFlowPatterns);
-    memref::populateResolveRankedShapeTypeResultDimsPatterns(
+    IREE::Flow::populateTensorToFlowConversionPatterns(context,
+                                                       convertToFlowPatterns);
+    memref::populateResolveRankedShapedTypeResultDimsPatterns(
         convertToFlowPatterns);
-    if (failed(applyPatternsAndFoldGreedily(
-            getOperation(), std::move(convertToFlowPatterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(convertToFlowPatterns)))) {
       return signalPassFailure();
     }
   }
 };
-}  // namespace
 
-std::unique_ptr<Pass> Flow::createConvertToFlowPass() {
-  return std::make_unique<ConvertToFlowPass>();
-}
+} // namespace
+
+} // namespace mlir::iree_compiler::IREE::Flow

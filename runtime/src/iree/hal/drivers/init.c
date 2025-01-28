@@ -6,11 +6,13 @@
 
 #include "iree/hal/drivers/init.h"
 
-#include "iree/base/tracing.h"
-
 #if defined(IREE_HAVE_HAL_CUDA_DRIVER_MODULE)
 #include "iree/hal/drivers/cuda/registration/driver_module.h"
 #endif  // IREE_HAVE_HAL_CUDA_DRIVER_MODULE
+
+#if defined(IREE_HAVE_HAL_HIP_DRIVER_MODULE)
+#include "iree/hal/drivers/hip/registration/driver_module.h"
+#endif  // IREE_HAVE_HAL_HIP_DRIVER_MODULE
 
 #if defined(IREE_HAVE_HAL_LOCAL_SYNC_DRIVER_MODULE)
 #include "iree/hal/drivers/local_sync/registration/driver_module.h"
@@ -18,7 +20,15 @@
 
 #if defined(IREE_HAVE_HAL_LOCAL_TASK_DRIVER_MODULE)
 #include "iree/hal/drivers/local_task/registration/driver_module.h"
+
+#if defined(IREE_HAVE_HAL_METAL_DRIVER_MODULE)
+#include "iree/hal/drivers/metal/registration/driver_module.h"
+#endif  // IREE_HAVE_HAL_METAL_DRIVER_MODULE
 #endif  // IREE_HAVE_HAL_LOCAL_TASK_DRIVER_MODULE
+
+#if defined(IREE_HAVE_HAL_NULL_DRIVER_MODULE)
+#include "iree/hal/drivers/null/registration/driver_module.h"
+#endif  // IREE_HAVE_HAL_NULL_DRIVER_MODULE
 
 #if defined(IREE_HAVE_HAL_VULKAN_DRIVER_MODULE)
 #include "iree/hal/drivers/vulkan/registration/driver_module.h"
@@ -44,6 +54,11 @@ iree_hal_register_all_available_drivers(iree_hal_driver_registry_t* registry) {
       z0, iree_hal_cuda_driver_module_register(registry));
 #endif  // IREE_HAVE_HAL_CUDA_DRIVER_MODULE
 
+#if defined(IREE_HAVE_HAL_HIP_DRIVER_MODULE)
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_hip_driver_module_register(registry));
+#endif  // IREE_HAVE_HAL_HIP_DRIVER_MODULE
+
 #if defined(IREE_HAVE_HAL_LOCAL_SYNC_DRIVER_MODULE)
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_local_sync_driver_module_register(registry));
@@ -53,6 +68,16 @@ iree_hal_register_all_available_drivers(iree_hal_driver_registry_t* registry) {
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_local_task_driver_module_register(registry));
 #endif  // IREE_HAVE_HAL_LOCAL_TASK_DRIVER_MODULE
+
+#if defined(IREE_HAVE_HAL_METAL_DRIVER_MODULE)
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_metal_driver_module_register(registry));
+#endif  // IREE_HAVE_HAL_METAL_DRIVER_MODULE
+
+#if defined(IREE_HAVE_HAL_NULL_DRIVER_MODULE)
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_null_driver_module_register(registry));
+#endif  // IREE_HAVE_HAL_NULL_DRIVER_MODULE
 
 #if defined(IREE_HAVE_HAL_VULKAN_DRIVER_MODULE)
   IREE_RETURN_AND_END_ZONE_IF_ERROR(

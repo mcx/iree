@@ -9,7 +9,6 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTraits.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -25,10 +24,10 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_DUMPSTATISTICSPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
 
 namespace {
 
@@ -39,11 +38,14 @@ namespace {
 struct UsageInfo {
   // util.globals holding resources mapped by name.
   llvm::MapVector<StringRef, IREE::Util::GlobalOp> resourceGlobalOps;
+  // util.buffer.constants that are (for the most part) going to end up in the
+  // final binary.
+  SmallVector<IREE::Util::BufferConstantOp> bufferConstantOps;
 
   // stream.executable ops mapped by name.
   llvm::MapVector<StringRef, IREE::Stream::ExecutableOp> executableOps;
   // stream.executable exported function -> dispatches to it.
-  llvm::MapVector<mlir::func::FuncOp, SmallVector<IREE::Stream::CmdDispatchOp>>
+  llvm::MapVector<Operation *, SmallVector<IREE::Stream::CmdDispatchOp>>
       exportDispatchOps;
 
   // TODO(benvanik): resource allocations.
@@ -58,16 +60,18 @@ struct UsageInfo {
   void analyze(mlir::ModuleOp moduleOp) {
     SymbolTable symbolTable(moduleOp);
     for (auto globalOp : moduleOp.getOps<IREE::Util::GlobalOp>()) {
-      if (globalOp.getType().isa<IREE::Stream::ResourceType>()) {
+      if (llvm::isa<IREE::Stream::ResourceType>(globalOp.getType())) {
         resourceGlobalOps[globalOp.getName()] = globalOp;
       }
     }
     for (auto executableOp : moduleOp.getOps<IREE::Stream::ExecutableOp>()) {
       executableOps[executableOp.getName()] = executableOp;
     }
-    for (auto funcLikeOp : moduleOp.getOps<FunctionOpInterface>()) {
-      funcLikeOp.walk([&](Operation *op) {
+    for (auto funcOp : moduleOp.getOps<mlir::FunctionOpInterface>()) {
+      funcOp.walk([&](Operation *op) {
         TypeSwitch<Operation *>(op)
+            .Case<IREE::Util::BufferConstantOp>(
+                [&](auto op) { bufferConstantOps.push_back(op); })
             .Case<IREE::Stream::ResourceAllocaOp>(
                 [&](auto op) { allocaOps.push_back(op); })
             .Case<IREE::Stream::CmdExecuteOp>(
@@ -113,26 +117,34 @@ struct Statistics {
   size_t copyCount = 0;
   size_t collectiveCount = 0;
   size_t dispatchCount = 0;
+  size_t callCount = 0;
 
   // Executables:
   size_t executableCount = 0;
 
   void analyze(const UsageInfo &usageInfo) {
     // Globals:
-    for (auto it : usageInfo.resourceGlobalOps) {
+    for (auto [name, globalOp] : usageInfo.resourceGlobalOps) {
       auto globalType =
-          it.second.getType().dyn_cast<IREE::Stream::ResourceType>();
-      if (!globalType) continue;
-      // TODO(benvanik): analyze size in UsageInfo.
+          llvm::dyn_cast<IREE::Stream::ResourceType>(globalOp.getType());
+      if (!globalType)
+        continue;
+      // TODO(benvanik): analyze size in UsageInfo where possible.
       switch (globalType.getLifetime()) {
-        case IREE::Stream::Lifetime::Constant:
-          ++constantCount;
-          break;
-        case IREE::Stream::Lifetime::Variable:
-          ++variableCount;
-          break;
-        default:
-          continue;
+      case IREE::Stream::Lifetime::Constant:
+        ++constantCount;
+        break;
+      case IREE::Stream::Lifetime::Variable:
+        ++variableCount;
+        break;
+      default:
+        continue;
+      }
+    }
+    for (auto constantOp : usageInfo.bufferConstantOps) {
+      if (auto storageAttr =
+              dyn_cast<IREE::Util::SizedStorageAttr>(constantOp.getValue())) {
+        constantSize += storageAttr.getStorageSize();
       }
     }
 
@@ -157,7 +169,8 @@ struct Statistics {
             .Case<IREE::Stream::CmdCollectiveOp>(
                 [&](auto op) { ++collectiveCount; })
             .Case<IREE::Stream::CmdDispatchOp>(
-                [&](auto op) { ++dispatchCount; });
+                [&](auto op) { ++dispatchCount; })
+            .Case<IREE::Stream::CmdCallOp>([&](auto op) { ++callCount; });
       });
     }
 
@@ -212,33 +225,34 @@ static void prettyPrintStatistics(const UsageInfo &usageInfo,
   Statistics stats;
   stats.analyze(usageInfo);
 
-  os << llvm::formatv("//   Constants: {0}, ", stats.constantCount);
+  os << llvm::formatv("//   Constants: {}, ", stats.constantCount);
+  os << llvm::formatv("estimated storage of {}{} B ({:F2} MiB)\n",
+                      stats.constantSizeDynamic ? "minimum " : "",
+                      stats.constantSize,
+                      stats.constantSize / (1 * 1024 * 1024.0f));
+  os << llvm::formatv("//   Variables: {}, ", stats.variableCount);
   os << llvm::formatv(
-      "{0}{1} B ({2:F2} MiB)\n", stats.constantSizeDynamic ? "minimum " : "",
-      stats.constantSize, stats.constantSize / (1 * 1024 * 1024.0f));
-  os << llvm::formatv("//   Variables: {0}, ", stats.variableCount);
-  os << llvm::formatv(
-      "{0}{1} B ({2:F2} MiB)\n", stats.variableSizeDynamic ? "minimum " : "",
+      "(TBD) {}{} B ({:F2} MiB)\n", stats.variableSizeDynamic ? "minimum " : "",
       stats.variableSize, stats.variableSize / (1 * 1024 * 1024.0f));
 
-  os << llvm::formatv("//  D->H Syncs: {0}\n", stats.awaitCount);
+  os << llvm::formatv("//  D->H Syncs: {}\n", stats.awaitCount);
 
-  os << llvm::formatv("// Submissions: {0}, using cumulative ",
+  os << llvm::formatv("// Submissions: {}, using cumulative ",
                       stats.submissionCount);
   os << llvm::formatv(
-      "{0}{1} B ({2:F2} MiB)\n", stats.transientSizeDynamic ? "minimum " : "",
+      "{}{} B ({:F2} MiB)\n", stats.transientSizeDynamic ? "minimum " : "",
       stats.transientSize, stats.transientSize / (1 * 1024 * 1024.0f));
 
-  os << llvm::formatv("//   DMA Fills: {0}\n", stats.fillCount);
-  os << llvm::formatv("//  DMA Copies: {0}\n", stats.copyCount);
-  os << llvm::formatv("// Collectives: {0}\n", stats.collectiveCount);
-  os << llvm::formatv("//  Dispatches: {0}\n", stats.dispatchCount);
+  os << llvm::formatv("//   DMA Fills: {}\n", stats.fillCount);
+  os << llvm::formatv("//  DMA Copies: {}\n", stats.copyCount);
+  os << llvm::formatv("// Collectives: {}\n", stats.collectiveCount);
+  os << llvm::formatv("//  Dispatches: {}\n", stats.dispatchCount);
+  os << llvm::formatv("// Async Calls: {}\n", stats.callCount);
 
-  os << llvm::formatv(
-      "// Executables: {0}, {1}% reuse\n", stats.executableCount,
-      (int)std::roundf(
-          (1.0f - (stats.executableCount / (float)stats.dispatchCount)) *
-          100.0f));
+  os << llvm::formatv("// Executables: {}, {}% reuse\n", stats.executableCount,
+                      (int)std::roundf((1.0f - (stats.executableCount /
+                                                (float)stats.dispatchCount)) *
+                                       100.0f));
 
   os << "//\n";
 }
@@ -275,11 +289,11 @@ static void prettyPrintSyncInfo(const UsageInfo &usageInfo, bool verbose,
 static void prettyPrintStreamInfo(const UsageInfo &usageInfo,
                                   IREE::Stream::CmdExecuteOp executeOp,
                                   llvm::raw_fd_ostream &os) {
-  auto parentOp = executeOp->getParentOfType<FunctionOpInterface>();
+  auto parentOp = executeOp->getParentOfType<mlir::FunctionOpInterface>();
 
-  prettyPrintItemHeader(
-      llvm::formatv("stream.cmd.execute", parentOp->getName().getStringRef()),
-      os);
+  prettyPrintItemHeader(llvm::Twine("stream.cmd.execute ") +
+                            parentOp->getName().getStringRef(),
+                        os);
   os << "// ";
   prettyPrintOpBreadcrumb(executeOp, os);
   os << "\n";
@@ -315,10 +329,10 @@ static void prettyPrintExecutableExportInfo(
     const UsageInfo &usageInfo, IREE::Stream::ExecutableOp executableOp,
     IREE::Stream::ExecutableExportOp exportOp, llvm::raw_fd_ostream &os) {
   auto funcOp = exportOp.lookupFunctionRef();
-  prettyPrintItemHeader(
-      llvm::formatv("stream.executable.export @{0}::@{1}",
-                    executableOp.getName(), exportOp.getName()),
-      os);
+  prettyPrintItemHeader(llvm::formatv("stream.executable.export @{}::@{}",
+                                      executableOp.getName(),
+                                      exportOp.getName()),
+                        os);
   os << "// ";
   prettyPrintOpBreadcrumb(funcOp, os);
   os << "\n";
@@ -386,24 +400,23 @@ static void dumpAggregateCSVTable(const UsageInfo &usageInfo,
   Statistics stats;
   stats.analyze(usageInfo);
 
-  os << R"("Constants","Constant Size","Variables","Variable Size","Awaits","Submissions","Transient Size","Fills","Copies","Dispatches","Executables")";
+  os << R"("Constants","Constant Size","Variables","Variable Size","Awaits","Submissions","Transient Size","Fills","Copies","Dispatches","Async Calls","Executables")";
   os << "\n";
 
   // Globals:
-  os << llvm::formatv("{0},{1},{2},{3},", stats.constantCount,
-                      stats.constantSize, stats.variableCount,
-                      stats.variableSize);
+  os << llvm::formatv("{},{},{},{},", stats.constantCount, stats.constantSize,
+                      stats.variableCount, stats.variableSize);
 
   // Synchronization:
-  os << llvm::formatv("{0},", stats.awaitCount);
+  os << llvm::formatv("{},", stats.awaitCount);
 
   // Execution:
-  os << llvm::formatv("{0},{1},{2},{3},{4},", stats.submissionCount,
+  os << llvm::formatv("{},{},{},{},{},{},", stats.submissionCount,
                       stats.transientSize, stats.fillCount, stats.copyCount,
-                      stats.dispatchCount);
+                      stats.dispatchCount, stats.callCount);
 
   // Executables:
-  os << llvm::formatv("{0}", stats.executableCount);
+  os << llvm::formatv("{}", stats.executableCount);
 
   os << "\n";
   os << "\n";
@@ -423,31 +436,34 @@ static void dumpExecutionCSVTable(const UsageInfo &usageInfo,
     TypeSwitch<Operation *>(op)
         .Case<IREE::Stream::CmdSerialOp>([&](auto op) {
           ++depth;
-          for (auto &nestedOp : op.getBody().front()) dumpRow(&nestedOp);
+          for (auto &nestedOp : op.getBody().front())
+            dumpRow(&nestedOp);
           --depth;
         })
         .Case<IREE::Stream::CmdConcurrentOp>([&](auto op) {
           ++depth;
-          for (auto &nestedOp : op.getBody().front()) dumpRow(&nestedOp);
+          for (auto &nestedOp : op.getBody().front())
+            dumpRow(&nestedOp);
           --depth;
         })
         .Case<IREE::Stream::CmdFillOp>([&](auto op) {
           APInt length;
           matchPattern(op.getTargetLength(), m_ConstantInt(&length));
-          os << llvm::formatv(R"({0},"fill",,{1},,,,)", depth, length);
+          os << llvm::formatv(R"({},"fill",,{},,,,)", depth, length);
           os << "\n";
         })
         .Case<IREE::Stream::CmdCopyOp>([&](auto op) {
           APInt length;
           matchPattern(op.getLength(), m_ConstantInt(&length));
-          os << llvm::formatv(R"({0},"copy",,{1},,,,)", depth, length);
+          os << llvm::formatv(R"({},"copy",,{},,,,)", depth, length);
           os << "\n";
         })
         .Case<IREE::Stream::CmdDispatchOp>([&](auto op) {
           auto workload = op.getWorkload();
           SmallString<32> workloadStr;
           for (unsigned i = 0; i < workload.size(); ++i) {
-            if (i > 0) workloadStr.append(";");
+            if (i > 0)
+              workloadStr.append(";");
             APInt dimValue;
             if (matchPattern(workload[i], m_ConstantInt(&dimValue))) {
               dimValue.toString(workloadStr, 10, /*signed=*/true);
@@ -520,7 +536,8 @@ static void dumpAggregateJSONStructure(const UsageInfo &usageInfo,
   os << llvm::formatv(kvPair, "transient-memory-size", stats.transientSize);
   os << llvm::formatv(kvPair, "fill-count", stats.fillCount);
   os << llvm::formatv(kvPair, "copy-count", stats.copyCount);
-  os << llvm::formatv(kvPairNoComma, "dispatch-count", stats.dispatchCount);
+  os << llvm::formatv(kvPair, "dispatch-count", stats.dispatchCount);
+  os << llvm::formatv(kvPairNoComma, "call-count", stats.callCount);
   os << "  },\n";
 
   os << "  \"executable\": {\n";
@@ -542,44 +559,37 @@ static void dumpJSONStructures(const UsageInfo &usageInfo,
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-dump-statistics
+// --iree-stream-dump-statistics
 //===----------------------------------------------------------------------===//
 
 // Opens a canonical |filePath| for text output.
 // An empty path can be used to target stderr and `-` will go to stdout.
 // If the file cannot be opened stderr will be used.
-static std::unique_ptr<llvm::raw_fd_ostream> openOutputFile(
-    StringRef filePath) {
+static std::unique_ptr<llvm::raw_fd_ostream>
+openOutputFile(StringRef filePath) {
   if (filePath.empty()) {
-    return std::make_unique<llvm::raw_fd_ostream>(2, false);  // stderr
+    return std::make_unique<llvm::raw_fd_ostream>(2, false); // stderr
   } else if (filePath == "-") {
-    return std::make_unique<llvm::raw_fd_ostream>(1, false);  // stdout
+    return std::make_unique<llvm::raw_fd_ostream>(1, false); // stdout
   } else {
     std::error_code ec;
     auto result = std::make_unique<llvm::raw_fd_ostream>(
         filePath, ec, llvm::sys::fs::OF_TextWithCRLF);
-    if (!ec) return result;
+    if (!ec)
+      return result;
     llvm::errs() << "Error opening iree-stream-dump-statistics output file '"
                  << filePath << "'\n";
-    return std::make_unique<llvm::raw_fd_ostream>(2, false);  // stderr.
+    return std::make_unique<llvm::raw_fd_ostream>(2, false); // stderr.
   }
 }
 
-class DumpStatisticsPass : public DumpStatisticsBase<DumpStatisticsPass> {
- public:
-  DumpStatisticsPass() = default;
-  DumpStatisticsPass(DumpOutputFormat outputFormat, std::string outputFile) {
-    this->outputFormat = outputFormat;
-    this->outputFile = outputFile;
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
-  }
-
+struct DumpStatisticsPass
+    : public IREE::Stream::impl::DumpStatisticsPassBase<DumpStatisticsPass> {
+  using IREE::Stream::impl::DumpStatisticsPassBase<
+      DumpStatisticsPass>::DumpStatisticsPassBase;
   void runOnOperation() override {
-    if (outputFormat == DumpOutputFormat::None) return;
+    if (outputFormat == DumpOutputFormat::None)
+      return;
 
     // Open the output file we'll be streaming to.
     // Since we are processing the entire module at once we overwrite the file.
@@ -591,33 +601,25 @@ class DumpStatisticsPass : public DumpStatisticsBase<DumpStatisticsPass> {
     usageInfo.analyze(moduleOp);
 
     switch (outputFormat) {
-      case DumpOutputFormat::Pretty:
-      case DumpOutputFormat::Verbose:
-        prettyPrintUsageInfo(usageInfo,
-                             outputFormat == DumpOutputFormat::Verbose, *os);
-        break;
-      case DumpOutputFormat::CSV:
-        dumpCSVTables(usageInfo, *os);
-        break;
-      case DumpOutputFormat::JSON:
-        dumpJSONStructures(usageInfo, *os);
-        break;
-      default:
-        break;
+    case DumpOutputFormat::Pretty:
+    case DumpOutputFormat::Verbose:
+      prettyPrintUsageInfo(usageInfo, outputFormat == DumpOutputFormat::Verbose,
+                           *os);
+      break;
+    case DumpOutputFormat::CSV:
+      dumpCSVTables(usageInfo, *os);
+      break;
+    case DumpOutputFormat::JSON:
+      dumpJSONStructures(usageInfo, *os);
+      break;
+    default:
+      break;
     }
 
     os->flush();
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createDumpStatisticsPass(
-    DumpOutputFormat outputFormat, std::string outputFile) {
-  return std::make_unique<DumpStatisticsPass>(outputFormat, outputFile);
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

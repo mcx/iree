@@ -82,6 +82,16 @@ typedef struct iree_hal_vulkan_device_extensions_t {
   bool calibrated_timestamps : 1;
   // VK_EXT_subgroup_size_control is enabled.
   bool subgroup_size_control : 1;
+  // VK_EXT_external_memory_host is enabled.
+  bool external_memory_host : 1;
+  // VK_KHR_buffer_device_address is enabled.
+  bool buffer_device_address : 1;
+  // VK_KHR_8bit_storage is enabled.
+  bool shader_8bit_storage : 1;
+  // VK_KHR_shader_float16_int8 is enabled.
+  bool shader_float16_int8 : 1;
+  // VK_KHR_cooperative_matrix is enabled.
+  bool cooperative_matrix : 1;
 } iree_hal_vulkan_device_extensions_t;
 
 // Returns a bitfield with all of the provided extension names.
@@ -95,5 +105,70 @@ iree_hal_vulkan_populate_enabled_device_extensions(
 iree_hal_vulkan_device_extensions_t
 iree_hal_vulkan_infer_enabled_device_extensions(
     const iree::hal::vulkan::DynamicSymbols* device_syms);
+
+// A subset of relevant device limits.
+// These come from VkPhysicalDeviceLimits and other extension structures and are
+// condensed here to avoid the need for handling extension/versioning
+// compatibility in all places that may be interested in the limits.
+typedef struct iree_hal_vulkan_device_limits_t {
+  // maxPerStageDescriptorUniformBuffers is the maximum number of uniform
+  // buffers that can be accessible to a single shader stage in a pipeline
+  // layout. Descriptors with a type of VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER or
+  // VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC count against this limit.
+  uint32_t max_per_stage_descriptor_uniform_buffers;
+  // maxPerStageDescriptorStorageBuffers is the maximum number of storage
+  // buffers that can be accessible to a single shader stage in a pipeline
+  // layout. Descriptors with a type of VK_DESCRIPTOR_TYPE_STORAGE_BUFFER or
+  // VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC count against this limit.
+  uint32_t max_per_stage_descriptor_storage_buffers;
+  // maxPushConstantsSize is the maximum size, in bytes, of the pool of push
+  // constant memory. For each of the push constant ranges indicated by the
+  // pPushConstantRanges member of the VkPipelineLayoutCreateInfo structure,
+  // (offset + size) must be less than or equal to this limit.
+  uint32_t max_push_constants_size;
+} iree_hal_vulkan_device_limits_t;
+
+// Struct for supported device properties.
+//
+// Note that the fields used here should match the ones used in KernelFeatures
+// on the compiler side.
+typedef struct iree_hal_vulkan_device_properties_t {
+  // Floating-point compute related feature bitfield:
+  // * 0b01: f16
+  // * 0b10: f64
+  // Note that f32 is assumed to always exist and does not appear in this
+  // bitfield.
+  uint32_t compute_float : 8;
+  // Integer compute related feature bitfield:
+  // * 0b001: i8
+  // * 0b010: i16
+  // * 0b100: i64
+  // Note that i32 or i1 is assumed to always exist and does not appear in
+  // this bitfield.
+  uint32_t compute_int : 8;
+  // Storage bitwidth requirement bitfiled:
+  // * 0b01: 8-bit
+  // * 0b10: 16-bit
+  uint32_t storage : 8;
+  // Subgroup operation requirement bitfield:
+  // * 0b01: subgroup shuffle operations
+  // * 0b10: subgroup arithmetic operations
+  uint32_t subgroup : 8;
+  // Dot product operation requirement bitfield:
+  // ("dotprod.<input-type>.<output-type>")
+  // * 0b01: dotprod.4xi8.i32
+  uint32_t dot_product : 8;
+  // Cooperative matrix requirement bitfield:
+  // ("coopmatrix.<input-element-type>.<output-element-type>.<m>x<n>x<k>")
+  // * 0b01: coopmatrix.f16.f16.16x16x16
+  uint32_t cooperative_matrix : 8;
+  // Addressing more requirement bitfield:
+  // ("address.<mode>")
+  // * 0b01: address.physical64
+  uint32_t address : 8;
+
+  // Device limits.
+  iree_hal_vulkan_device_limits_t limits;
+} iree_hal_vulkan_iree_hal_vulkan_device_properties_t;
 
 #endif  // IREE_HAL_DRIVERS_VULKAN_EXTENSIBILITY_UTIL_H_

@@ -8,37 +8,12 @@
 
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/ADT/STLExtras.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 
 #define DEBUG_TYPE "iree-llvmcpu-utils"
 
-namespace mlir {
-namespace iree_compiler {
-
-Optional<StringRef> getCpuFeatures(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  auto cpuFeatures = getConfigStringAttr(targetAttr, "cpu_features");
-  if (!cpuFeatures) return std::nullopt;
-  return cpuFeatures->getValue();
-}
-
-bool isX86(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
-  return triple && triple.value().isX86();
-}
-
-bool isX86_64(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
-  return triple && triple.value().getArch() == llvm::Triple::x86_64;
-}
-
-bool isAArch64(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
-  return triple && triple.value().isAArch64();
-}
-
-bool isRISCV(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  Optional<llvm::Triple> triple = getTargetTriple(targetAttr);
-  return triple && triple.value().isRISCV();
-}
+namespace mlir::iree_compiler {
 
 bool preferIntrinsicsOverAsm(IREE::HAL::ExecutableTargetAttr targetAttr) {
   auto intrinsicsAttr =
@@ -46,31 +21,12 @@ bool preferIntrinsicsOverAsm(IREE::HAL::ExecutableTargetAttr targetAttr) {
   return intrinsicsAttr && intrinsicsAttr->getValue();
 }
 
-// TODO(dcaballe): If we have to check for a significantly large number of
-// features in the future, we may want to consider a persistent state to carry
-// over processed HAL information or keeping the TTI instance alive and query
-// subtarget features data structure.
-bool hasFeature(IREE::HAL::ExecutableTargetAttr targetAttr, StringRef feature) {
-  Optional<StringRef> features = getCpuFeatures(targetAttr);
-  if (!features) {
-    return false;
-  }
-
-  // Find feature string in list of features, making sure that we don't match a
-  // sub-string.
-  std::stringstream sstream(features->str());
-  std::string str;
-  while (std::getline(sstream, str, ',')) {
-    if (str == feature) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 bool hasAVX2Feature(IREE::HAL::ExecutableTargetAttr targetAttr) {
   return hasFeature(targetAttr, "+avx2");
+}
+
+bool hasAVX512fFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+avx512f");
 }
 
 bool hasVFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
@@ -89,9 +45,71 @@ bool hasZve64xFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
   return hasFeature(targetAttr, "+zve64x");
 }
 
-bool hasAnySVEFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
-  return hasFeature(targetAttr, "+sve") || hasFeature(targetAttr, "+sve2");
+bool hasAnyVFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasVFeature(targetAttr) || hasZve32xFeature(targetAttr) ||
+         hasZve32fFeature(targetAttr) || hasZve64xFeature(targetAttr) ||
+         hasFeature(targetAttr, "+zve64f") || hasFeature(targetAttr, "+zve64d");
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+bool hasAnySVEFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+sve") || hasFeature(targetAttr, "+sve2") ||
+         hasFeature(targetAttr, "+v9a");
+}
+
+bool hasSMEFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+sme");
+}
+
+bool hasI8mmFeature(IREE::HAL::ExecutableTargetAttr targetAttr) {
+  return hasFeature(targetAttr, "+i8mm");
+}
+
+bool isLinalgGeneric2DTranspose(linalg::GenericOp genericOp) {
+  // Check op has 2 dimensions.
+  if (genericOp.getNumLoops() != 2)
+    return false;
+
+  // Check op has single input and output.
+  if (genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1)
+    return false;
+
+  // Check all iterators are parallel.
+  if (genericOp.getNumParallelLoops() != genericOp.getNumLoops())
+    return false;
+
+  // Check that the two indexing maps are a permutation of each other.
+  SmallVector<AffineMap> indexingMaps = genericOp.getIndexingMapsArray();
+  bool isTranspose =
+      (indexingMaps[0].isPermutation() && indexingMaps[1].isIdentity()) ||
+      (indexingMaps[1].isPermutation() && indexingMaps[0].isIdentity());
+  if (!isTranspose)
+    return false;
+
+  // Make sure the region only contains a yield op.
+  Block &body = genericOp.getRegion().front();
+  if (!llvm::hasSingleElement(body))
+    return false;
+
+  auto yieldOp = cast<linalg::YieldOp>(body.getTerminator());
+
+  // The yield op should return the block argument corresponding to the input.
+  auto yieldArg = dyn_cast<BlockArgument>(yieldOp.getValues()[0]);
+  if (!yieldArg || yieldArg.getArgNumber() != 0 || yieldArg.getOwner() != &body)
+    return false;
+
+  return true;
+}
+
+bool mayHaveUndefinedBehaviorInMasking(Operation *op) {
+  // Those operations will be lowered to division or related instructions,
+  // and they might result in divide-by-zero.
+  if (isa<mlir::arith::RemSIOp, mlir::arith::RemUIOp, mlir::arith::DivSIOp,
+          mlir::arith::DivUIOp, mlir::arith::CeilDivSIOp,
+          mlir::arith::CeilDivUIOp, mlir::arith::FloorDivSIOp,
+          mlir::arith::DivFOp, mlir::arith::RemFOp>(op)) {
+    return true;
+  }
+  return false;
+}
+
+} // namespace mlir::iree_compiler

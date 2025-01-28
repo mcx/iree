@@ -7,12 +7,14 @@ add_mlir_library(IREEInputDialect
 
   DEPENDS
   IREEInputIncGen
+  IREEInputInterfacesIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect
   MLIRIR
   MLIRInferTypeOpInterface
   MLIRSideEffectInterfaces
+  MLIRTensorDialect
 )
 
 iree_dialects_target_includes(IREEInputDialect)

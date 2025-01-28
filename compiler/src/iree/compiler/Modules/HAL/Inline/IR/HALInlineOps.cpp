@@ -17,11 +17,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Inline {
+namespace mlir::iree_compiler::IREE::HAL::Inline {
 
 //===----------------------------------------------------------------------===//
 // hal_inline.buffer.allocate
@@ -107,7 +103,8 @@ void BufferStorageOp::getAsmResultNames(
 
 OpFoldResult BufferStorageOp::fold(FoldAdaptor operands) {
   auto *definingOp = getBuffer().getDefiningOp();
-  if (!definingOp) return {};
+  if (!definingOp)
+    return {};
   if (auto sourceOp =
           dyn_cast_or_null<IREE::HAL::Inline::BufferAllocateOp>(definingOp)) {
     return sourceOp.getStorage();
@@ -161,7 +158,7 @@ struct FoldBufferViewCreateSubspan
     rewriter.setInsertionPoint(op);
     bool needsUpdate = false;
     auto newSourceBuffer = op.getSourceBuffer();
-    auto newSourceOffset = op.getSourceOffset().cast<Value>();
+    auto newSourceOffset = llvm::cast<Value>(op.getSourceOffset());
     if (auto subspanOp = dyn_cast_or_null<BufferSubspanOp>(
             op.getSourceBuffer().getDefiningOp())) {
       newSourceBuffer = subspanOp.getSourceBuffer();
@@ -171,8 +168,9 @@ struct FoldBufferViewCreateSubspan
       needsUpdate = true;
     }
     rewriter.restoreInsertionPoint(ip);
-    if (!needsUpdate) return failure();
-    rewriter.updateRootInPlace(op, [&]() {
+    if (!needsUpdate)
+      return failure();
+    rewriter.modifyOpInPlace(op, [&]() {
       op.getSourceBufferMutable().assign(newSourceBuffer);
       op.getSourceOffsetMutable().assign(newSourceOffset);
     });
@@ -180,7 +178,7 @@ struct FoldBufferViewCreateSubspan
   }
 };
 
-}  // namespace
+} // namespace
 
 void BufferViewCreateOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                      MLIRContext *context) {
@@ -213,7 +211,7 @@ struct SkipBufferViewBufferOp : public OpRewritePattern<BufferViewBufferOp> {
   }
 };
 
-}  // namespace
+} // namespace
 
 void BufferViewBufferOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                      MLIRContext *context) {
@@ -227,7 +225,8 @@ void BufferViewBufferOp::getCanonicalizationPatterns(RewritePatternSet &results,
 LogicalResult DeviceQueryOp::verify() {
   DeviceQueryOp op = *this;
   if (op.getDefaultValue().has_value()) {
-    if (auto typedDefaultValue = op.getDefaultValue()->dyn_cast<TypedAttr>()) {
+    if (auto typedDefaultValue =
+            llvm::dyn_cast<TypedAttr>(*op.getDefaultValue())) {
       if (typedDefaultValue.getType() != op.getValue().getType()) {
         return op.emitOpError()
                << "type mismatch between result and default value";
@@ -237,11 +236,7 @@ LogicalResult DeviceQueryOp::verify() {
   return success();
 }
 
-}  // namespace Inline
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL::Inline
 
 //===----------------------------------------------------------------------===//
 // TableGen definitions (intentionally last)

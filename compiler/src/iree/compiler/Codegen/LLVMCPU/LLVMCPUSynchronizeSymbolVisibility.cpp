@@ -4,13 +4,14 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_LLVMCPUSYNCHRONIZESYMBOLVISIBILITYPASS
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h.inc"
 
 namespace {
 
@@ -18,22 +19,20 @@ static void setVisibilityFromLinkage(SymbolOpInterface op,
                                      LLVM::Linkage linkage) {
   SymbolTable::Visibility visibility = op.getVisibility();
   switch (linkage) {
-    case LLVM::Linkage::Private:
-    case LLVM::Linkage::Internal:
-      visibility = SymbolTable::Visibility::Private;
-      break;
-    default:
-      visibility = SymbolTable::Visibility::Public;
-      break;
+  case LLVM::Linkage::Private:
+  case LLVM::Linkage::Internal:
+    visibility = SymbolTable::Visibility::Private;
+    break;
+  default:
+    visibility = SymbolTable::Visibility::Public;
+    break;
   }
   op.setVisibility(visibility);
 }
 
 struct LLVMCPUSynchronizeSymbolVisibilityPass
-    : public LLVMCPUSynchronizeSymbolVisibilityBase<
+    : public impl::LLVMCPUSynchronizeSymbolVisibilityPassBase<
           LLVMCPUSynchronizeSymbolVisibilityPass> {
-  LLVMCPUSynchronizeSymbolVisibilityPass() = default;
-
   void runOnOperation() override {
     auto moduleOp = getOperation();
     for (auto &op : moduleOp.getOps()) {
@@ -45,13 +44,5 @@ struct LLVMCPUSynchronizeSymbolVisibilityPass
     }
   }
 };
-
-}  // namespace
-
-std::unique_ptr<OperationPass<ModuleOp>>
-createLLVMCPUSynchronizeSymbolVisibilityPass() {
-  return std::make_unique<LLVMCPUSynchronizeSymbolVisibilityPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

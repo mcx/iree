@@ -17,7 +17,8 @@ namespace {
 
 TEST(ScopeTest, Lifetime) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
   iree_task_scope_deinitialize(&scope);
 }
@@ -27,7 +28,7 @@ TEST(ScopeTest, Lifetime) {
 TEST(ScopeTest, LongNameTruncation) {
   iree_task_scope_t scope;
   iree_task_scope_initialize(iree_make_cstring_view("01234567890123456789"),
-                             &scope);
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
   EXPECT_TRUE(iree_string_view_equal(iree_make_cstring_view("012345678901234"),
                                      iree_task_scope_name(&scope)));
   iree_task_scope_deinitialize(&scope);
@@ -35,7 +36,8 @@ TEST(ScopeTest, LongNameTruncation) {
 
 TEST(ScopeTest, AbortEmpty) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -55,7 +57,8 @@ TEST(ScopeTest, AbortEmpty) {
 
 TEST(ScopeTest, FailEmpty) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -64,7 +67,7 @@ TEST(ScopeTest, FailEmpty) {
   // Enter failure state.
   iree_task_t failed_task = {0};
   failed_task.scope = &scope;
-  iree_task_scope_fail(&scope,
+  iree_task_scope_fail(failed_task.scope,
                        iree_make_status(IREE_STATUS_DATA_LOSS, "whoops!"));
   iree_status_t consumed_status = iree_task_scope_consume_status(&scope);
   EXPECT_TRUE(iree_status_is_data_loss(consumed_status));
@@ -80,7 +83,8 @@ TEST(ScopeTest, FailEmpty) {
 // calls are ignored.
 TEST(ScopeTest, FailAgain) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -89,7 +93,7 @@ TEST(ScopeTest, FailAgain) {
   // Enter initial failure state.
   iree_task_t failed_task_a = {0};
   failed_task_a.scope = &scope;
-  iree_task_scope_fail(&scope,
+  iree_task_scope_fail(failed_task_a.scope,
                        iree_make_status(IREE_STATUS_DATA_LOSS, "whoops 1"));
   iree_status_t consumed_status_a = iree_task_scope_consume_status(&scope);
   EXPECT_TRUE(iree_status_is_data_loss(consumed_status_a));
@@ -102,7 +106,8 @@ TEST(ScopeTest, FailAgain) {
   iree_task_t failed_task_b = {0};
   failed_task_b.scope = &scope;
   iree_task_scope_fail(
-      &scope, iree_make_status(IREE_STATUS_FAILED_PRECONDITION, "whoops 2"));
+      failed_task_b.scope,
+      iree_make_status(IREE_STATUS_FAILED_PRECONDITION, "whoops 2"));
   iree_status_t consumed_status_b = iree_task_scope_consume_status(&scope);
   EXPECT_TRUE(iree_status_is_data_loss(consumed_status_b));
   iree_status_ignore(consumed_status_b);
@@ -115,7 +120,8 @@ TEST(ScopeTest, FailAgain) {
 
 TEST(ScopeTest, WaitIdleWhenIdle) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK and idle.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -131,7 +137,8 @@ TEST(ScopeTest, WaitIdleWhenIdle) {
 
 TEST(ScopeTest, WaitIdleDeadlineExceeded) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK and idle.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -160,7 +167,8 @@ TEST(ScopeTest, WaitIdleDeadlineExceeded) {
 
 TEST(ScopeTest, WaitIdleSuccess) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK and idle.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -174,6 +182,8 @@ TEST(ScopeTest, WaitIdleSuccess) {
 
   // Spin up a thread to wait on the scope.
   std::thread wait_thread([&]() {
+    // Note: if the thread takes longer to start than the sleep below, this
+    // will fail with a flake :(
     EXPECT_FALSE(iree_task_scope_is_idle(&scope));
     EXPECT_TRUE(iree_status_is_ok(
         iree_task_scope_wait_idle(&scope, IREE_TIME_INFINITE_FUTURE)));
@@ -182,7 +192,7 @@ TEST(ScopeTest, WaitIdleSuccess) {
 
   // Wait a moment for the thread to spin up.
   // NOTE: this may flake. Need to see if there's a better way to do this.
-  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
   // Complete the task.
   iree_task_submission_t pending_submission;
@@ -199,7 +209,8 @@ TEST(ScopeTest, WaitIdleSuccess) {
 
 TEST(ScopeTest, WaitIdleFailure) {
   iree_task_scope_t scope;
-  iree_task_scope_initialize(iree_make_cstring_view("scope_a"), &scope);
+  iree_task_scope_initialize(iree_make_cstring_view("scope_a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope);
 
   // Current state is OK and idle.
   EXPECT_TRUE(iree_task_scope_is_idle(&scope));
@@ -213,6 +224,8 @@ TEST(ScopeTest, WaitIdleFailure) {
 
   // Spin up a thread to wait on the scope.
   std::thread wait_thread([&]() {
+    // Note: if the thread takes longer to start than the sleep below, this
+    // will fail with a flake :(
     EXPECT_FALSE(iree_task_scope_is_idle(&scope));
     EXPECT_TRUE(iree_status_is_ok(
         iree_task_scope_wait_idle(&scope, IREE_TIME_INFINITE_FUTURE)));
@@ -221,7 +234,7 @@ TEST(ScopeTest, WaitIdleFailure) {
 
   // Wait a moment for the thread to spin up.
   // NOTE: this may flake. Need to see if there's a better way to do this.
-  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
   // Set the failure state.
   iree_task_scope_fail(

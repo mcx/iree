@@ -4,44 +4,41 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/SPIRV/Utils.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
+#include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_SPIRVANNOTATEWINOGRADLOOPSPASS
+#include "iree/compiler/Codegen/SPIRV/Passes.h.inc"
 
 namespace {
 
 class SPIRVAnnotateWinogradLoopsPass final
-    : public SPIRVAnnotateWinogradLoopsBase<SPIRVAnnotateWinogradLoopsPass> {
- public:
-  SPIRVAnnotateWinogradLoopsPass() = default;
-  SPIRVAnnotateWinogradLoopsPass(const SPIRVAnnotateWinogradLoopsPass &pass) =
-      default;
+    : public impl::SPIRVAnnotateWinogradLoopsPassBase<
+          SPIRVAnnotateWinogradLoopsPass> {
+public:
+  using impl::SPIRVAnnotateWinogradLoopsPassBase<
+      SPIRVAnnotateWinogradLoopsPass>::SPIRVAnnotateWinogradLoopsPassBase;
 
   void runOnOperation() override {
-    func::FuncOp funcOp = getOperation();
-    SmallVector<scf::ForOp, 4> forOps;
+    auto funcOp = getOperation();
+    SmallVector<scf::ForOp> forOps;
     funcOp.walk([&](scf::ForOp forOp) {
-      if (!isTiledAndDistributedLoop(forOp)) forOps.push_back(forOp);
+      if (!isTiledAndDistributedLoop(forOp))
+        forOps.push_back(forOp);
     });
 
     MLIRContext *context = &getContext();
     OpBuilder builder(context);
-    const char *attrName = getSPIRVDistributeAttrName();
+    const char *attrName = getGPUDistributeAttrName();
     for (auto [index, forOp] : llvm::enumerate(forOps)) {
-      if (index > kNumGPUDims) break;
+      if (index > kNumGPUDims)
+        break;
       forOp->setAttr(attrName, builder.getIndexAttr(index));
     }
   }
 };
-}  // namespace
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createSPIRVAnnotateWinogradLoopsPass() {
-  return std::make_unique<SPIRVAnnotateWinogradLoopsPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

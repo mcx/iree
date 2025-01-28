@@ -16,15 +16,12 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 class DeduplicateRodataPass
     : public PassWrapper<DeduplicateRodataPass,
                          OperationPass<IREE::VM::ModuleOp>> {
- public:
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::VM::VMDialect>();
   }
@@ -56,7 +53,7 @@ class DeduplicateRodataPass
       bucketOps.push_back(rodataOp);
     }
 
-    SymbolTable symbolTable(moduleOp);
+    DenseMap<SymbolRefAttr, SymbolRefAttr> replacements;
     for (auto bucketKV : bucketedOps) {
       auto &bucketOps = bucketKV.second;
 
@@ -80,17 +77,23 @@ class DeduplicateRodataPass
       }
 
       // Point all duplicates at the base op.
+      auto baseName = FlatSymbolRefAttr::get(baseOp.getNameAttr());
       for (auto duplicateOp : bucketOps) {
-        if (failed(symbolTable.replaceAllSymbolUses(
-                duplicateOp, baseOp.getNameAttr(), moduleOp))) {
-          duplicateOp.emitError()
-              << "failed to replace duplicate rodata op with base op "
-              << baseOp.getName();
-          return signalPassFailure();
-        }
+        replacements.insert(std::make_pair(
+            FlatSymbolRefAttr::get(duplicateOp.getSymNameAttr()), baseName));
         duplicateOp.erase();
       }
     }
+
+    AttrTypeReplacer replacer;
+    replacer.addReplacement(
+        [&](SymbolRefAttr attr) -> std::pair<Attribute, WalkResult> {
+          auto replacement = replacements.find(attr);
+          if (replacement != replacements.end())
+            return {replacement->getSecond(), WalkResult::skip()};
+          return {attr, WalkResult::skip()};
+        });
+    moduleOp.walk([&](Operation *op) { replacer.replaceElementsIn(op); });
   }
 };
 
@@ -101,7 +104,4 @@ createDeduplicateRodataPass() {
 
 static PassRegistration<DeduplicateRodataPass> pass;
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

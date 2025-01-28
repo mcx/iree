@@ -13,8 +13,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Support/LogicalResult.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Base class that can bind named options to fields of structs.
 //
@@ -36,7 +35,7 @@ namespace iree_compiler {
 // options of built-in scalar types (string, ints, bool, etc) and enums. Lists
 // of built-in scalar types are also supported.
 class OptionsBinder {
- public:
+public:
   static OptionsBinder global() { return OptionsBinder(); }
 
   static OptionsBinder local() {
@@ -104,7 +103,7 @@ class OptionsBinder {
   // and is stable.
   llvm::SmallVector<std::string> printArguments(bool nonDefaultOnly = false);
 
- private:
+private:
   struct LocalOptionInfo {
     using ChangedCallback = std::function<bool()>;
     using PrintCallback = std::function<void(llvm::raw_ostream &)>;
@@ -130,7 +129,7 @@ class OptionsBinder {
       -> decltype(static_cast<llvm::cl::generic_parser_base &>(parser),
                   static_cast<int>(*value), LocalOptionInfo::PrintCallback()) {
     return [optionName, &parser, value](llvm::raw_ostream &os) {
-      StringRef valueName("<unknown>");
+      llvm::StringRef valueName("<unknown>");
       for (unsigned i = 0; i < parser.getNumOptions(); ++i) {
         V cmpValue = static_cast<const llvm::cl::OptionValue<V> &>(
                          parser.getOptionValue(i))
@@ -183,8 +182,8 @@ class OptionsBinder {
 
   // List changed specialization.
   template <typename V>
-  static LocalOptionInfo::ChangedCallback makeListChangedCallback(
-      V *currentValue) {
+  static LocalOptionInfo::ChangedCallback
+  makeListChangedCallback(V *currentValue) {
     return [currentValue]() -> bool { return !currentValue->empty(); };
   }
 
@@ -199,7 +198,8 @@ class OptionsBinder {
     return [optionName, values](llvm::raw_ostream &os) {
       os << "--" << optionName << "=";
       for (auto it : llvm::enumerate(*values)) {
-        if (it.index() > 0) os << ",";
+        if (it.index() > 0)
+          os << ",";
         os << it.value();
       }
     };
@@ -216,29 +216,27 @@ class OptionsBinder {
 //   IREE_DEFINE_COMPILER_OPTION_FLAGS(DerivedTy);
 template <typename DerivedTy>
 class OptionsFromFlags {
- public:
+public:
   static DerivedTy &get();
 };
 
-#define IREE_DEFINE_COMPILER_OPTION_FLAGS(DerivedTy)                   \
-  template <>                                                          \
-  DerivedTy &mlir::iree_compiler::OptionsFromFlags<DerivedTy>::get() { \
-    struct InitializedTy : DerivedTy {                                 \
-      InitializedTy() {                                                \
-        mlir::iree_compiler::OptionsBinder binder =                    \
-            mlir::iree_compiler::OptionsBinder::global();              \
-        DerivedTy::bindOptions(binder);                                \
-      }                                                                \
-    };                                                                 \
-    static InitializedTy singleton;                                    \
-    return singleton;                                                  \
+#define IREE_DEFINE_COMPILER_OPTION_FLAGS(DerivedTy)                           \
+  template <>                                                                  \
+  DerivedTy &mlir::iree_compiler::OptionsFromFlags<DerivedTy>::get() {         \
+    struct InitializedTy : DerivedTy {                                         \
+      InitializedTy() {                                                        \
+        mlir::iree_compiler::OptionsBinder binder =                            \
+            mlir::iree_compiler::OptionsBinder::global();                      \
+        DerivedTy::bindOptions(binder);                                        \
+      }                                                                        \
+    };                                                                         \
+    static InitializedTy singleton;                                            \
+    return singleton;                                                          \
   }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-namespace llvm {
-namespace cl {
+namespace llvm::cl {
 
 struct ByteSize {
   int64_t value = 0;
@@ -256,7 +254,7 @@ extern template class basic_parser<PowerOf2ByteSize>;
 
 template <>
 class parser<ByteSize> : public basic_parser<ByteSize> {
- public:
+public:
   parser(Option &O) : basic_parser(O) {}
   bool parse(Option &O, StringRef ArgName, StringRef Arg, ByteSize &Val);
   StringRef getValueName() const override { return "byte size"; }
@@ -267,7 +265,7 @@ class parser<ByteSize> : public basic_parser<ByteSize> {
 
 template <>
 class parser<PowerOf2ByteSize> : public basic_parser<PowerOf2ByteSize> {
- public:
+public:
   parser(Option &O) : basic_parser(O) {}
   bool parse(Option &O, StringRef ArgName, StringRef Arg,
              PowerOf2ByteSize &Val);
@@ -277,7 +275,6 @@ class parser<PowerOf2ByteSize> : public basic_parser<PowerOf2ByteSize> {
   void anchor() override;
 };
 
-}  // namespace cl
-}  // namespace llvm
+} // namespace llvm::cl
 
-#endif  // IREE_COMPILER_UTILS_FLAG_UTILS_H
+#endif // IREE_COMPILER_UTILS_FLAG_UTILS_H

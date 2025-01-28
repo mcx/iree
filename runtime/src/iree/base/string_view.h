@@ -22,7 +22,7 @@ extern "C" {
 
 typedef struct iree_status_handle_t* iree_status_t;
 
-#define IREE_STRING_VIEW_NPOS SIZE_MAX
+#define IREE_STRING_VIEW_NPOS IREE_HOST_SIZE_MAX
 
 // A string view (ala std::string_view) into a non-NUL-terminated string.
 typedef struct iree_string_view_t {
@@ -48,7 +48,7 @@ static inline iree_string_view_t iree_make_string_view(
 // Returns a string view initialized with a reference to the given
 // NUL-terminated string literal.
 static inline iree_string_view_t iree_make_cstring_view(const char* str) {
-  iree_string_view_t v = {str, strlen(str)};
+  iree_string_view_t v = {str, str ? strlen(str) : 0};
   return v;
 }
 
@@ -89,6 +89,20 @@ static inline iree_string_pair_t iree_make_cstring_pair(const char* first,
   return v;
 }
 
+// A list of string key-value pairs.
+typedef struct iree_string_pair_list_t {
+  // Total number of pairs in the list.
+  iree_host_size_t count;
+  // Value list or NULL if no values.
+  const iree_string_pair_t* pairs;
+} iree_string_pair_list_t;
+
+// Returns an empty string pair list.
+static inline iree_string_pair_list_t iree_string_pair_list_empty(void) {
+  iree_string_pair_list_t v = {0, NULL};
+  return v;
+}
+
 #define iree_string_view_literal(str) \
   { .data = (str), .size = IREE_ARRAYSIZE(str) - 1 }
 
@@ -97,6 +111,20 @@ static inline iree_string_pair_t iree_make_cstring_pair(const char* first,
 
 // Returns a string view initialized with the given string literal.
 #define IREE_SVL(cstr) iree_string_view_literal(cstr)
+
+// A list of string views.
+typedef struct iree_string_view_list_t {
+  // Total number of values in the list.
+  iree_host_size_t count;
+  // Value list or NULL if no values.
+  const iree_string_view_t* values;
+} iree_string_view_list_t;
+
+// Returns an empty string list.
+static inline iree_string_view_list_t iree_string_view_list_empty(void) {
+  iree_string_view_list_t v = {0, NULL};
+  return v;
+}
 
 // Returns true if the two strings are equal (compare == 0).
 IREE_API_EXPORT bool iree_string_view_equal(iree_string_view_t lhs,
@@ -164,8 +192,8 @@ IREE_API_EXPORT iree_string_view_t
 iree_string_view_trim(iree_string_view_t value);
 
 // Returns a substring of the string view at offset |pos| and length |n|.
-// Use |n| == INTPTR_MAX to take the remainder of the string after |pos|.
-// Returns empty string on failure.
+// Use |n| == IREE_HOST_SIZE_MAX to take the remainder of the string after
+// |pos|. Returns empty string on failure.
 IREE_API_EXPORT iree_string_view_t iree_string_view_substr(
     iree_string_view_t value, iree_host_size_t pos, iree_host_size_t n);
 
@@ -193,6 +221,11 @@ IREE_API_EXPORT void iree_string_view_replace_char(iree_string_view_t value,
 IREE_API_EXPORT bool iree_string_view_match_pattern(iree_string_view_t value,
                                                     iree_string_view_t pattern);
 
+// Copies the string view |value| to |buffer| with |buffer_length| available
+// bytes and adds a NUL terminator. Truncates if capacity would be exceeded.
+IREE_API_EXPORT void iree_string_view_to_cstring(
+    iree_string_view_t value, char* buffer, iree_host_size_t buffer_length);
+
 // Copies the string bytes into the target buffer and returns the number of
 // characters copied. Does not include a NUL terminator.
 IREE_API_EXPORT iree_host_size_t iree_string_view_append_to_buffer(
@@ -205,6 +238,9 @@ IREE_API_EXPORT bool iree_string_view_atoi_uint32(iree_string_view_t value,
                                                   uint32_t* out_value);
 IREE_API_EXPORT bool iree_string_view_atoi_int64(iree_string_view_t value,
                                                  int64_t* out_value);
+IREE_API_EXPORT bool iree_string_view_atoi_uint64_base(iree_string_view_t value,
+                                                       int base,
+                                                       uint64_t* out_value);
 IREE_API_EXPORT bool iree_string_view_atoi_uint64(iree_string_view_t value,
                                                   uint64_t* out_value);
 IREE_API_EXPORT bool iree_string_view_atof(iree_string_view_t value,

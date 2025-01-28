@@ -4,20 +4,22 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_LLVMCPUEMITVECTORIZATIONREMARKSPASS
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h.inc"
 
 namespace {
 struct LLVMCPUEmitVectorizationRemarksPass
-    : LLVMCPUEmitVectorizationRemarksBase<LLVMCPUEmitVectorizationRemarksPass> {
+    : impl::LLVMCPUEmitVectorizationRemarksPassBase<
+          LLVMCPUEmitVectorizationRemarksPass> {
   void runOnOperation() override;
 };
-}  // namespace
+} // namespace
 
 void LLVMCPUEmitVectorizationRemarksPass::runOnOperation() {
   auto funcOp = getOperation();
@@ -30,11 +32,4 @@ void LLVMCPUEmitVectorizationRemarksPass::runOnOperation() {
     funcOp.emitWarning("found one or more ops not vectorized");
   }
 }
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createLLVMCPUEmitVectorizationRemarksPass() {
-  return std::make_unique<LLVMCPUEmitVectorizationRemarksPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

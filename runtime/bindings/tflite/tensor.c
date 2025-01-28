@@ -6,7 +6,6 @@
 
 #include "runtime/bindings/tflite/tensor.h"
 
-#include "iree/base/tracing.h"
 #include "runtime/bindings/tflite/shim.h"
 
 iree_status_t _TfLiteTensorParseNameAttr(TfLiteTensor* tensor,
@@ -145,7 +144,7 @@ iree_status_t _TfLiteTensorReallocateIfNeeded(
                            IREE_HAL_BUFFER_USAGE_TRANSFER |
                            IREE_HAL_BUFFER_USAGE_MAPPING,
               },
-              allocation_size, iree_const_byte_span_empty(), &tensor->buffer));
+              allocation_size, &tensor->buffer));
 
   // Map the buffer memory immediately. The tflite API doesn't let us know if
   // this is a buffer the user will actually touch or some state buffer that is
@@ -153,10 +152,10 @@ iree_status_t _TfLiteTensorReallocateIfNeeded(
   // on-demand mapping when the user calls TfLiteTensorData but this at least
   // puts potential errors in the same easy to find place.
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_hal_buffer_map_range(tensor->buffer, IREE_HAL_MAPPING_MODE_SCOPED,
-                                IREE_HAL_MEMORY_ACCESS_ALL, 0,
-                                IREE_WHOLE_BUFFER, &tensor->buffer_mapping));
+      z0, iree_hal_buffer_map_range(
+              tensor->buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+              IREE_HAL_MEMORY_ACCESS_ALL, 0, IREE_HAL_WHOLE_BUFFER,
+              &tensor->buffer_mapping));
 
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -177,7 +176,7 @@ iree_status_t _TfLiteTensorBind(TfLiteTensor* tensor,
   // move this to an on-demand mapping when the user calls TfLiteTensorData but
   // this at least puts potential errors in the same easy to find place.
   iree_device_size_t byte_offset = 0;
-  iree_device_size_t byte_length = IREE_WHOLE_BUFFER;
+  iree_device_size_t byte_length = IREE_HAL_WHOLE_BUFFER;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_buffer_map_range(
               buffer, IREE_HAL_MAPPING_MODE_SCOPED,
@@ -246,7 +245,8 @@ TFL_CAPI_EXPORT extern TfLiteStatus TfLiteTensorCopyFromBuffer(
     return kTfLiteApplicationError;
   }
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, tensor->buffer_mapping.contents.data_length);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0,
+                                   tensor->buffer_mapping.contents.data_length);
 
   // NOTE: we could use a iree_hal_buffer_map_write here but we already
   // have the buffer mapped. If we knew the user would never use
@@ -265,7 +265,7 @@ TFL_CAPI_EXPORT extern TfLiteStatus TfLiteTensorCopyToBuffer(
     return kTfLiteApplicationError;
   }
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(
       z0, output_tensor->buffer_mapping.contents.data_length);
 
   // NOTE: as with above we should use an iree_hal_buffer_map_read here.

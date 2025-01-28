@@ -11,10 +11,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Diagnostics.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
 
 //===----------------------------------------------------------------------===//
 // Hazard analysis
@@ -25,7 +22,7 @@ namespace Stream {
 // analyzed and the hazards between them will be available for querying via the
 // lookup functions.
 class ResourceHazardAnalysis {
- public:
+public:
   explicit ResourceHazardAnalysis(Operation *rootOp);
   ~ResourceHazardAnalysis();
 
@@ -40,13 +37,10 @@ class ResourceHazardAnalysis {
   // allowed to run while operating on the same resource.
   bool hasHazard(Operation *producerOp, Operation *consumerOp);
 
- private:
+private:
   std::unique_ptr<AsmState> asmState;
 };
 
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream
 
-#endif  // IREE_COMPILER_DIALECT_STREAM_ANALYSIS_RESOURCE_HAZARDS_H_
+#endif // IREE_COMPILER_DIALECT_STREAM_ANALYSIS_RESOURCE_HAZARDS_H_

@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Preprocessing/Common/PassDetail.h"
 #include "iree/compiler/Preprocessing/Common/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -14,15 +13,16 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
+namespace mlir::iree_compiler::Preprocessing {
+
+#define GEN_PASS_DEF_PADLINALGOPSPASS
+#include "iree/compiler/Preprocessing/Common/Passes.h.inc" // IWYU pragma: export
 
 namespace {
 /// A pattern to pad statically shaped matmul operands to the next integer
 /// multiple of padSize.
 class PadMatmulOp : public OpInterfaceRewritePattern<linalg::LinalgOp> {
- public:
+public:
   PadMatmulOp(MLIRContext *context, int size, PatternBenefit benefit = 1)
       : OpInterfaceRewritePattern(context, benefit), paddingSize(size) {}
 
@@ -31,18 +31,20 @@ class PadMatmulOp : public OpInterfaceRewritePattern<linalg::LinalgOp> {
     Operation *op = linalgOp.getOperation();
     const bool isBatchMatmul = isa<linalg::BatchMatmulOp>(op);
     const bool isMatmul = isa<linalg::MatmulOp>(op);
-    if (!isBatchMatmul && !isMatmul) return failure();
+    if (!isBatchMatmul && !isMatmul)
+      return failure();
 
     Location loc = linalgOp.getLoc();
     Value lhs = linalgOp.getDpsInputOperand(0)->get();
     Value rhs = linalgOp.getDpsInputOperand(1)->get();
     Value result = linalgOp.getDpsInitOperand(0)->get();
 
-    auto lhsType = lhs.getType().dyn_cast<RankedTensorType>();
-    auto rhsType = rhs.getType().dyn_cast<RankedTensorType>();
-    auto resultType = result.getType().dyn_cast<RankedTensorType>();
+    auto lhsType = llvm::dyn_cast<RankedTensorType>(lhs.getType());
+    auto rhsType = llvm::dyn_cast<RankedTensorType>(rhs.getType());
+    auto resultType = llvm::dyn_cast<RankedTensorType>(result.getType());
 
-    if (!lhsType || !rhsType) return failure();
+    if (!lhsType || !rhsType)
+      return failure();
 
     if (!lhsType.hasStaticShape() || !rhsType.hasStaticShape())
       return failure();
@@ -67,7 +69,8 @@ class PadMatmulOp : public OpInterfaceRewritePattern<linalg::LinalgOp> {
 
     auto getFullShape = [&](ArrayRef<int> dims) {
       SmallVector<int64_t, 3> shape;
-      if (isBatchMatmul) shape.push_back(B);
+      if (isBatchMatmul)
+        shape.push_back(B);
       llvm::append_range(shape, dims);
       return shape;
     };
@@ -148,32 +151,26 @@ class PadMatmulOp : public OpInterfaceRewritePattern<linalg::LinalgOp> {
     return success();
   }
 
- private:
+private:
   int paddingSize;
 };
 
-class PadLinalgOpsPass : public PadLinalgOpsBase<PadLinalgOpsPass> {
- public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<linalg::LinalgDialect>();
-  }
+class PadLinalgOpsPass
+    : public iree_compiler::Preprocessing::impl::PadLinalgOpsPassBase<
+          PadLinalgOpsPass> {
+public:
+  using iree_compiler::Preprocessing::impl::PadLinalgOpsPassBase<
+      PadLinalgOpsPass>::PadLinalgOpsPassBase;
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
     patterns.insert<PadMatmulOp>(context, paddingSize);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<Pass> createPadLinalgOpsToIntegerMultiplePass() {
-  return std::make_unique<PadLinalgOpsPass>();
-}
-
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::Preprocessing

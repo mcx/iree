@@ -87,12 +87,12 @@ typedef struct iree_hal_executable_environment_v0_t
 // or some semantic versioning we track in whatever spec we end up having.
 typedef uint32_t iree_hal_executable_library_version_t;
 
-#define IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_3 0x00000003u
+#define IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_5 0x00000005u
 
 // The latest version of the library API; can be used to populate the
 // iree_hal_executable_library_header_t::version when building libraries.
 #define IREE_HAL_EXECUTABLE_LIBRARY_VERSION_LATEST \
-  IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_3
+  IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_5
 
 // A header present at the top of all versions of the library API used by the
 // runtime to ensure version compatibility.
@@ -154,7 +154,7 @@ typedef const iree_hal_executable_library_header_t** (
 // a useful failure though the HAL does not mandate that all overflows are
 // caught and only that they are not harmful - clamping byte ranges and never
 // returning a failure is sufficient.
-typedef int (*iree_hal_executable_import_v0_t)(void* context, void* params,
+typedef int (*iree_hal_executable_import_v0_t)(void* params, void* context,
                                                void* reserved);
 
 // A thunk function used to call an import.
@@ -162,7 +162,7 @@ typedef int (*iree_hal_executable_import_v0_t)(void* context, void* params,
 // function pointer as the first argument followed by the arguments of the
 // import function itself.
 typedef int (*iree_hal_executable_import_thunk_v0_t)(
-    iree_hal_executable_import_v0_t fn_ptr, void* context, void* params,
+    iree_hal_executable_import_v0_t fn_ptr, void* params, void* context,
     void* reserved);
 
 // Declares imports available to the executable library at runtime.
@@ -188,7 +188,11 @@ typedef struct iree_hal_executable_import_table_v0_t {
   uint32_t count;
 
   // Import symbol name encoding the name and whether it is weak.
-  // Example: `mylib_some_fn_v2?`
+  // Example: `?mylib_some_fn_v2`
+  //   `?`:
+  //     Indicates when an import is optional. If the import of the specified
+  //     version is not found the table entry will be NULL. When omitted if the
+  //     import is unavailable loading will fail.
   //   `mylib_...`:
   //     Prefix indicating the owner of the function; symbols have a global
   //     namespace and this is used to reduce collisions.
@@ -200,10 +204,6 @@ typedef struct iree_hal_executable_import_table_v0_t {
   //     to be imported. For backward compatibility one could import both
   //     `some_fn_v1?` and `some_fn_v2?` and use whichever is available.
   //     Note that this is just a convention for the suffix and can be anything.
-  //   `?`:
-  //     Indicates when an import is optional. If the import of the specified
-  //     version is not found the table entry will be NULL. When omitted if the
-  //     import is unavailable loading will fail.
   //
   // The symbol table is sorted ascending alphabetical (by strcmp).
   const char* const* symbols;
@@ -279,8 +279,8 @@ typedef struct iree_hal_executable_dispatch_state_v0_t {
   uint32_t workgroup_size_y;
   uint16_t workgroup_size_z;
 
-  // Total number of available 4 byte push constant values in |push_constants|.
-  uint16_t push_constant_count;
+  // Total number of available 4 byte push constant values in |constants|.
+  uint16_t constant_count;
 
   // Total workgroup count for the dispatch. This is sourced from either the
   // original dispatch call (for iree_hal_command_buffer_dispatch) or the
@@ -299,8 +299,8 @@ typedef struct iree_hal_executable_dispatch_state_v0_t {
   // used (known at compile-time).
   uint8_t binding_count;
 
-  // |push_constant_count| values.
-  const uint32_t* push_constants;
+  // |constant_count| values.
+  const uint32_t* constants;
   // Base pointers to each binding buffer.
   void* const* binding_ptrs;
   // The length of each binding in bytes, 1:1 with |binding_ptrs|.
@@ -372,34 +372,55 @@ typedef int (*iree_hal_executable_dispatch_v0_t)(
 
 // Bytes per page of workgroup local memory.
 // This is chosen to match the common page size of devices.
-#define IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE 4096
+#define IREE_HAL_EXECUTABLE_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE 4096
+
+// Maximum number of constants that can be used by a single dispatch.
+#define IREE_HAL_EXECUTABLE_MAX_CONSTANT_COUNT 64
+// Maximum number of bindings that can be used by a single dispatch.
+#define IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT 64
 
 // Attributes for exported dispatch functions defining how they are to be
 // executed. 0 defaults are well-specified and the entire attributes table may
 // be omitted if no dispatch functions require these fields.
 typedef struct iree_hal_executable_dispatch_attrs_v0_t {
-  // Number of IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE byte pages (or 0)
-  // indicating how much workgroup local memory is required for the dispatch.
-  // This is the size of the buffer referenced by the `local_memory` argument.
+  // Number of IREE_HAL_EXECUTABLE_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE byte pages
+  // (or 0) indicating how much workgroup local memory is required for the
+  // dispatch. This is the size of the buffer referenced by the `local_memory`
+  // argument.
   uint16_t local_memory_pages;
-  // Must be 0. May be used in the future for flags controlling the dispatch
-  // behavior/synchronization requirements.
-  uint16_t reserved;
+  // Total number of 32-bit constants used by the dispatch.
+  uint8_t constant_count;
+  // Total number of bindings used by the dispatch.
+  uint8_t binding_count;
+  // Unused to pad the structure. Must be 0.
+  uint32_t reserved_0;
+  // Unused. Must be 0.
+  uint64_t reserved_1[8];
 } iree_hal_executable_dispatch_attrs_v0_t;
-static_assert(sizeof(iree_hal_executable_dispatch_attrs_v0_t) == 4, "uint32_t");
 
 // Source location information for a dispatch function indicating what code was
 // used to generate it. This only represents a single source snapshot, of which
 // there may be multiple valid possibilities (source program in Python, imported
-// high level framework .mlir, LLVM bitcode, etc.).
-typedef struct iree_hal_executable_src_loc_v0_t {
+// high level framework .mlir, LLVM bitcode, etc).
+typedef struct iree_hal_executable_source_location_v0_t {
   // The line within the file at |path|.
   uint32_t line;
   // The length of |path|.
   uint32_t path_length;
-  // The path (absolute or relative) to the source file.
+  // The path (absolute or relative) to the source file, NUL-terminated.
   const char* path;
-} iree_hal_executable_src_loc_v0_t;
+} iree_hal_executable_source_location_v0_t;
+
+// Table of source locations keyed by a string compilation stage name.
+// Locations are sorted ascending by name.
+typedef struct iree_hal_executable_stage_location_table_v0_t {
+  // Total number of source locations in the table.
+  uint32_t count;
+  // Names identifying the locations 1:1 with the locations set, NUL-terminated.
+  const char* const* names;
+  // Source locations matching 1:1 with the names.
+  const iree_hal_executable_source_location_v0_t* locations;
+} iree_hal_executable_stage_location_table_v0_t;
 
 // A table of exported functions arranged as a struct-of-arrays for more
 // efficient packing and faster lookup. Each subarray - when not omitted and
@@ -428,7 +449,13 @@ typedef struct iree_hal_executable_export_table_v0_t {
   const char* const* tags;
 
   // Optional table of source locations 1:1 with ptrs.
-  const iree_hal_executable_src_loc_v0_t* src_locs;
+  // These are the canonical source location in the compiler.
+  const iree_hal_executable_source_location_v0_t* source_locations;
+
+  // Optional table of source locations by compilation stage 1:1 with ptrs.
+  // These may provide additional internal compilation results at various
+  // stages of compilation.
+  const iree_hal_executable_stage_location_table_v0_t* stage_locations;
 } iree_hal_executable_export_table_v0_t;
 
 // A table declaring the executable-level constants that can be used to
@@ -438,6 +465,26 @@ typedef struct iree_hal_executable_constant_table_v0_t {
   uint32_t count;
   // We could add more metadata here if we wanted to enable reflection.
 } iree_hal_executable_constant_table_v0_t;
+
+// An embedded file defined by an arbitrary path.
+typedef struct iree_hal_executable_source_file_v0_t {
+  // The length of |path| in bytes.
+  uint32_t path_length;
+  // The path (absolute or relative) of the source file, NUL-terminated.
+  const char* path;
+  // The length of |content| in bytes.
+  uint32_t content_length;
+  // The file contents (possibly binary).
+  const uint8_t* content;
+} iree_hal_executable_source_file_v0_t;
+
+// A table listing zero or more embedded source files.
+typedef struct iree_hal_executable_source_file_table_v0_t {
+  // Total number of source files.
+  uint32_t count;
+  // Table of |count| source files.
+  const iree_hal_executable_source_file_v0_t* files;
+} iree_hal_executable_source_file_table_v0_t;
 
 // Structure used for v0 library interfaces.
 // The entire structure is designed to be read-only and able to live embedded in
@@ -462,6 +509,10 @@ typedef struct iree_hal_executable_library_v0_t {
 
   // Table of executable-level constants.
   iree_hal_executable_constant_table_v0_t constants;
+
+  // Table of optional sources used for debugging.
+  // Exports may reference locations within the sources by path.
+  iree_hal_executable_source_file_table_v0_t sources;
 } iree_hal_executable_library_v0_t;
 
 #endif  // IREE_HAL_LOCAL_EXECUTABLE_LIBRARY_H_

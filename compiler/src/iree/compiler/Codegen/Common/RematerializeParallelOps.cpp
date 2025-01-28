@@ -4,39 +4,57 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #define DEBUG_TYPE "iree-codegen-rematerialize-parallel-ops"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_REMATERIALIZEPARALLELOPSPASS
+#include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
 
-/// Merge elementwise operations into their consumers.
-struct MergeElementwiseOps : public OpRewritePattern<linalg::GenericOp> {
+static bool isScalarOrTensorOfSizeOne(Type t) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(t)) {
+    return tensorType.hasStaticShape() && tensorType.getNumElements() == 1;
+  }
+  return t.isIntOrIndexOrFloat();
+}
+
+/// Rematerialize all parallel elementwise operations into its users within a
+/// `flow.dispatch.region`.
+struct RematerializeParallelOpsPattern
+    : public OpRewritePattern<linalg::GenericOp> {
   using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
-                                PatternRewriter& rewriter) const override {
+                                PatternRewriter &rewriter) const override {
+    // Avoid doing this for scalar operations.
+    auto isScalarValue = [](Value v) {
+      return isScalarOrTensorOfSizeOne(v.getType());
+    };
+    if (llvm::all_of(genericOp.getOperands(), isScalarValue) &&
+        llvm::all_of(genericOp.getResults(), isScalarValue)) {
+      return failure();
+    }
+
     // Find the first operand that is defined by another generic op on tensors.
-    for (OpOperand& opOperand : genericOp->getOpOperands()) {
-      if (!linalg::areElementwiseOpsFusable(&opOperand)) continue;
+    for (OpOperand &opOperand : genericOp->getOpOperands()) {
+      if (!linalg::areElementwiseOpsFusable(&opOperand))
+        continue;
 
       FailureOr<linalg::ElementwiseOpFusionResult> fusionResult =
           linalg::fuseElementwiseOps(rewriter, &opOperand);
       if (succeeded(fusionResult)) {
-        // Forward lowering config.
-        if (auto loweringAttr = getLoweringConfig(genericOp)) {
-          setLoweringConfig(fusionResult->fusedOp, loweringAttr);
-        }
         auto replacements = fusionResult->fusedOp->getResults().take_back(
             genericOp.getNumResults());
+        // Copy over any non native attributes for the operation.
+        auto prunedAttributeList = linalg::getPrunedAttributeList(genericOp);
+        fusionResult->fusedOp->setAttrs(prunedAttributeList);
         rewriter.replaceOp(genericOp, replacements);
         return success();
       }
@@ -45,26 +63,18 @@ struct MergeElementwiseOps : public OpRewritePattern<linalg::GenericOp> {
   }
 };
 
-struct RematerializeParallelOpsPass
-    : public RematerializeParallelOpsBase<RematerializeParallelOpsPass> {
+struct RematerializeParallelOpsPass final
+    : impl::RematerializeParallelOpsPassBase<RematerializeParallelOpsPass> {
   void runOnOperation() override {
-    func::FuncOp funcOp = getOperation();
+    auto funcOp = getOperation();
     RewritePatternSet fusionPatterns(funcOp.getContext());
-    fusionPatterns.insert<MergeElementwiseOps>(funcOp.getContext());
+    fusionPatterns.insert<RematerializeParallelOpsPattern>(funcOp.getContext());
     linalg::populateEraseUnusedOperandsAndResultsPatterns(fusionPatterns);
-    if (failed(
-            applyPatternsAndFoldGreedily(funcOp, std::move(fusionPatterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(fusionPatterns)))) {
       return signalPassFailure();
     }
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createRematerializeParallelOpsPass() {
-  return std::make_unique<RematerializeParallelOpsPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

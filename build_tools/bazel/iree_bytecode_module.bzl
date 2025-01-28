@@ -6,7 +6,7 @@
 
 """Rules for compiling IREE executables, modules, and archives."""
 
-load("//build_tools/embed_data:build_defs.bzl", "c_embed_data")
+load("//build_tools/embed_data:build_defs.bzl", "iree_c_embed_data")
 
 # TODO(benvanik): port to a full starlark rule, document, etc.
 
@@ -45,7 +45,10 @@ def iree_bytecode_module(
         module_name = "%s.vmfb" % (name)
 
     out_files = [module_name]
-    flags.append("--output-format=vm-bytecode")
+    flags += [
+        "--output-format=vm-bytecode",
+        "--mlir-print-op-on-diagnostic=false",
+    ]
     if static_lib_path:
         static_header_path = static_lib_path.replace(".o", ".h")
         out_files.extend([static_lib_path, static_header_path])
@@ -78,7 +81,7 @@ def iree_bytecode_module(
 
     # Embed the module for use in C.
     if c_identifier:
-        c_embed_data(
+        iree_c_embed_data(
             name = "%s_c" % (name),
             identifier = c_identifier,
             srcs = [module_name],

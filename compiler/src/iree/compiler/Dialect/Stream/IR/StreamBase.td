@@ -105,6 +105,11 @@ def Stream_Dialect : Dialect {
     breaking execution correctness.
   }];
 
+  let dependentDialects = [
+    "mlir::complex::ComplexDialect",
+    "IREE::Util::UtilDialect",
+  ];
+
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
 }
@@ -122,8 +127,9 @@ class Stream_Op<string mnemonic, list<Trait> traits = []> :
 // Stream dialect types
 //===----------------------------------------------------------------------===//
 
-def Stream_PrimitiveType : AnyTypeOf<[Index, AnyInteger, AnyFloat]>;
-def Stream_FillPatternType : AnyTypeOf<[I8, I16, I32]>;
+def Stream_PrimitiveType : AnyTypeOf<[Index, AnyInteger, AnyFloat, AnyComplex]>;
+def Stream_FillPatternType : AnyTypeOf<[I8, I16, I32, I64]>;
+def Stream_NativeFillPatternType : AnyTypeOf<[I8, I16, I32]>;
 
 def Stream_Offset : TypeAlias<Index>;
 def Stream_Size : TypeAlias<Index>;
@@ -152,20 +158,24 @@ def Stream_GlobalPtr : Util_AnyPtrOf<[Stream_Tensor, Stream_PrimitiveType]>;
 
 def Stream_CollectiveKind_AllGather : I32EnumAttrCase<"AllGather", 0, "all_gather">;
 def Stream_CollectiveKind_AllReduce : I32EnumAttrCase<"AllReduce", 1, "all_reduce">;
-def Stream_CollectiveKind_Broadcast : I32EnumAttrCase<"Broadcast", 2, "broadcast">;
-def Stream_CollectiveKind_Reduce : I32EnumAttrCase<"Reduce", 3, "reduce">;
-def Stream_CollectiveKind_ReduceScatter : I32EnumAttrCase<"ReduceScatter", 4, "reduce_scatter">;
-def Stream_CollectiveKind_Send : I32EnumAttrCase<"Send", 5, "send">;
-def Stream_CollectiveKind_Recv : I32EnumAttrCase<"Recv", 6, "recv">;
+def Stream_CollectiveKind_AllToAll : I32EnumAttrCase<"AllToAll", 2, "all_to_all">;
+def Stream_CollectiveKind_Broadcast : I32EnumAttrCase<"Broadcast", 3, "broadcast">;
+def Stream_CollectiveKind_Reduce : I32EnumAttrCase<"Reduce", 4, "reduce">;
+def Stream_CollectiveKind_ReduceScatter : I32EnumAttrCase<"ReduceScatter", 5, "reduce_scatter">;
+def Stream_CollectiveKind_Send : I32EnumAttrCase<"Send", 6, "send">;
+def Stream_CollectiveKind_Recv : I32EnumAttrCase<"Recv", 7, "recv">;
+def Stream_CollectiveKind_SendRecv : I32EnumAttrCase<"SendRecv", 8, "send_recv">;
 def Stream_CollectiveKindAttr :
     I32EnumAttr<"CollectiveKind", "valid CollectiveKind", [
       Stream_CollectiveKind_AllGather,
       Stream_CollectiveKind_AllReduce,
+      Stream_CollectiveKind_AllToAll,
       Stream_CollectiveKind_Broadcast,
       Stream_CollectiveKind_Reduce,
       Stream_CollectiveKind_ReduceScatter,
       Stream_CollectiveKind_Send,
       Stream_CollectiveKind_Recv,
+      Stream_CollectiveKind_SendRecv,
     ]> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
 }
@@ -227,7 +237,7 @@ def Stream_CollectiveAttr :
   }];
   let parameters = (ins
     AttrParameter<"CollectiveKind", "">:$kind,
-    OptionalParameter<"mlir::Optional<CollectiveReductionOp>">:$reduction,
+    OptionalParameter<"std::optional<CollectiveReductionOp>">:$reduction,
     AttrParameter<"CollectiveElementType", "">:$element_type
   );
   let assemblyFormat = [{
@@ -282,6 +292,16 @@ def Stream_PartitioningConfigAttr :
   let hasCustomAssemblyFormat = 1;
 }
 
+def Stream_MemoryModel_Unified : I32EnumAttrCase<"Unified", 0>;
+def Stream_MemoryModel_Discrete : I32EnumAttrCase<"Discrete", 1>;
+def Stream_MemoryModelAttr :
+    I32EnumAttr<"MemoryModel", "stream resource memory model", [
+      Stream_MemoryModel_Unified,
+      Stream_MemoryModel_Discrete,
+    ]> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+}
+
 def Stream_ResourceConfigAttr :
     AttrDef<Stream_Dialect, "ResourceConfig", []> {
   let mnemonic = "resource_config";
@@ -311,7 +331,11 @@ def Stream_ResourceConfigAttr :
     // bindings.
     "int64_t":$minBufferRangeAlignment,
     // Number of bits in `index` values as passed across device boundaries.
-    "int64_t":$indexBits
+    "int64_t":$indexBits,
+    // Fuses bindings that are mutable instead of leaving them split.
+    "bool":$aliasMutableBindings,
+    // Memory model used for host-device memory access.
+    "IREE::Stream::MemoryModel":$memoryModel
   );
 
   let valueType = NoneType;
@@ -351,6 +375,38 @@ def Stream_ResourceAccessBitfieldAttr :
 def Stream_ResourceAccessArrayAttr :
     TypedArrayAttrBase<Stream_ResourceAccessBitfieldAttr,
                        "access array attribute"> {}
+
+//===----------------------------------------------------------------------===//
+// Parameter storage attributes
+//===----------------------------------------------------------------------===//
+
+def Stream_NamedParameterAttr :
+    AttrDef<Stream_Dialect, "NamedParameter", [
+      TypedAttrInterface,
+      DeclareAttrInterfaceMethods<Util_SizedStorageAttr, [
+        "getStorageSize",
+      ]>,
+    ]> {
+  let mnemonic = "parameter.named";
+  let summary = [{named parameter referenced an optional scope and key}];
+  let description = [{
+    Species an externally-defined parameter that can be referenced by an
+    optional scope defining a set of parameters and a key uniquely identifying
+    the parameter within its scope.
+  }];
+  let parameters = (ins
+    AttributeSelfTypeParameter<"">:$type,
+    OptionalParameter<"StringAttr">:$scope,
+    AttrParameter<"StringAttr", "">:$key,
+    OptionalParameter<"DictionaryAttr">:$config
+  );
+  let assemblyFormat = [{
+    `<`
+    custom<ParameterReference>($scope, $key)
+    (`,` $config^)?
+    `>`
+  }];
+}
 
 //===----------------------------------------------------------------------===//
 // Stream synchronization types
@@ -418,7 +474,7 @@ def Stream_LifetimeAttr :
 }
 
 def Stream_AnyResource : Type<
-    CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+    CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
     "any stream-compatible type">;
 
 // TODO(benvanik): support other types; the interface may be enough.
@@ -439,17 +495,16 @@ def Stream_Channel : TypeDef<Stream_Dialect, "Channel", [
     may exist within the same program to allow for partial operations or
     hierarchical operations.
 
-    In programs that have already been partitioned prior to being compiled there
-    will often exist only one channel and `stream.channel.default` can be used
-    to reference it. In programs that model SPMD behavior internally channels
-    can be created or provided by hosting applications. For example, the program
-    could expose a `@set_channels(!util.list<!stream.channel>)` method that
-    stores the channels in globals for use throughout the program allowing for
+    In programs that model SPMD behavior internally channels can be created or
+    provided by hosting applications. For example, the program could expose a
+    `@set_channels(!util.list<!stream.channel>)` method that stores the channels
+    in globals for use throughout the program allowing for
     application-controlled channel configuration.
   }];
 }
 
 def Stream_Resource : TypeDef<Stream_Dialect, "Resource", [
+  Stream_AffinityType,
   Util_ReferenceType,
   Util_SizeAwareType,
   DeclareTypeInterfaceMethods<Util_GlobalType, [
@@ -496,32 +551,32 @@ def Stream_Resource : TypeDef<Stream_Dialect, "Resource", [
 }
 
 def Stream_ResourceLifetimeUnknown : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::Unknown
 }]>;
 def Stream_ResourceLifetimeExternal : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::External
 }]>;
 def Stream_ResourceLifetimeStaging : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::Staging
 }]>;
 def Stream_ResourceLifetimeTransient : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::Transient
 }]>;
 def Stream_ResourceLifetimeVariable : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::Variable
 }]>;
 def Stream_ResourceLifetimeConstant : CPred<[{
-  $_self.cast<IREE::Stream::ResourceType>().getLifetime() ==
+  mlir::cast<IREE::Stream::ResourceType>($_self).getLifetime() ==
       IREE::Stream::Lifetime::Constant
 }]>;
 
 def Stream_UnknownResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeUnknown,
 ]>, "resource"> {
   let description = [{
@@ -530,7 +585,7 @@ def Stream_UnknownResource : DialectType<Stream_Dialect, And<[
 }
 
 def Stream_ExternalResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeExternal,
 ]>, "external resource"> {
   let description = [{
@@ -547,7 +602,7 @@ def Stream_ExternalResource : DialectType<Stream_Dialect, And<[
 }
 
 def Stream_StagingResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeStaging,
 ]>, "staging resource"> {
   let description = [{
@@ -559,7 +614,7 @@ def Stream_StagingResource : DialectType<Stream_Dialect, And<[
 }
 
 def Stream_TransientResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeTransient,
 ]>, "transient resource"> {
   let description = [{
@@ -575,7 +630,7 @@ def Stream_TransientResource : DialectType<Stream_Dialect, And<[
 }
 
 def Stream_VariableResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeVariable,
 ]>, "variable resource"> {
   let description = [{
@@ -591,7 +646,7 @@ def Stream_VariableResource : DialectType<Stream_Dialect, And<[
 }
 
 def Stream_ConstantResource : DialectType<Stream_Dialect, And<[
-  CPred<"$_self.isa<IREE::Stream::ResourceType>()">,
+  CPred<"mlir::isa<IREE::Stream::ResourceType>($_self)">,
   Stream_ResourceLifetimeConstant,
 ]>, "constant resource"> {
   let description = [{
@@ -607,6 +662,28 @@ def Stream_AnyStreamResource : AnyTypeOf<[
   Stream_VariableResource,
   Stream_ConstantResource,
 ]>;
+
+//===----------------------------------------------------------------------===//
+// File resources
+//===----------------------------------------------------------------------===//
+
+def Stream_File : TypeDef<Stream_Dialect, "File", []> {
+  let mnemonic = "file";
+
+  let summary = [{a file handle used for I/O operations}];
+  let description = [{
+    A file handle that can be asynchronously read and written into/from
+    stream resources.
+  }];
+
+  let parameters = (ins);
+
+  let builders = [
+    TypeBuilder<(ins), [{
+      return $_get($_ctxt);
+    }]>,
+  ];
+}
 
 //===----------------------------------------------------------------------===//
 // Executable bindings

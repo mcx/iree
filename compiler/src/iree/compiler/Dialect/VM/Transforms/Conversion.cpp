@@ -13,14 +13,12 @@
 #include "iree/compiler/Dialect/VM/Conversion/ConversionDialectInterface.h"
 #include "iree/compiler/Dialect/VM/Conversion/ConversionTarget.h"
 #include "iree/compiler/Dialect/VM/Conversion/ImportUtils.h"
-#include "iree/compiler/Dialect/VM/Conversion/MathToVM/ConvertMathToVM.h"
-#include "iree/compiler/Dialect/VM/Conversion/StandardToVM/ConvertStandardToVM.h"
 #include "iree/compiler/Dialect/VM/Conversion/TypeConverter.h"
-#include "iree/compiler/Dialect/VM/Conversion/UtilToVM/ConvertUtilToVM.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -29,35 +27,18 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+#include "iree/compiler/Dialect/VM/Conversion/ArithToVM/Patterns.h"
+#include "iree/compiler/Dialect/VM/Conversion/MathToVM/Patterns.h"
+#include "iree/compiler/Dialect/VM/Conversion/StandardToVM/Patterns.h"
+#include "iree/compiler/Dialect/VM/Conversion/UtilToVM/Patterns.h"
+
+namespace mlir::iree_compiler::IREE::VM {
 namespace {
-
-// TODO#(11786): The expansions of integer min and max ops were removed in
-// llvm-project@e502f4fc2e25. They are added here for moving integrate forward.
-// We should add native VM ops for supporting them.
-template <typename OpTy, arith::CmpIPredicate pred>
-struct MaxMinIOpConverter : public OpRewritePattern<OpTy> {
- public:
-  using OpRewritePattern<OpTy>::OpRewritePattern;
-  LogicalResult matchAndRewrite(OpTy op,
-                                PatternRewriter &rewriter) const final {
-    Value lhs = op.getLhs();
-    Value rhs = op.getRhs();
-
-    Location loc = op.getLoc();
-    Value cmp = rewriter.create<arith::CmpIOp>(loc, pred, lhs, rhs);
-    rewriter.replaceOpWithNewOp<arith::SelectOp>(op, cmp, lhs, rhs);
-    return success();
-  }
-};
 
 // Returns a stably sorted list of dialect interfaces of T for all dialects used
 // within the given module.
 template <typename T>
-SmallVector<const T *, 4> gatherUsedDialectInterfaces(mlir::ModuleOp moduleOp) {
+SmallVector<const T *> gatherUsedDialectInterfaces(mlir::ModuleOp moduleOp) {
   SmallPtrSet<const T *, 4> resultSet;
   moduleOp.walk([&](Operation *op) {
     // Special case for declarations which may reference builtins.
@@ -72,15 +53,17 @@ SmallVector<const T *, 4> gatherUsedDialectInterfaces(mlir::ModuleOp moduleOp) {
       // Generic dialect lookup.
       dialect = op->getDialect();
     }
-    if (!dialect) return;
+    if (!dialect)
+      return;
     auto *dialectInterface = dialect->getRegisteredInterface<T>();
-    if (!dialectInterface) return;
+    if (!dialectInterface)
+      return;
     resultSet.insert(dialectInterface);
   });
 
   // NOTE: to ensure deterministic output we sort the result so that imports are
   // always added in a consistent order.
-  SmallVector<const T *, 4> results = {resultSet.begin(), resultSet.end()};
+  SmallVector<const T *> results = {resultSet.begin(), resultSet.end()};
   llvm::sort(
       results, +[](const T *a, const T *b) {
         return a->getDialect()->getNamespace().compare(
@@ -89,12 +72,12 @@ SmallVector<const T *, 4> gatherUsedDialectInterfaces(mlir::ModuleOp moduleOp) {
   return results;
 }
 
-}  // namespace
+} // namespace
 
 // Runs conversion with registered input dialects.
 class ConversionPass
     : public PassWrapper<ConversionPass, OperationPass<mlir::ModuleOp>> {
- public:
+public:
   explicit ConversionPass(TargetOptions targetOptions)
       : targetOptions_(targetOptions) {}
 
@@ -105,13 +88,14 @@ class ConversionPass
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<IREE::Util::UtilDialect, IREE::VM::VMDialect, func::FuncDialect,
-                mlir::arith::ArithDialect, math::MathDialect, AffineDialect>();
+    registry.insert<IREE::Util::UtilDialect, IREE::VM::VMDialect,
+                    func::FuncDialect, mlir::arith::ArithDialect,
+                    math::MathDialect, affine::AffineDialect>();
   }
 
   void runOnOperation() override {
-    if (getOperation().getBody()->empty()) return;
+    if (getOperation().getBody()->empty())
+      return;
 
     auto *context = &getContext();
     VMConversionTarget conversionTarget(context);
@@ -145,20 +129,27 @@ class ConversionPass
       }
     }
 
+    // Populated below after all type converters are registered.
+    ImportTable importTable;
+
     RewritePatternSet patterns(&getContext());
     populateUtilConversionPatterns(context, conversionTarget, typeConverter,
                                    patterns);
     populateUtilToVMPatterns(context, conversionTarget, typeConverter,
-                             patterns);
-    arith::populateCeilFloorDivExpandOpsPatterns(patterns);
-    populateStandardToVMPatterns(context, typeConverter, patterns);
-    populateMathToVMPatterns(context, typeConverter, patterns);
+                             importTable, patterns);
+
+    conversionTarget.addIllegalDialect<affine::AffineDialect>();
     populateAffineToStdConversionPatterns(patterns);
 
-    conversionTarget
-        .addIllegalDialect<func::FuncDialect, mlir::arith::ArithDialect>();
-    conversionTarget.addIllegalDialect<AffineDialect>();
+    conversionTarget.addIllegalDialect<arith::ArithDialect>();
+    arith::populateCeilFloorDivExpandOpsPatterns(patterns);
+    populateArithToVMPatterns(context, typeConverter, patterns);
+
     conversionTarget.addIllegalDialect<math::MathDialect>();
+    populateMathToVMPatterns(context, typeConverter, patterns);
+
+    conversionTarget.addIllegalDialect<func::FuncDialect>();
+    populateStandardToVMPatterns(context, typeConverter, importTable, patterns);
 
     // Populate patterns from all used dialects, providing the imports they
     // registered earlier.
@@ -168,6 +159,12 @@ class ConversionPass
           importSymbols, patterns, conversionTarget, typeConverter);
     }
 
+    // Build an import table so that we can quickly look up import information
+    // during conversion.
+    if (failed(importTable.build(innerModuleOp, typeConverter))) {
+      return signalPassFailure(); // error emitted already
+    }
+
     if (failed(applyPartialConversion(outerModuleOp, conversionTarget,
                                       std::move(patterns)))) {
       outerModuleOp.emitError() << "conversion to vm.module failed";
@@ -175,12 +172,12 @@ class ConversionPass
     }
   }
 
- private:
+private:
   TargetOptions targetOptions_;
 };
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createConversionPass(
-    TargetOptions targetOptions) {
+std::unique_ptr<OperationPass<mlir::ModuleOp>>
+createConversionPass(TargetOptions targetOptions) {
   return std::make_unique<ConversionPass>(targetOptions);
 }
 
@@ -191,7 +188,4 @@ static PassRegistration<ConversionPass> pass(
       return std::make_unique<ConversionPass>(options);
     });
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

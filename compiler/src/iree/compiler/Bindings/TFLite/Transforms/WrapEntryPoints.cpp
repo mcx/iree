@@ -12,7 +12,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/MLIRContext.h"
@@ -22,10 +21,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace TFLite {
+namespace mlir::iree_compiler::IREE::TFLite {
 
 // Wraps each model entry point in a "_tflite_xx" function that matches the
 // expectations of the IREE TFLite C bindings and materializes shape query and
@@ -47,11 +43,10 @@ namespace TFLite {
 //   util.global private mutable @_tflite_xx_arg0_dim2 : index
 class WrapEntryPointsPass
     : public PassWrapper<WrapEntryPointsPass, OperationPass<ModuleOp>> {
- public:
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::func::FuncDialect, mlir::arith::ArithDialect,
-                    mlir::tensor::TensorDialect, IREE::HAL::HALDialect,
-                    IREE::Util::UtilDialect>();
+    registry.insert<mlir::arith::ArithDialect, mlir::tensor::TensorDialect,
+                    IREE::HAL::HALDialect, IREE::Util::UtilDialect>();
   }
 
   StringRef getArgument() const override {
@@ -63,11 +58,23 @@ class WrapEntryPointsPass
            "bindings";
   }
 
+  static StringAttr getArgId(IREE::Util::FuncOp funcOp, int i) {
+    StringAttr id =
+        funcOp.getArgAttrOfType<StringAttr>(i, "ml_program.identifier");
+    return id ? id : funcOp.getArgAttrOfType<StringAttr>(i, "iree.abi.name");
+  }
+
+  static StringAttr getResultId(IREE::Util::FuncOp funcOp, int i) {
+    StringAttr id =
+        funcOp.getResultAttrOfType<StringAttr>(i, "ml_program.identifier");
+    return id ? id : funcOp.getResultAttrOfType<StringAttr>(i, "iree.abi.name");
+  }
+
   void runOnOperation() override {
     auto moduleOp = getOperation();
 
-    SmallVector<func::FuncOp, 4> entryFuncOps;
-    for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
+    SmallVector<IREE::Util::FuncOp> entryFuncOps;
+    for (auto funcOp : moduleOp.getOps<IREE::Util::FuncOp>()) {
       if (funcOp.isPublic() && !funcOp->hasAttr("iree.abi.stub")) {
         entryFuncOps.push_back(funcOp);
       }
@@ -88,7 +95,7 @@ class WrapEntryPointsPass
     wrapEntryPoint(entryFuncOps.front());
   }
 
- private:
+private:
   // Globals representing each dynamic dimension of an IO tensor.
   struct DynamicDims {
     TensorType tensorType;
@@ -100,10 +107,8 @@ class WrapEntryPointsPass
       for (unsigned i = 0; i < tensorType.getRank(); ++i) {
         if (tensorType.isDynamicDim(i)) {
           auto globalOp = globalOps[dynamicDimIdx++];
-          dims.push_back(
-              builder
-                  .create<IREE::Util::GlobalLoadOp>(globalOp.getLoc(), globalOp)
-                  .getResult());
+          dims.push_back(globalOp.createLoadOp(globalOp.getLoc(), builder)
+                             .getLoadedGlobalValue());
         }
       }
       return dims;
@@ -131,17 +136,16 @@ class WrapEntryPointsPass
   // Creates dynamic dim globals for each input and output of |funcOp|.
   static std::pair<SmallVector<DynamicDims>, SmallVector<DynamicDims>>
   createDynamicDimGlobals(Location loc, StringRef namePrefix,
-                          mlir::func::FuncOp funcOp, OpBuilder &moduleBuilder) {
+                          IREE::Util::FuncOp funcOp, OpBuilder &moduleBuilder) {
     auto funcType = funcOp.getFunctionType();
 
     // TFLite requires the tensor names at runtime. If they've previously been
-    // extracted into iree.identifiers we use those and otherwise fallback to
+    // extracted into iree.abi.names we use those and otherwise fallback to
     // a generic naming scheme that matches the IR (somewhat).
-    SmallVector<std::string, 4> inputNames;
-    SmallVector<std::string, 4> outputNames;
+    SmallVector<std::string> inputNames;
+    SmallVector<std::string> outputNames;
     for (unsigned i = 0; i < funcType.getNumInputs(); ++i) {
-      auto identifier =
-          funcOp.getArgAttrOfType<StringAttr>(i, "iree.identifier");
+      auto identifier = getArgId(funcOp, i);
       if (identifier) {
         inputNames.push_back(identifier.getValue().str());
       } else {
@@ -149,8 +153,7 @@ class WrapEntryPointsPass
       }
     }
     for (unsigned i = 0; i < funcType.getNumResults(); ++i) {
-      auto identifier =
-          funcOp.getResultAttrOfType<StringAttr>(i, "iree.identifier");
+      auto identifier = getResultId(funcOp, i);
       if (identifier) {
         outputNames.push_back(identifier.getValue().str());
       } else {
@@ -162,7 +165,7 @@ class WrapEntryPointsPass
     for (auto [arg, inputName, inputType] : llvm::zip_equal(
              funcOp.getArguments(), inputNames, funcType.getInputs())) {
       auto fullName = (namePrefix + "_" + inputName + "_shape").str();
-      auto tensorType = inputType.dyn_cast<TensorType>();
+      auto tensorType = llvm::dyn_cast<TensorType>(inputType);
       assert(tensorType && "expecting only tensors in tflite function I/O");
       inputDynamicDims.push_back(createDynamicDimGlobals(
           arg.getLoc(), fullName, tensorType, moduleBuilder));
@@ -171,7 +174,7 @@ class WrapEntryPointsPass
     for (auto [outputName, outputType] :
          llvm::zip_equal(outputNames, funcType.getResults())) {
       auto fullName = (namePrefix + "_" + outputName + "_shape").str();
-      auto tensorType = outputType.dyn_cast<TensorType>();
+      auto tensorType = llvm::dyn_cast<TensorType>(outputType);
       assert(tensorType && "expecting only tensors in tflite function I/O");
       outputDynamicDims.push_back(
           createDynamicDimGlobals(loc, fullName, tensorType, moduleBuilder));
@@ -181,14 +184,14 @@ class WrapEntryPointsPass
   }
 
   // Derives a shape calculation function from the given entry point |funcOp|.
-  static mlir::func::FuncOp createShapeCalculationFunc(
-      Location loc, StringRef namePrefix, mlir::func::FuncOp funcOp,
+  static IREE::Util::FuncOp createShapeCalculationFunc(
+      Location loc, StringRef namePrefix, IREE::Util::FuncOp funcOp,
       ArrayRef<DynamicDims> inputDynamicDims,
       ArrayRef<DynamicDims> outputDynamicDims,
       IREE::Util::GlobalOp dirtyGlobalOp, OpBuilder &moduleBuilder) {
     // Clone the entire entry function with all its IR.
     auto calcFuncOp =
-        cast<mlir::func::FuncOp>(moduleBuilder.clone(*funcOp.getOperation()));
+        cast<IREE::Util::FuncOp>(moduleBuilder.clone(*funcOp.getOperation()));
     calcFuncOp.setName(
         moduleBuilder.getStringAttr(namePrefix.str() + "_calculate_shapes"));
     calcFuncOp.setPrivate();
@@ -199,8 +202,8 @@ class WrapEntryPointsPass
     auto entryBuilder = OpBuilder::atBlockBegin(&entryBlock);
 
     // Go back and insert a check for the dirty flag.
-    auto dirtyValue = entryBuilder.createOrFold<IREE::Util::GlobalLoadOp>(
-        loc, dirtyGlobalOp.getType(), dirtyGlobalOp.getName());
+    auto dirtyValue =
+        dirtyGlobalOp.createLoadOp(loc, entryBuilder).getLoadedGlobalValue();
     auto *recalculateBlock = calcFuncOp.addBlock();
     auto *returnBlock = calcFuncOp.addBlock();
     entryBuilder.create<mlir::cf::CondBranchOp>(loc, dirtyValue,
@@ -224,7 +227,8 @@ class WrapEntryPointsPass
       auto dynamicDims = inputDynamicDims.loadDynamicDims(recalculateBuilder);
       auto castOp = recalculateBuilder.create<IREE::HAL::TensorImportOp>(
           loc, inputValue.getType(), inputPlaceholder, inputValue.getType(),
-          dynamicDims, /*wait_fence=*/Value{});
+          dynamicDims, /*wait_fence=*/Value{}, /*name=*/nullptr,
+          /*affinity=*/nullptr);
       inputValue.replaceAllUsesWith(castOp.getTarget());
     }
     while (entryBlock.getNumArguments() > 0) {
@@ -236,7 +240,7 @@ class WrapEntryPointsPass
     // Replace each exit from the function with a storage back to the shape
     // variables.
     for (auto returnOp :
-         llvm::to_vector<4>(calcFuncOp.getOps<mlir::func::ReturnOp>())) {
+         llvm::to_vector(calcFuncOp.getOps<IREE::Util::ReturnOp>())) {
       auto exitLoc = returnOp.getLoc();
       OpBuilder exitBuilder(returnOp);
 
@@ -249,21 +253,20 @@ class WrapEntryPointsPass
         for (int64_t i = 0; i < outputDynamicDims.globalOps.size(); ++i) {
           auto dimValue =
               exitBuilder.createOrFold<tensor::DimOp>(exitLoc, outputValue, i);
-          exitBuilder.create<IREE::Util::GlobalStoreOp>(
-              exitLoc, dimValue, outputDynamicDims.globalOps[i].getSymName());
+          outputDynamicDims.globalOps[i].createStoreOp(exitLoc, dimValue,
+                                                       exitBuilder);
         }
       }
 
       // Clear the dirty flag now that the shapes have been updated.
       auto falseValue =
           exitBuilder.createOrFold<arith::ConstantIntOp>(exitLoc, 0, 1);
-      exitBuilder.create<IREE::Util::GlobalStoreOp>(exitLoc, falseValue,
-                                                    dirtyGlobalOp.getSymName());
-      exitBuilder.create<mlir::func::ReturnOp>(exitLoc);
+      dirtyGlobalOp.createStoreOp(exitLoc, falseValue, exitBuilder);
+      exitBuilder.create<IREE::Util::ReturnOp>(exitLoc);
       returnOp.erase();
     }
 
-    OpBuilder::atBlockBegin(returnBlock).create<mlir::func::ReturnOp>(loc);
+    OpBuilder::atBlockBegin(returnBlock).create<IREE::Util::ReturnOp>(loc);
 
     return calcFuncOp;
   }
@@ -282,8 +285,8 @@ class WrapEntryPointsPass
       builder.create<mlir::cf::BranchOp>(loc, exitBlock);
       return exitBlock;
     }
-    SmallVector<Block *, 4> compareBlocks;
-    SmallVector<Block *, 4> caseBlocks;
+    SmallVector<Block *> compareBlocks;
+    SmallVector<Block *> caseBlocks;
     for (size_t i = 0; i < caseCount; ++i) {
       compareBlocks.push_back(builder.createBlock(exitBlock));
       caseBlocks.push_back(builder.createBlock(exitBlock));
@@ -319,8 +322,9 @@ class WrapEntryPointsPass
     for (unsigned i = 0; i < shapeType.getRank(); ++i) {
       Value dimValue;
       if (shapeType.isDynamicDim(i)) {
-        dimValue = builder.create<IREE::Util::GlobalLoadOp>(
-            loc, dynamicDims.globalOps[dynamicDimIdx++]);
+        dimValue = dynamicDims.globalOps[dynamicDimIdx++]
+                       .createLoadOp(loc, builder)
+                       .getLoadedGlobalValue();
       } else {
         dimValue = builder.createOrFold<arith::ConstantIndexOp>(
             loc, shapeType.getDimSize(i));
@@ -337,15 +341,16 @@ class WrapEntryPointsPass
     auto shapeType = dynamicDims.tensorType;
     unsigned dynamicDimIdx = 0;
     for (unsigned i = 0; i < shapeType.getRank(); ++i) {
-      if (!shapeType.isDynamicDim(i)) continue;
+      if (!shapeType.isDynamicDim(i))
+        continue;
       auto dimValue =
           builder
               .create<IREE::Util::ListGetOp>(
                   loc, builder.getIndexType(), listValue,
                   builder.createOrFold<arith::ConstantIndexOp>(loc, i))
               .getResult();
-      builder.create<IREE::Util::GlobalStoreOp>(
-          loc, dimValue, dynamicDims.globalOps[dynamicDimIdx++].getSymName());
+      dynamicDims.globalOps[dynamicDimIdx++].createStoreOp(loc, dimValue,
+                                                           builder);
     }
   }
 
@@ -356,7 +361,7 @@ class WrapEntryPointsPass
   void createQueryInputShapeFunc(Location loc, StringRef namePrefix,
                                  ArrayRef<DynamicDims> inputDynamicDims,
                                  OpBuilder &moduleBuilder) {
-    auto queryFuncOp = moduleBuilder.create<mlir::func::FuncOp>(
+    auto queryFuncOp = moduleBuilder.create<IREE::Util::FuncOp>(
         loc, namePrefix.str() + "_query_input_shape",
         moduleBuilder.getFunctionType(/*inputs=*/
                                       TypeRange{
@@ -378,7 +383,7 @@ class WrapEntryPointsPass
         entryBuilder);
 
     auto exitBuilder = OpBuilder::atBlockBegin(exitBlock);
-    exitBuilder.create<mlir::func::ReturnOp>(loc);
+    exitBuilder.create<IREE::Util::ReturnOp>(loc);
   }
 
   // Creates a function to resize |inputGlobalOps| and sets the |dirtyGlobalOp|
@@ -389,7 +394,7 @@ class WrapEntryPointsPass
                                   ArrayRef<DynamicDims> inputDynamicDims,
                                   IREE::Util::GlobalOp dirtyGlobalOp,
                                   OpBuilder &moduleBuilder) {
-    auto resizeFuncOp = moduleBuilder.create<mlir::func::FuncOp>(
+    auto resizeFuncOp = moduleBuilder.create<IREE::Util::FuncOp>(
         loc, namePrefix.str() + "_resize_input_shape",
         moduleBuilder.getFunctionType(/*inputs=*/
                                       TypeRange{
@@ -413,9 +418,8 @@ class WrapEntryPointsPass
     // Set the dirty flag so that shapes get recalculated as needed.
     auto exitBuilder = OpBuilder::atBlockBegin(exitBlock);
     auto trueValue = exitBuilder.createOrFold<arith::ConstantIntOp>(loc, 1, 1);
-    exitBuilder.create<IREE::Util::GlobalStoreOp>(loc, trueValue,
-                                                  dirtyGlobalOp.getName());
-    exitBuilder.create<mlir::func::ReturnOp>(loc);
+    dirtyGlobalOp.createStoreOp(loc, trueValue, exitBuilder);
+    exitBuilder.create<IREE::Util::ReturnOp>(loc);
   }
 
   // Creates a function to query the |outputGlobalOps| at runtime by the
@@ -424,9 +428,9 @@ class WrapEntryPointsPass
   // func.func @_query_output_shape(%index : index, %shape : !util.list<index>)
   void createQueryOutputShapeFunc(Location loc, StringRef namePrefix,
                                   ArrayRef<DynamicDims> outputDynamicDims,
-                                  mlir::func::FuncOp calculateShapeFuncOp,
+                                  IREE::Util::FuncOp calculateShapeFuncOp,
                                   OpBuilder &moduleBuilder) {
-    auto queryFuncOp = moduleBuilder.create<func::FuncOp>(
+    auto queryFuncOp = moduleBuilder.create<IREE::Util::FuncOp>(
         loc, namePrefix.str() + "_query_output_shape",
         moduleBuilder.getFunctionType(/*inputs=*/
                                       TypeRange{
@@ -442,7 +446,8 @@ class WrapEntryPointsPass
 
     // Always call the recalculation function - it checks for whether it needs
     // to run based on the dirty flag value.
-    entryBuilder.create<mlir::func::CallOp>(loc, calculateShapeFuncOp);
+    entryBuilder.create<IREE::Util::CallOp>(loc, calculateShapeFuncOp,
+                                            ValueRange{});
 
     auto *exitBlock = buildSwitch(
         loc, entryBlock->getArgument(0), outputDynamicDims.size(),
@@ -452,7 +457,7 @@ class WrapEntryPointsPass
         entryBuilder);
 
     auto exitBuilder = OpBuilder::atBlockBegin(exitBlock);
-    exitBuilder.create<mlir::func::ReturnOp>(loc);
+    exitBuilder.create<IREE::Util::ReturnOp>(loc);
   }
 
   // Creates the corresponding wrapper function for the given entry point.
@@ -466,7 +471,7 @@ class WrapEntryPointsPass
   //
   // NOTE: today we only support a single entry point; with minor tweaks we
   // could fix this up to support multiple if we wanted.
-  void createWrapperFunc(StringRef namePrefix, mlir::func::FuncOp entryFuncOp,
+  void createWrapperFunc(StringRef namePrefix, IREE::Util::FuncOp entryFuncOp,
                          ArrayRef<DynamicDims> inputDynamicDims,
                          ArrayRef<DynamicDims> outputDynamicDims,
                          IREE::Util::GlobalOp dirtyGlobalOp,
@@ -481,20 +486,22 @@ class WrapEntryPointsPass
     auto wrapperFuncType =
         moduleBuilder.getFunctionType(inputTypes, outputTypes);
 
-    auto wrapperFuncOp = moduleBuilder.create<mlir::func::FuncOp>(
+    auto wrapperFuncOp = moduleBuilder.create<IREE::Util::FuncOp>(
         entryFuncOp.getLoc(), "_tflite_main", wrapperFuncType);
     wrapperFuncOp.setPublic();
     wrapperFuncOp.getOperation()->setAttr("iree.abi.stub",
                                           moduleBuilder.getUnitAttr());
 
-    SmallVector<DictionaryAttr, 4> argAttrDict;
+    SmallVector<DictionaryAttr> argAttrDict;
     entryFuncOp.getAllArgAttrs(argAttrDict);
     wrapperFuncOp.setAllArgAttrs(argAttrDict);
-    SmallVector<DictionaryAttr, 4> resultAttrDict;
+    SmallVector<DictionaryAttr> resultAttrDict;
     entryFuncOp.getAllResultAttrs(resultAttrDict);
     wrapperFuncOp.setAllResultAttrs(resultAttrDict);
 
     populateReflectionAttrs(entryFuncOp, wrapperFuncOp);
+    if (auto affinityAttr = entryFuncOp->getAttr("stream.affinity"))
+      wrapperFuncOp->setAttr("stream.affinity", affinityAttr);
 
     // Call the entryFuncOp and return the results.
     // If we wanted to perform additional work here to invalidate cached shapes
@@ -513,15 +520,16 @@ class WrapEntryPointsPass
          llvm::zip_equal(entryBlock->getArguments(), inputDynamicDims)) {
       SmallVector<Value> dynamicDims;
       for (auto globalOp : inputDynamicDims.globalOps) {
-        dynamicDims.push_back(entryBuilder.create<IREE::Util::GlobalLoadOp>(
-            arg.getLoc(), globalOp));
+        dynamicDims.push_back(globalOp.createLoadOp(arg.getLoc(), entryBuilder)
+                                  .getLoadedGlobalValue());
       }
       callOperands.push_back(entryBuilder.create<IREE::HAL::TensorImportOp>(
           arg.getLoc(), inputDynamicDims.tensorType, arg,
           TypeAttr::get(inputDynamicDims.tensorType), dynamicDims,
-          /*wait_fence=*/Value{}));
+          /*wait_fence=*/Value{}, /*name=*/nullptr,
+          /*affinity=*/nullptr));
     }
-    auto callOp = entryBuilder.create<mlir::func::CallOp>(
+    auto callOp = entryBuilder.create<IREE::Util::CallOp>(
         entryFuncOp.getLoc(), entryFuncOp, callOperands);
     SmallVector<Value> callResults;
     for (auto [result, outputDynamicDims] :
@@ -535,25 +543,24 @@ class WrapEntryPointsPass
       }
       callResults.push_back(entryBuilder.create<IREE::HAL::TensorExportOp>(
           result.getLoc(), bufferType, result, outputDynamicDims.tensorType,
-          dynamicDims, /*target_storage=*/nullptr));
+          dynamicDims, /*name=*/nullptr, /*affinity=*/nullptr));
       for (auto [dynamicDim, globalOp] :
            llvm::zip_equal(dynamicDims, outputDynamicDims.globalOps)) {
-        entryBuilder.create<IREE::Util::GlobalStoreOp>(
-            result.getLoc(), dynamicDim, globalOp.getSymName());
+        globalOp.createStoreOp(result.getLoc(), dynamicDim, entryBuilder);
       }
     }
 
     // We recomputed the shapes of the outputs and can clear the dirty flag.
-    entryBuilder.create<IREE::Util::GlobalStoreOp>(
+    dirtyGlobalOp.createStoreOp(
         entryFuncOp.getLoc(),
         entryBuilder.create<arith::ConstantIntOp>(entryFuncOp.getLoc(), 0, 1),
-        dirtyGlobalOp.getSymName());
+        entryBuilder);
 
-    entryBuilder.create<mlir::func::ReturnOp>(entryFuncOp.getLoc(),
+    entryBuilder.create<IREE::Util::ReturnOp>(entryFuncOp.getLoc(),
                                               callResults);
   }
 
-  void wrapEntryPoint(mlir::func::FuncOp funcOp) {
+  void wrapEntryPoint(IREE::Util::FuncOp funcOp) {
     auto loc = funcOp.getLoc();
     auto namePrefix = ("_tflite_" + funcOp.getName()).str();
     OpBuilder moduleBuilder(funcOp);
@@ -596,9 +603,9 @@ class WrapEntryPointsPass
 
   // Populates attributes on |wrapperFuncOp| to support runtime reflection like
   // IO tensor names and quantization information.
-  void populateReflectionAttrs(mlir::func::FuncOp entryFuncOp,
-                               mlir::func::FuncOp wrapperFuncOp) {
-    SmallVector<NamedAttribute, 4> attrs;
+  void populateReflectionAttrs(IREE::Util::FuncOp entryFuncOp,
+                               IREE::Util::FuncOp wrapperFuncOp) {
+    SmallVector<NamedAttribute, 1> attrs;
     attrs.push_back(buildIONamesAttr(entryFuncOp));
     // TODO(#3972): tfl.io.quant: quantization information.
     // TODO(#3978): tfl.io.types: tensor types (complex/strings/etc).
@@ -609,12 +616,11 @@ class WrapEntryPointsPass
   // Constructs an attribute containing all of the input and output identifiers:
   //   tfl.io.names=arg0;arg1;ret0;ret1
   //
-  // Default names will be used if no iree.identifiers are set on the function.
-  NamedAttribute buildIONamesAttr(mlir::func::FuncOp entryFuncOp) {
-    SmallVector<std::string, 4> pieces;
+  // Default names will be used if no identifiers are set on the function.
+  NamedAttribute buildIONamesAttr(IREE::Util::FuncOp entryFuncOp) {
+    SmallVector<std::string> pieces;
     for (int i = 0; i < entryFuncOp.getNumArguments(); ++i) {
-      auto identifierAttr =
-          entryFuncOp.getArgAttrOfType<StringAttr>(i, "iree.identifier");
+      auto identifierAttr = getArgId(entryFuncOp, i);
       if (!identifierAttr || identifierAttr.getValue().empty()) {
         pieces.push_back("arg" + std::to_string(i));
       } else {
@@ -622,8 +628,7 @@ class WrapEntryPointsPass
       }
     }
     for (int i = 0; i < entryFuncOp.getNumResults(); ++i) {
-      auto identifierAttr =
-          entryFuncOp.getResultAttrOfType<StringAttr>(i, "iree.identifier");
+      auto identifierAttr = getResultId(entryFuncOp, i);
       if (!identifierAttr || identifierAttr.getValue().empty()) {
         pieces.push_back("ret" + std::to_string(i));
       } else {
@@ -631,7 +636,7 @@ class WrapEntryPointsPass
       }
     }
     return NamedAttribute{
-        StringAttr::get(&getContext(), "tfl.io.names"),
+        "tfl.io.names",
         StringAttr::get(&getContext(), llvm::join(pieces, ";"))};
   }
 };
@@ -642,7 +647,4 @@ std::unique_ptr<OperationPass<mlir::ModuleOp>> createWrapEntryPointsPass() {
 
 static PassRegistration<WrapEntryPointsPass> pass;
 
-}  // namespace TFLite
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::TFLite

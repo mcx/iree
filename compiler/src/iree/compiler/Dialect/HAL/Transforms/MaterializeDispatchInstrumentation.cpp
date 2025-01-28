@@ -18,20 +18,22 @@
 #include "iree/schemas/instruments/dispatch.h"
 #include "iree/schemas/instruments/dispatch_def_builder.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
+
+#define GEN_PASS_DEF_MATERIALIZEDISPATCHINSTRUMENTATIONPASS
+#include "iree/compiler/Dialect/HAL/Transforms/Passes.h.inc"
+
+namespace {
 
 static std::string getAttrStr(Attribute attr) {
-  if (!attr) return "";
+  if (!attr)
+    return "";
   std::string result;
   llvm::raw_string_ostream os(result);
   attr.print(os, /*elideType=*/true);
@@ -71,7 +73,8 @@ static Value createChunkHeader(Location loc, iree_idbts_chunk_type_t type,
 static Value createPadding(Location loc, uint64_t unalignedLength,
                            OpBuilder &builder) {
   uint64_t padding = llvm::alignTo(unalignedLength, 16) - unalignedLength;
-  if (!padding) return nullptr;
+  if (!padding)
+    return nullptr;
   auto i8Type = builder.getI8Type();
   auto zeroAttr = IntegerAttr::get(i8Type, 0);
   auto dataAttr = DenseElementsAttr::get(
@@ -95,35 +98,20 @@ static void appendListItems(Location loc, Value list, ArrayRef<Value> items,
   }
 }
 
-class MaterializeDispatchInstrumentationPass
-    : public PassWrapper<MaterializeDispatchInstrumentationPass,
-                         OperationPass<mlir::ModuleOp>> {
- public:
-  MaterializeDispatchInstrumentationPass() = default;
-  MaterializeDispatchInstrumentationPass(
-      const MaterializeDispatchInstrumentationPass &pass) {}
-  explicit MaterializeDispatchInstrumentationPass(int64_t bufferSize) {
-    this->bufferSize = bufferSize;
-  }
+//===----------------------------------------------------------------------===//
+// --iree-hal-materialize-dispatch-instrumentation
+//===----------------------------------------------------------------------===//
 
-  StringRef getArgument() const override {
-    return "iree-hal-materialize-dispatch-instrumentation";
-  }
-
-  StringRef getDescription() const override {
-    return "Materializes dispatch instrumentation resources.";
-  }
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::arith::ArithDialect>();
-    registry.insert<IREE::HAL::HALDialect>();
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
-  }
-
+struct MaterializeDispatchInstrumentationPass
+    : public IREE::HAL::impl::MaterializeDispatchInstrumentationPassBase<
+          MaterializeDispatchInstrumentationPass> {
+  using IREE::HAL::impl::MaterializeDispatchInstrumentationPassBase<
+      MaterializeDispatchInstrumentationPass>::
+      MaterializeDispatchInstrumentationPassBase;
   void runOnOperation() override {
     auto moduleOp = getOperation();
-    if (moduleOp.getBody()->empty()) return;
+    if (moduleOp.getBody()->empty())
+      return;
 
     auto moduleBuilder = OpBuilder(&moduleOp.getBody()->front());
     auto i8Type = moduleBuilder.getI8Type();
@@ -158,14 +146,11 @@ class MaterializeDispatchInstrumentationPass
           OpBuilder::atBlockBegin(initializerOp.addEntryBlock());
       Value bufferSize =
           initializerBuilder.create<arith::ConstantOp>(loc, bufferSizeAttr);
-      Value buffer = initializerBuilder
-                         .create<IREE::Stream::ResourceAllocOp>(
-                             loc, globalOp.getType(), bufferSize,
-                             /*uninitialized=*/true, /*affinity=*/nullptr)
-                         .getResult(0);
-      initializerBuilder.create<IREE::Util::GlobalStoreOp>(loc, buffer,
-                                                           globalOp);
-      initializerBuilder.create<IREE::Util::InitializerReturnOp>(loc);
+      Value buffer = initializerBuilder.create<IREE::Stream::ResourceAllocOp>(
+          loc, globalOp.getType(), bufferSize,
+          /*uninitialized=*/true, /*affinity=*/nullptr);
+      globalOp.createStoreOp(loc, buffer, initializerBuilder);
+      initializerBuilder.create<IREE::Util::ReturnOp>(loc);
     }
 
     FlatbufferBuilder metadataBuilder;
@@ -184,7 +169,8 @@ class MaterializeDispatchInstrumentationPass
       for (auto exportOp :
            executableOp.getOps<IREE::Stream::ExecutableExportOp>()) {
         auto funcOp = exportOp.lookupFunctionRef();
-        if (!funcOp) continue;
+        if (!funcOp)
+          continue;
 
         // Capture the source before we mess with it.
         auto originalSource = getOpStr(funcOp);
@@ -195,22 +181,17 @@ class MaterializeDispatchInstrumentationPass
             instrumentedExports.size();
 
         // Update function signature to add the ringbuffer and dispatch ID.
-        auto funcType = funcOp.getFunctionType();
-        SmallVector<Type> argTypes(funcType.getInputs());
+        SmallVector<Type> argTypes(funcOp.getArgumentTypes());
         argTypes.push_back(bindingType);
         argTypes.push_back(i32Type);
-        funcOp.setFunctionType(
-            FunctionType::get(&getContext(), argTypes, funcType.getResults()));
+        funcOp.setType(FunctionType::get(&getContext(), argTypes,
+                                         funcOp.getResultTypes()));
         auto bindingArg = funcOp.front().addArgument(bindingType, loc);
         auto dispatchIdArg = funcOp.front().addArgument(i32Type, loc);
-
-        // Fix up arg attrs (yuck).
-        SmallVector<DictionaryAttr> argAttrs;
-        funcOp.getAllArgAttrs(argAttrs);
-        argAttrs.push_back(DictionaryAttr::get(
-            &getContext(), {NamedAttribute(alignmentKey, alignment64)}));
-        argAttrs.push_back(DictionaryAttr::get(&getContext(), {}));
-        funcOp.setAllArgAttrs(argAttrs);
+        funcOp.setArgAttrs(
+            bindingArg.getArgNumber(),
+            DictionaryAttr::get(&getContext(),
+                                {NamedAttribute(alignmentKey, alignment64)}));
 
         // Insert the workgroup instrumentation. Note that this happens before
         // codegen would do tile-and-distribute, but that's ok as it should just
@@ -244,26 +225,27 @@ class MaterializeDispatchInstrumentationPass
     // instrumentation buffer.
     SmallVector<iree_instruments_DispatchSiteDef_ref_t> dispatchSiteRefs;
     uint32_t dispatchSiteCount = 0;
-    for (auto funcLikeOp : moduleOp.getOps<FunctionOpInterface>()) {
-      funcLikeOp.walk([&](IREE::Stream::CmdExecuteOp executeOp) {
+    for (auto funcOp : moduleOp.getOps<mlir::FunctionOpInterface>()) {
+      funcOp.walk([&](IREE::Stream::CmdExecuteOp executeOp) {
         auto parentBuilder = OpBuilder(executeOp);
 
         // Load the ringbuffer and capture it for use within the execute region.
-        auto loadOp =
-            parentBuilder.create<IREE::Util::GlobalLoadOp>(loc, globalOp);
+        auto loadedValue =
+            globalOp.createLoadOp(loc, parentBuilder).getLoadedGlobalValue();
         Value zero = parentBuilder.create<arith::ConstantIndexOp>(loc, 0);
         Value bufferSize =
             parentBuilder.create<arith::ConstantOp>(loc, bufferSizeAttr);
-        executeOp.getResourceOperandsMutable().append(loadOp.getResult());
+        executeOp.getResourceOperandsMutable().append(loadedValue);
         executeOp.getResourceOperandSizesMutable().append(bufferSize);
-        auto bufferArg = executeOp.getBody().addArgument(loadOp.getType(), loc);
+        auto bufferArg =
+            executeOp.getBody().addArgument(loadedValue.getType(), loc);
 
         // Walk dispatches and pass them the ringbuffer and their unique ID.
         executeOp.walk([&](IREE::Stream::CmdDispatchOp dispatchOp) {
           // NOTE: we just choose the first instrumented export for attribution
           // as that's good enough for all current use cases. If we start
           // specializing really early we may want to fix that.
-          Optional<uint32_t> functionId;
+          std::optional<uint32_t> functionId;
           for (auto entryPointAttr : dispatchOp.getEntryPointRefs()) {
             auto it = instrumentedExports.find(entryPointAttr);
             if (it != instrumentedExports.end()) {
@@ -272,7 +254,8 @@ class MaterializeDispatchInstrumentationPass
               break;
             }
           }
-          if (!functionId) return;  // not instrumented
+          if (!functionId)
+            return; // not instrumented
 
           // Append dispatch site ID to correlate this op with where it lives in
           // the program and what is being dispatched. Note that multiple
@@ -326,7 +309,7 @@ class MaterializeDispatchInstrumentationPass
     // Create query function for getting the instrumentation data.
     auto listType = moduleBuilder.getType<IREE::Util::ListType>(
         moduleBuilder.getType<IREE::Util::VariantType>());
-    auto queryOp = moduleBuilder.create<func::FuncOp>(
+    auto queryOp = moduleBuilder.create<IREE::Util::FuncOp>(
         loc, "__query_instruments",
         moduleBuilder.getFunctionType({listType}, {}));
     {
@@ -358,7 +341,7 @@ class MaterializeDispatchInstrumentationPass
 
       // Export the device buffer containing the instrument data.
       Value buffer =
-          queryBuilder.create<IREE::Util::GlobalLoadOp>(loc, globalOp);
+          globalOp.createLoadOp(loc, queryBuilder).getLoadedGlobalValue();
       Value bufferSize =
           queryBuilder.create<arith::ConstantOp>(loc, bufferSizeAttr);
       auto bufferViewType = moduleBuilder.getType<IREE::HAL::BufferViewType>();
@@ -375,29 +358,11 @@ class MaterializeDispatchInstrumentationPass
       }
 
       appendListItems(loc, listArg, iovecs, queryBuilder);
-      queryBuilder.create<func::ReturnOp>(loc);
+      queryBuilder.create<IREE::Util::ReturnOp>(loc);
     }
   }
-
- private:
-  Option<llvm::cl::PowerOf2ByteSize> bufferSize{
-      *this,
-      "bufferSize",
-      llvm::cl::desc("Power-of-two byte size of the instrumentation buffer."),
-      llvm::cl::init(llvm::cl::PowerOf2ByteSize(64 * 1024 * 1024)),
-  };
 };
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createMaterializeDispatchInstrumentationPass(int64_t bufferSize) {
-  return std::make_unique<MaterializeDispatchInstrumentationPass>(bufferSize);
-}
+} // namespace
 
-static PassRegistration<MaterializeDispatchInstrumentationPass> pass([] {
-  return std::make_unique<MaterializeDispatchInstrumentationPass>();
-});
-
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL

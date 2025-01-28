@@ -15,16 +15,12 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Parser/Parser.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Inline {
+namespace mlir::iree_compiler::IREE::HAL::Inline {
 
 namespace {
 
 class HALInlineToVMConversionInterface : public VMConversionDialectInterface {
- public:
+public:
   using VMConversionDialectInterface::VMConversionDialectInterface;
 
   OwningOpRef<mlir::ModuleOp> parseVMImportModule() const override {
@@ -34,17 +30,18 @@ class HALInlineToVMConversionInterface : public VMConversionDialectInterface {
         getDialect()->getContext());
   }
 
-  void populateVMConversionPatterns(
-      SymbolTable &importSymbols, RewritePatternSet &patterns,
-      ConversionTarget &conversionTarget,
-      TypeConverter &typeConverter) const override {
+  void
+  populateVMConversionPatterns(SymbolTable &importSymbols,
+                               RewritePatternSet &patterns,
+                               ConversionTarget &conversionTarget,
+                               TypeConverter &typeConverter) const override {
     conversionTarget.addIllegalDialect<IREE::HAL::Inline::HALInlineDialect>();
     populateHALInlineToVMPatterns(getDialect()->getContext(), conversionTarget,
                                   typeConverter, importSymbols, patterns);
   }
 };
 
-}  // namespace
+} // namespace
 
 HALInlineDialect::HALInlineDialect(MLIRContext *context)
     : Dialect(getDialectNamespace(), context, TypeID::get<HALInlineDialect>()) {
@@ -56,8 +53,4 @@ HALInlineDialect::HALInlineDialect(MLIRContext *context)
       >();
 }
 
-}  // namespace Inline
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL::Inline

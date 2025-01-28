@@ -12,29 +12,46 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
-#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/CallInterfaces.h"
+#include "mlir/Interfaces/CastInterfaces.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-#define GET_OP_CLASSES
-#include "iree/compiler/Dialect/Util/IR/UtilOps.h.inc"  // IWYU pragma: export
+namespace mlir::iree_compiler {
 
-namespace mlir {
-namespace iree_compiler {
+//===----------------------------------------------------------------------===//
+// Experimental
+//===----------------------------------------------------------------------===//
+
+// NOTE: this is a placeholder for a util.tree_switch (or something) op that
+// looks like scf.index_switch but with a region per case. For now we emit a
+// sequence of arith.select ops and return the index of the first condition that
+// is true. Would be nicer with some range template magic instead of an index.
+// Returns an index of -1 if no case matches.
+Value buildIfElseTree(
+    Location loc, size_t count,
+    std::function<Value(Location, size_t, OpBuilder &)> caseBuilder,
+    OpBuilder &builder);
 
 //===----------------------------------------------------------------------===//
 // Utils
 //===----------------------------------------------------------------------===//
 
-// Returns the dynamic size of the value at |index|.
-Value findValueSizeInList(unsigned index, ValueRange values, ValueRange sizes);
+// Removes duplicate attributes in the array (if any).
+ArrayAttr deduplicateArrayElements(ArrayAttr arrayAttr);
+
+// Finds the operand index in |operands| that |tiedResult| references.
+// Returns TiedOpInterface::kUntiedIndex if no operand is found.
+int64_t findTiedOperand(OpAsmParser::UnresolvedOperand tiedResult,
+                        ArrayRef<OpAsmParser::UnresolvedOperand> operands);
 
 //===----------------------------------------------------------------------===//
 // custom<SymbolVisibility>($sym_visibility)
@@ -98,21 +115,44 @@ ParseResult parseSizeAwareType(OpAsmParser &parser, Type &type,
 void printSizeAwareType(OpAsmPrinter &p, Operation *op, Type type, Value size);
 
 //===----------------------------------------------------------------------===//
-// custom<SizeAwareTypeList>
+// custom<OperandTypeList>
 //===----------------------------------------------------------------------===//
-// (type{%size0}, type, type{%size1})
+// ()
+// (type, type)
 
-ParseResult parseSizeAwareTypeList(
-    OpAsmParser &parser, SmallVectorImpl<Type> &types,
-    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &sizes);
-void printSizeAwareTypeList(OpAsmPrinter &p, Operation *op, TypeRange types,
-                            OperandRange sizes);
-ParseResult parseSizeAwareTypeList(
-    OpAsmParser &parser, SmallVectorImpl<Type> &types0,
-    SmallVectorImpl<Type> &types1,
-    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &sizes);
-void printSizeAwareTypeList(OpAsmPrinter &p, Operation *op, TypeRange types0,
-                            TypeRange types1, OperandRange sizes);
+ParseResult parseOperandTypeList(OpAsmParser &parser,
+                                 SmallVectorImpl<Type> &operandTypes);
+void printOperandTypeList(OpAsmPrinter &p, Operation *op,
+                          TypeRange operandTypes);
+
+//===----------------------------------------------------------------------===//
+// custom<TiedResultList>
+//===----------------------------------------------------------------------===//
+// type, %operand4
+
+ParseResult
+parseTiedResultList(OpAsmParser &parser,
+                    ArrayRef<OpAsmParser::UnresolvedOperand> operands,
+                    TypeRange operandTypes, SmallVectorImpl<Type> &resultTypes,
+                    ArrayAttr &tiedOperands);
+void printTiedResultList(OpAsmPrinter &p, Operation *op, ValueRange operands,
+                         TypeRange operandTypes, TypeRange resultTypes,
+                         ArrayAttr tiedOperands);
+
+//===----------------------------------------------------------------------===//
+// custom<TiedFunctionResultList>
+//===----------------------------------------------------------------------===//
+// ()
+// type
+// (type, %operand0, %operand1 as type)
+
+ParseResult parseTiedFunctionResultList(
+    OpAsmParser &parser, ArrayRef<OpAsmParser::UnresolvedOperand> operands,
+    ArrayRef<Type> operandTypes, SmallVectorImpl<Type> &resultTypes,
+    ArrayAttr &tiedOperands);
+void printTiedFunctionResultList(OpAsmPrinter &p, Operation *op,
+                                 ValueRange operands, TypeRange operandTypes,
+                                 TypeRange resultTypes, ArrayAttr tiedOperands);
 
 //===----------------------------------------------------------------------===//
 // custom<ShapedTiedResult>
@@ -123,9 +163,9 @@ void printSizeAwareTypeList(OpAsmPrinter &p, Operation *op, TypeRange types0,
 ParseResult parseShapedTiedResult(
     OpAsmParser &parser, Type &resultType,
     SmallVectorImpl<OpAsmParser::UnresolvedOperand> &resultDims);
-inline ParseResult parseShapedTiedResult(
-    OpAsmParser &parser, Type &resultType,
-    OpAsmParser::UnresolvedOperand &resultDim) {
+inline ParseResult
+parseShapedTiedResult(OpAsmParser &parser, Type &resultType,
+                      OpAsmParser::UnresolvedOperand &resultDim) {
   SmallVector<OpAsmParser::UnresolvedOperand, 1> resultDims;
   if (failed(parseShapedTiedResult(parser, resultType, resultDims))) {
     return failure();
@@ -144,9 +184,10 @@ ParseResult parseShapedTiedResult(
 void printShapedTiedResult(OpAsmPrinter &p, Operation *op, Type resultType,
                            ValueRange resultDims, ArrayAttr tiedOperands);
 
-inline ParseResult parseShapedTiedResult(
-    OpAsmParser &parser, Type &resultType,
-    OpAsmParser::UnresolvedOperand &resultDim, ArrayAttr &tiedOperands) {
+inline ParseResult
+parseShapedTiedResult(OpAsmParser &parser, Type &resultType,
+                      OpAsmParser::UnresolvedOperand &resultDim,
+                      ArrayAttr &tiedOperands) {
   SmallVector<OpAsmParser::UnresolvedOperand> resultDims;
   if (failed(parseShapedTiedResult(parser, resultType, resultDims,
                                    tiedOperands))) {
@@ -161,6 +202,27 @@ inline void printShapedTiedResult(OpAsmPrinter &p, Operation *op,
                                   ArrayAttr tiedOperands) {
   printShapedTiedResult(p, op, resultType, ValueRange{resultDim}, tiedOperands);
 }
+//===----------------------------------------------------------------------===//
+// custom<ShapedTypeList>
+//===----------------------------------------------------------------------===//
+// i32, type{%size}, type{%dim0, %dim1}
+
+ParseResult
+parseShapedTypeList(OpAsmParser &parser, SmallVectorImpl<Type> &types,
+                    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dims);
+void printShapedTypeList(OpAsmPrinter &p, Operation *op, TypeRange types,
+                         ValueRange dims);
+ParseResult
+parseShapedTypeList(OpAsmParser &parser, SmallVectorImpl<Type> &types0,
+                    SmallVectorImpl<Type> &types1,
+                    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &dims);
+void printShapedTypeList(OpAsmPrinter &p, Operation *op, TypeRange types0,
+                         TypeRange types1, ValueRange dims);
+
+//===----------------------------------------------------------------------===//
+// custom<ShapedResultList>
+//===----------------------------------------------------------------------===//
+// type{%dim2}, %operand4
 
 ParseResult parseShapedResultList(
     OpAsmParser &parser, ArrayRef<OpAsmParser::UnresolvedOperand> operands,
@@ -191,7 +253,24 @@ void printShapedFunctionType(OpAsmPrinter &p, Operation *op,
                              OperandRange operandDims, TypeRange resultTypes,
                              OperandRange resultDims, ArrayAttr tiedOperands);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+//===----------------------------------------------------------------------===//
+// custom<ShapedFunctionSignature>
+//===----------------------------------------------------------------------===//
+// (%arg0: type {some.attr = 54 : index}, %arg1: type) -> (type, %arg1 as type)
 
-#endif  // IREE_COMPILER_DIALECT_UTIL_IR_UTILOPS_H_
+ParseResult parseShapedFunctionSignature(OpAsmParser &parser,
+                                         TypeAttr &functionTypeAttr,
+                                         ArrayAttr &tiedOperands,
+                                         ArrayAttr &argAttrs,
+                                         ArrayAttr &resultAttrs);
+void printShapedFunctionSignature(OpAsmPrinter &p, Operation *op,
+                                  TypeAttr functionTypeAttr,
+                                  ArrayAttr tiedOperands, ArrayAttr argAttrs,
+                                  ArrayAttr resultAttrs);
+
+} // namespace mlir::iree_compiler
+
+#define GET_OP_CLASSES
+#include "iree/compiler/Dialect/Util/IR/UtilOps.h.inc" // IWYU pragma: export
+
+#endif // IREE_COMPILER_DIALECT_UTIL_IR_UTILOPS_H_

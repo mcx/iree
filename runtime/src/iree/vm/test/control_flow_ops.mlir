@@ -124,6 +124,43 @@ vm.module @control_flow_ops {
     vm.return
   }
 
+  vm.export @test_br_table_inbounds
+  vm.func private @test_br_table_inbounds() {
+    %c0 = vm.const.i32 0
+    %c1 = vm.const.i32 1
+    %c2 = vm.const.i32 2
+    %c1dno = util.optimization_barrier %c1 : i32
+    vm.br_table %c1dno {
+      default: ^bb1(%c2 : i32),
+      0: ^bb2(%c0 : i32),
+      1: ^bb2(%c1 : i32)
+    }
+  ^bb1(%arg0: i32):
+    vm.fail %arg0, "unreachable"
+  ^bb2(%arg1: i32):
+    vm.check.eq %arg1, %c1, "expected table[1] branch" : i32
+    vm.return
+  }
+
+  vm.export @test_br_table_outofbounds
+  vm.func private @test_br_table_outofbounds() {
+    %c0 = vm.const.i32 0
+    %c1 = vm.const.i32 1
+    %c2 = vm.const.i32 2
+    %c-1 = vm.const.i32 -1
+    %c-1dno = util.optimization_barrier %c-1 : i32
+    vm.br_table %c-1dno {
+      default: ^bb1(%c0 : i32),
+      0: ^bb2(%c1 : i32),
+      1: ^bb2(%c2 : i32)
+    }
+  ^bb1(%arg0: i32):
+    vm.check.eq %arg0, %c0, "expected default branch" : i32
+    vm.return
+  ^bb2(%arg1: i32):
+    vm.fail %arg1, "unreachable"
+  }
+
   vm.rodata private @buffer_a dense<[1]> : tensor<1xi8>
   vm.rodata private @buffer_b dense<[2]> : tensor<1xi8>
   vm.rodata private @buffer_c dense<[3]> : tensor<1xi8>
@@ -144,7 +181,7 @@ vm.module @control_flow_ops {
 
   vm.func private @_return_arg_cycling(%arg0 : !vm.buffer, %arg1: !vm.buffer,
                                        %arg2: !vm.buffer)
-      -> (!vm.buffer, !vm.buffer, !vm.buffer) attributes {noinline} {
+      -> (!vm.buffer, !vm.buffer, !vm.buffer) attributes {inlining_policy = #util.inline.never} {
     vm.return %arg1, %arg2, %arg0 : !vm.buffer, !vm.buffer, !vm.buffer
   }
 
@@ -166,7 +203,7 @@ vm.module @control_flow_ops {
 
   vm.func private @_branch_arg_cycling(%arg0 : !vm.buffer, %arg1: !vm.buffer,
                                        %arg2: !vm.buffer, %arg3: i32)
-      -> (!vm.buffer, !vm.buffer, !vm.buffer) attributes {noinline} {
+      -> (!vm.buffer, !vm.buffer, !vm.buffer) attributes {inlining_policy = #util.inline.never} {
     vm.cond_br %arg3,
                ^bb1(%arg0, %arg1, %arg2: !vm.buffer, !vm.buffer, !vm.buffer),
                ^bb2(%arg1, %arg2, %arg0, %arg3: !vm.buffer, !vm.buffer, !vm.buffer, i32)
@@ -177,7 +214,7 @@ vm.module @control_flow_ops {
     vm.return %d, %e, %f : !vm.buffer, !vm.buffer, !vm.buffer
   }
 
-  vm.func private @_side_effect(%arg0: i32) attributes {noinline}
+  vm.func private @_side_effect(%arg0: i32) attributes {inlining_policy = #util.inline.never}
   {
     vm.return
   }

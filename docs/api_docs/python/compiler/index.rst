@@ -7,8 +7,8 @@ Compiler API
 
    api.rst
    tools.rst
-   iree_dialect.rst
-   iree_pydm_dialect.rst
-   mlir_dialects.rst
-   tensorflow_dialects.rst
+   build.rst
    mlir.rst
+   iree_dialects.rst
+   iree_input_dialect.rst
+   mlir_dialects.rst

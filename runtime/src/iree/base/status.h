@@ -154,6 +154,11 @@ typedef enum iree_status_code_e {
   // Callers that do not handle deferred execution can treat this as a failure.
   IREE_STATUS_DEFERRED = 17,
 
+  // The program or a component of it is incompatible with the hosting
+  // environment. This may indicate the operating system, host hardware, or
+  // device hardware does not match expectations.
+  IREE_STATUS_INCOMPATIBLE = 18,
+
   IREE_STATUS_CODE_MASK = 0x1Fu,
 } iree_status_code_t;
 
@@ -216,6 +221,8 @@ typedef struct iree_status_handle_t* iree_status_t;
   (iree_status_code(value) == IREE_STATUS_UNAUTHENTICATED)
 #define iree_status_is_deferred(value) \
   (iree_status_code(value) == IREE_STATUS_DEFERRED)
+#define iree_status_is_incompatible(value) \
+  (iree_status_code(value) == IREE_STATUS_INCOMPATIBLE)
 
 #define IREE_STATUS_IMPL_CONCAT_INNER_(x, y) x##y
 #define IREE_STATUS_IMPL_CONCAT_(x, y) IREE_STATUS_IMPL_CONCAT_INNER_(x, y)
@@ -299,7 +306,7 @@ typedef struct iree_status_handle_t* iree_status_t;
 // We cut out all status storage code when not used.
 #if IREE_STATUS_FEATURES == 0
 #define IREE_STATUS_IMPL_MAKE_(code, ...) \
-  (iree_status_t)(uintptr_t)((code)&IREE_STATUS_CODE_MASK)
+  (iree_status_t)(uintptr_t)((code) & IREE_STATUS_CODE_MASK)
 #define IREE_STATUS_IMPL_MAKE_LOC_(file, line, code, ...) \
   IREE_STATUS_IMPL_MAKE_(code)
 #undef IREE_STATUS_IMPL_RETURN_IF_API_ERROR_
@@ -398,6 +405,9 @@ typedef struct iree_status_handle_t* iree_status_t;
 #define IREE_CHECK_OK(expr)                                                    \
   IREE_STATUS_IMPL_CHECK_OK_(IREE_STATUS_IMPL_CONCAT_(__status_, __COUNTER__), \
                              (expr))
+//===----------------------------------------------------------------------===//
+// Status code utilities
+//===----------------------------------------------------------------------===//
 
 // Returns the canonical status code for the given errno value.
 // https://en.cppreference.com/w/cpp/error/errno_macros
@@ -415,6 +425,10 @@ iree_status_code_from_win32_error(uint32_t error);
 // IREE_STATUS_UNAVAILABLE = "UNAVAILABLE". Do not rely on string-matching the
 // result as the exact text may change.
 IREE_API_EXPORT const char* iree_status_code_string(iree_status_code_t code);
+
+//===----------------------------------------------------------------------===//
+// Status management
+//===----------------------------------------------------------------------===//
 
 // Allocates a new status instance for a failing error |code|.
 // |file| and |line| should be populated with __FILE__ and __LINE__ at the call
@@ -441,6 +455,12 @@ IREE_API_EXPORT IREE_MUST_USE_RESULT iree_status_t iree_status_allocate_vf(
 // No payloads, if present, will be cloned.
 IREE_API_EXPORT IREE_MUST_USE_RESULT iree_status_t
 iree_status_clone(iree_status_t status);
+
+// Freezes |status| into a new status instance. Formats all attached
+// annotations, payloads included, into a single message string allocated to
+// the new status. This always frees the original status.
+IREE_API_EXPORT IREE_MUST_USE_RESULT iree_status_t
+iree_status_freeze(iree_status_t status);
 
 // Frees |status| if it has any associated storage.
 IREE_API_EXPORT void iree_status_free(iree_status_t status);
@@ -487,6 +507,10 @@ IREE_API_EXPORT IREE_MUST_USE_RESULT iree_status_t IREE_PRINTF_ATTRIBUTE(2, 3)
 #define iree_status_annotate(base_status, ...) (base_status)
 #define iree_status_annotate_f(base_status, ...) (base_status)
 #endif  // has IREE_STATUS_FEATURE_ANNOTATIONS
+
+//===----------------------------------------------------------------------===//
+// Status string conversion and printing
+//===----------------------------------------------------------------------===//
 
 // Formats the status as a multi-line string containing all associated payloads.
 // Note that this may contain PII such as file paths and must only be used for

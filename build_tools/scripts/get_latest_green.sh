@@ -20,6 +20,10 @@ set -euo pipefail
 
 commitish="${1:-HEAD}"
 
+# TODO(scotttodd): update from ci.yml to new list
+#   * linux x64 clang
+#   * linux x64 clang asan
+#   * pkgci.yml?
 declare -r REQUIRED_WORKFLOWS=(ci.yml)
 declare -ar QUERY_PARAMS=(
   branch=main
@@ -39,7 +43,7 @@ function get_latest_green() {
     for workflow in "${REQUIRED_WORKFLOWS[@]}"; do
       local successful_run_count="$(\
         gh api --jq '.total_count' \
-        "/repos/openxla/iree/actions/workflows/${workflow}/runs?${query_string}" \
+        "/repos/iree-org/iree/actions/workflows/${workflow}/runs?${query_string}" \
       )"
       # Any successful run of the workflow (including reruns) is OK.
       if (( successful_run_count==0 )); then

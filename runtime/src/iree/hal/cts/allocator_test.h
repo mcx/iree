@@ -13,17 +13,13 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
-namespace iree {
-namespace hal {
-namespace cts {
+namespace iree::hal::cts {
 
 namespace {
-
 constexpr iree_device_size_t kAllocationSize = 1024;
-
 }  // namespace
 
-class allocator_test : public CtsTestBase {};
+class AllocatorTest : public CTSTestBase<> {};
 
 // All allocators must support some baseline capabilities.
 //
@@ -31,7 +27,7 @@ class allocator_test : public CtsTestBase {};
 // driver implementations or target devices, such as:
 //   IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL
 //   IREE_HAL_BUFFER_USAGE_MAPPING
-TEST_P(allocator_test, BaselineBufferCompatibility) {
+TEST_F(AllocatorTest, BaselineBufferCompatibility) {
   // Need at least one way to get data between the host and device.
   iree_hal_buffer_params_t host_local_params = {0};
   host_local_params.type =
@@ -80,14 +76,13 @@ TEST_P(allocator_test, BaselineBufferCompatibility) {
                             IREE_HAL_BUFFER_COMPATIBILITY_QUEUE_DISPATCH));
 }
 
-TEST_P(allocator_test, AllocateBuffer) {
+TEST_F(AllocatorTest, AllocateBuffer) {
   iree_hal_buffer_params_t params = {0};
   params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
   params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER;
   iree_hal_buffer_t* buffer = NULL;
-  IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(
-      device_allocator_, params, kAllocationSize, iree_const_byte_span_empty(),
-      &buffer));
+  IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(device_allocator_, params,
+                                                    kAllocationSize, &buffer));
 
   // At a mimimum, the requested memory type should be respected.
   // Additional bits may be optionally set depending on the allocator.
@@ -103,20 +98,17 @@ TEST_P(allocator_test, AllocateBuffer) {
 
 // While empty allocations aren't particularly useful, they can occur in
 // practice so we should at least be able to create them without errors.
-TEST_P(allocator_test, AllocateEmptyBuffer) {
+TEST_F(AllocatorTest, AllocateEmptyBuffer) {
   iree_hal_buffer_params_t params = {0};
   params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
   params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER;
   iree_hal_buffer_t* buffer = NULL;
   IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(
-      device_allocator_, params, /*allocation_size=*/0,
-      iree_const_byte_span_empty(), &buffer));
+      device_allocator_, params, /*allocation_size=*/0, &buffer));
 
   iree_hal_buffer_release(buffer);
 }
 
-}  // namespace cts
-}  // namespace hal
-}  // namespace iree
+}  // namespace iree::hal::cts
 
 #endif  // IREE_HAL_CTS_ALLOCATOR_TEST_H_

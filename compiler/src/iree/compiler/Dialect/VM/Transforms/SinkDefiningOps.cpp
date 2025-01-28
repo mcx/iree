@@ -18,14 +18,11 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 class SinkDefiningOpsPass
     : public PassWrapper<SinkDefiningOpsPass, OperationPass<ModuleOp>> {
- public:
+public:
   StringRef getArgument() const override { return "iree-vm-sink-defining-ops"; }
 
   StringRef getDescription() const override {
@@ -44,7 +41,7 @@ class SinkDefiningOpsPass
           continue;
         }
 
-        auto users = llvm::to_vector<4>(op.getUsers());
+        auto users = llvm::to_vector(op.getUsers());
         if (users.empty()) {
           // No users (probably leftover needing DCE).
           continue;
@@ -90,7 +87,4 @@ std::unique_ptr<OperationPass<ModuleOp>> createSinkDefiningOpsPass() {
 
 static PassRegistration<SinkDefiningOpsPass> pass;
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

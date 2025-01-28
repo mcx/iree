@@ -6,9 +6,12 @@
 
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
 
-#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
-#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtDialect.h"
+#include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -17,28 +20,26 @@
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.cpp.inc"  // IWYU pragma: export
 // clang-format on
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// Filters out dimensions in `parallelLoops` that have unit range in
 /// `loopRanges`.
-static llvm::SmallVector<unsigned> pruneUnitTripParallelLoops(
-    llvm::ArrayRef<unsigned> parallelLoops,
-    llvm::ArrayRef<int64_t> loopRanges) {
-  return llvm::to_vector(llvm::make_filter_range(
-      parallelLoops,
-      [&loopRanges](unsigned loopDim) { return loopRanges[loopDim] != 1; }));
+static llvm::SmallVector<unsigned>
+pruneUnitTripParallelLoops(llvm::ArrayRef<unsigned> parallelLoops,
+                           llvm::ArrayRef<int64_t> loopRanges) {
+  return llvm::filter_to_vector(parallelLoops, [&loopRanges](unsigned loopDim) {
+    return loopRanges[loopDim] != 1;
+  });
 }
 
 /// Returns the partitionable loops for all Linalg ops.
-llvm::SmallVector<unsigned> getPartitionableLoopsImpl(
-    linalg::LinalgOp linalgOp,
-    llvm::Optional<unsigned> maxNumPartitionedLoops) {
+llvm::SmallVector<unsigned>
+getPartitionableLoopsImpl(linalg::LinalgOp linalgOp,
+                          std::optional<unsigned> maxNumPartitionedLoops) {
   llvm::SmallVector<unsigned> parallelLoops;
   linalgOp.getParallelDims(parallelLoops);
   // Get the static loop ranges.
-  llvm::SmallVector<int64_t, 4> staticLoopRanges =
-      linalgOp.getStaticLoopRanges();
+  llvm::SmallVector<int64_t> staticLoopRanges = linalgOp.getStaticLoopRanges();
   parallelLoops = pruneUnitTripParallelLoops(parallelLoops, staticLoopRanges);
   // TODO(ravishankarm): For now the outer parallel loops are dropped. This is
   // a pragmatic choice for now but might need to be revisited.
@@ -51,21 +52,14 @@ llvm::SmallVector<unsigned> getPartitionableLoopsImpl(
   return parallelLoops;
 }
 
-static llvm::SmallVector<utils::IteratorType> getIteratorTypesFromAttr(
-    ArrayAttr iteratorTypesAttr) {
-  return llvm::to_vector(llvm::map_range(iteratorTypesAttr, [](Attribute attr) {
-    return utils::symbolizeIteratorType(attr.cast<StringAttr>().getValue())
-        .value();
-  }));
-}
-
 /// External model implementation for all LinalgOps.
 template <typename OpTy>
 struct LinalgOpPartitionableLoops
     : public PartitionableLoopsInterface::ExternalModel<
           LinalgOpPartitionableLoops<OpTy>, OpTy> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     auto linalgOp = cast<linalg::LinalgOp>(op);
     return getPartitionableLoopsImpl(linalgOp, maxNumPartitionedLoops);
   }
@@ -75,9 +69,27 @@ struct LinalgOpPartitionableLoops
 struct Mmt4DOpPartitionableLoops
     : public PartitionableLoopsInterface::ExternalModel<
           Mmt4DOpPartitionableLoops, linalg::Mmt4DOp> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     return {0, 1};
+  }
+};
+
+/// External model implementation for linalg::BatchMmt4DOp.
+struct BatchMmt4DOpPartitionableLoops
+    : public PartitionableLoopsInterface::ExternalModel<
+          BatchMmt4DOpPartitionableLoops, linalg::BatchMmt4DOp> {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
+    SmallVector<unsigned> parallelLoops = {0, 1, 2};
+    if (maxNumPartitionedLoops.has_value() &&
+        parallelLoops.size() > maxNumPartitionedLoops.value()) {
+      return llvm::to_vector(llvm::ArrayRef(parallelLoops)
+                                 .take_back(maxNumPartitionedLoops.value()));
+    }
+    return parallelLoops;
   }
 };
 
@@ -87,8 +99,9 @@ template <typename OpTy>
 struct OuterParallelAsPartitionableLoops
     : public PartitionableLoopsInterface::ExternalModel<
           OuterParallelAsPartitionableLoops<OpTy>, OpTy> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     // For now just return the loops that are returned by the
     // `TiledOpInterface`. This needs to be further pruned to remove unit-dim
     // loops, but that needs the interface to return the static sizes of the
@@ -119,8 +132,9 @@ struct OuterParallelAsPartitionableLoops
 template <typename OpTy>
 struct NoPartitionableLoops : public PartitionableLoopsInterface::ExternalModel<
                                   NoPartitionableLoops<OpTy>, OpTy> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     return {};
   }
 };
@@ -129,8 +143,9 @@ struct NoPartitionableLoops : public PartitionableLoopsInterface::ExternalModel<
 struct FftOpPartitionableLoops
     : public PartitionableLoopsInterface::ExternalModel<
           FftOpPartitionableLoops, IREE::LinalgExt::FftOp> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     auto fftOp = cast<IREE::LinalgExt::FftOp>(op);
     auto range = llvm::seq<unsigned>(0, fftOp.getOperandRank());
     SmallVector<unsigned> partitionableLoops(range.begin(), range.end());
@@ -156,8 +171,9 @@ template <typename OpTy>
 struct AllParallelAsPartitionableLoops
     : public PartitionableLoopsInterface::ExternalModel<
           AllParallelAsPartitionableLoops<OpTy>, OpTy> {
-  llvm::SmallVector<unsigned> getPartitionableLoops(
-      Operation *op, llvm::Optional<unsigned> maxNumPartitionedLoops) const {
+  llvm::SmallVector<unsigned>
+  getPartitionableLoops(Operation *op,
+                        std::optional<unsigned> maxNumPartitionedLoops) const {
     SmallVector<unsigned> partitionableLoops;
     auto interfaceOp = cast<OpTy>(op);
     for (auto iteratorType :
@@ -194,6 +210,11 @@ void registerInterfaceForLinalgOps<linalg::Mmt4DOp>(MLIRContext *ctx) {
   linalg::Mmt4DOp::attachInterface<Mmt4DOpPartitionableLoops>(*ctx);
 }
 
+template <>
+void registerInterfaceForLinalgOps<linalg::BatchMmt4DOp>(MLIRContext *ctx) {
+  linalg::BatchMmt4DOp::attachInterface<BatchMmt4DOpPartitionableLoops>(*ctx);
+}
+
 /// Registers the external models for all Linalg operations.
 template <typename OpTy1, typename OpTy2, typename... More>
 static void registerInterfaceForLinalgOps(MLIRContext *ctx) {
@@ -222,28 +243,38 @@ void registerPartitionableLoopsInterfaceModels(DialectRegistry &registry) {
         OuterParallelAsPartitionableLoops<IREE::LinalgExt::ScatterOp>>(*ctx);
     IREE::LinalgExt::SortOp::attachInterface<
         AllParallelAsPartitionableLoops<IREE::LinalgExt::SortOp>>(*ctx);
-    IREE::LinalgExt::ReverseOp::attachInterface<
-        OuterParallelAsPartitionableLoops<IREE::LinalgExt::ReverseOp>>(*ctx);
     IREE::LinalgExt::TopkOp::attachInterface<
         AllParallelAsPartitionableLoops<IREE::LinalgExt::TopkOp>>(*ctx);
     IREE::LinalgExt::WinogradInputTransformOp::attachInterface<
         AllParallelAsPartitionableLoops<
             IREE::LinalgExt::WinogradInputTransformOp>>(*ctx);
+    IREE::LinalgExt::WinogradFilterTransformOp::attachInterface<
+        AllParallelAsPartitionableLoops<
+            IREE::LinalgExt::WinogradFilterTransformOp>>(*ctx);
     IREE::LinalgExt::WinogradOutputTransformOp::attachInterface<
         AllParallelAsPartitionableLoops<
             IREE::LinalgExt::WinogradOutputTransformOp>>(*ctx);
-    IREE::LinalgExt::SoftmaxOp::attachInterface<
-        AllParallelAsPartitionableLoops<IREE::LinalgExt::SoftmaxOp>>(*ctx);
+    IREE::LinalgExt::Im2colOp::attachInterface<
+        AllParallelAsPartitionableLoops<IREE::LinalgExt::Im2colOp>>(*ctx);
     IREE::LinalgExt::AttentionOp::attachInterface<
         AllParallelAsPartitionableLoops<IREE::LinalgExt::AttentionOp>>(*ctx);
+    IREE::LinalgExt::OnlineAttentionOp::attachInterface<
+        AllParallelAsPartitionableLoops<IREE::LinalgExt::OnlineAttentionOp>>(
+        *ctx);
   });
   registry.addExtension(+[](MLIRContext *ctx, tensor::TensorDialect *dialect) {
     tensor::PackOp::attachInterface<
         OuterParallelAsPartitionableLoops<tensor::PackOp>>(*ctx);
+    tensor::PadOp::attachInterface<
+        OuterParallelAsPartitionableLoops<tensor::PadOp>>(*ctx);
     tensor::UnPackOp::attachInterface<
         OuterParallelAsPartitionableLoops<tensor::UnPackOp>>(*ctx);
   });
+  registry.addExtension(
+      +[](MLIRContext *ctx, IREE::GPU::IREEGPUDialect *dialect) {
+        IREE::GPU::MultiMmaOp::attachInterface<
+            OuterParallelAsPartitionableLoops<IREE::GPU::MultiMmaOp>>(*ctx);
+      });
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

@@ -8,8 +8,7 @@
 #include "iree/compiler/Dialect/VM/Conversion/ImportUtils.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 void populateHALChannelToVMPatterns(MLIRContext *context,
                                     SymbolTable &importSymbols,
@@ -17,9 +16,10 @@ void populateHALChannelToVMPatterns(MLIRContext *context,
                                     RewritePatternSet &patterns) {
   patterns.insert<VMImportOpConversion<IREE::HAL::ChannelCreateOp>>(
       context, importSymbols, typeConverter, "hal.channel.create");
+  patterns.insert<VMImportOpConversion<IREE::HAL::ChannelSplitOp>>(
+      context, importSymbols, typeConverter, "hal.channel.split");
   patterns.insert<VMImportOpConversion<IREE::HAL::ChannelRankAndCountOp>>(
       context, importSymbols, typeConverter, "hal.channel.rank_and_count");
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

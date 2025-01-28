@@ -5,25 +5,6 @@ formats.
 
 ## Quick Development Setup
 
-This assumes that you have an appropriate `bazel` installed.
-Build the importer binaries:
-
-```
-# All of them (takes a long time).
-bazel build iree_tf_compiler:importer-binaries
-
-# Or individuals:
-bazel build iree_tf_compiler:iree-import-tflite
-bazel build iree_tf_compiler:iree-import-xla
-bazel build iree_tf_compiler:iree-import-tf
-```
-
-Symlink binaries into python packages (only needs to be done once):
-
-```
-./symlink_binaries.sh
-```
-
 Pip install editable (recommend to do this in a virtual environment):
 
 ```
@@ -32,16 +13,14 @@ pip install -e python_projects/*
 
 # Or one at a time:
 pip install -e python_projects/iree_tflite
-pip install -e python_projects/iree_xla
 pip install -e python_projects/iree_tf
 ```
 
 Test installed:
 
 ```
-iree-import-tflite -help
-iree-import-xla -help
-iree-import-tf -help
+iree-import-tflite -h
+iree-import-tf -h
 ```
 
 ## Run test suite
@@ -71,3 +50,13 @@ lit -v -D DISABLE_FEATURES=llvmcpu -D FEATURES=vulkan test/
 # Individual test directories, files or globs can be run individually.
 lit -v $(find test -name '*softplus*')
 ```
+
+## Updating Tensorflow Importers in CI
+
+CI uses Tensorflow importers to run integration tests and benchmarks. They might
+need an update in CI if you want new features or bugfixes from the frontends.
+
+Tensorflow importers are wrappers which call Tensorflow Python APIs to perform
+conversions. To bump the Tensorflow version, you need to update the
+pinned version of Tensorflow that CI jobs install in
+[integrations/tensorflow/test/requirements.txt](/integrations/tensorflow/test/requirements.txt).

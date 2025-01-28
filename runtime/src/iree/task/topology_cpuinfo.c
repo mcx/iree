@@ -4,26 +4,27 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include <stdio.h>
-
 #include "iree/base/api.h"
 #include "iree/base/internal/math.h"
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
 #include "iree/task/topology.h"
+
+#if !defined(IREE_PLATFORM_APPLE) && !defined(IREE_PLATFORM_EMSCRIPTEN) && \
+    !defined(IREE_PLATFORM_WINDOWS)
 
 // Initializes |out_topology| with a standardized behavior when cpuinfo is not
 // available (unsupported arch, failed to query, etc).
 static void iree_task_topology_initialize_fallback(
     iree_host_size_t max_group_count, iree_task_topology_t* out_topology) {
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, max_group_count);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, max_group_count);
+
   // TODO(benvanik): implement our own query... but that seems not so great.
   // For now we default to a single group: if a user wants more then they can
   // either get cpuinfo working for their platform or manually construct the
   // topology themselves.
   iree_host_size_t group_count = 1;
   iree_task_topology_initialize_from_group_count(group_count, out_topology);
+
   IREE_TRACE_ZONE_END(z0);
 }
 
@@ -35,10 +36,61 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
   return 0;
 }
 
-void iree_task_topology_initialize_from_physical_cores(
-    iree_task_topology_node_id_t node_id, iree_host_size_t max_core_count,
+iree_status_t iree_task_topology_fixup_constructive_sharing_masks(
+    iree_task_topology_t* topology) {
+  // No-op.
+  return iree_ok_status();
+}
+
+iree_status_t iree_task_topology_initialize_from_logical_cpu_set(
+    iree_host_size_t cpu_count, const uint32_t* cpu_ids,
     iree_task_topology_t* out_topology) {
+  // Today we have a fixed limit on the number of groups within a particular
+  // topology.
+  if (cpu_count >= IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "too many CPUs specified (%" PRIhsz
+                            " provided for a max capacity of %zu)",
+                            cpu_count, IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT);
+  }
+
+  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, cpu_count);
+
+  iree_task_topology_initialize(out_topology);
+
+  out_topology->group_count = cpu_count;
+  for (iree_host_size_t i = 0; i < cpu_count; ++i) {
+    iree_task_topology_group_t* group = &out_topology->groups[i];
+    iree_task_topology_group_initialize(i, group);
+    group->processor_index = cpu_ids[i];
+
+    // NOTE: without cpuinfo we can't get cache sizes so we just guess some
+    // conservative values.
+    group->caches.l1_data = 32 * 1024;
+    group->caches.l2_data = 128 * 1024;
+
+    // NOTE: without cpuinfo we can't get SMT and node info but this isn't
+    // really used on Linux today anyway.
+    iree_thread_affinity_t* affinity = &group->ideal_thread_affinity;
+    memset(affinity, 0, sizeof(*affinity));
+    affinity->specified = 1;
+    affinity->id = cpu_ids[i];
+  }
+
+  iree_status_t status =
+      iree_task_topology_fixup_constructive_sharing_masks(out_topology);
+
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
+iree_status_t iree_task_topology_initialize_from_physical_cores(
+    iree_task_topology_node_id_t node_id,
+    iree_task_topology_performance_level_t performance_level,
+    iree_host_size_t max_core_count, iree_task_topology_t* out_topology) {
   iree_task_topology_initialize_fallback(max_core_count, out_topology);
+  return iree_ok_status();
 }
 
 #else
@@ -61,17 +113,6 @@ iree_host_size_t iree_task_topology_query_node_count(void) {
 // We wrap this here because cpuinfo only returns non-NULL on linux.
 static const struct cpuinfo_core* iree_task_topology_get_current_core() {
   const struct cpuinfo_core* current_core = cpuinfo_get_current_core();
-#if defined(IREE_PLATFORM_WINDOWS)
-  // TODO(benvanik): drop cpuinfo.
-  if (current_core == NULL) {
-    PROCESSOR_NUMBER processor_number;
-    GetCurrentProcessorNumberEx(&processor_number);
-    uint32_t processor_id =
-        cpuinfo_get_package(processor_number.Group)->processor_start +
-        processor_number.Number;
-    current_core = cpuinfo_get_processor(processor_id)->core;
-  }
-#endif  // IREE_PLATFORM_WINDOWS
   return current_core;
 }
 
@@ -124,13 +165,45 @@ static void iree_task_topology_set_affinity_from_processor(
 #elif defined(__linux__)
   out_affinity->group = processor->cluster->cluster_id;
   out_affinity->id = processor->linux_id;
-#elif defined(_WIN32) || defined(__CYGWIN__)
-  out_affinity->group = processor->windows_group_id;
-  out_affinity->id = processor->windows_processor_id;
 #else
   // WASM? Unusued today.
   out_affinity->specified = 0;
 #endif  // cpuinfo-like platform field
+}
+
+// Populates |out_group| with the information from |processor|.
+static void iree_task_topology_group_initialize_from_processor(
+    uint32_t group_index, const struct cpuinfo_processor* processor,
+    iree_task_topology_group_t* out_group) {
+  iree_task_topology_group_initialize(group_index, out_group);
+#if defined(__linux__)
+  out_group->processor_index = processor->linux_id;
+#else
+  out_group->processor_index =
+      processor->core->processor_start + processor->smt_id;
+#endif  // __linux__
+  out_group->caches.l1_data =
+      processor->cache.l1d ? processor->cache.l1d->size : 0;
+  out_group->caches.l2_data =
+      processor->cache.l2 ? processor->cache.l2->size : 0;
+  out_group->caches.l3_data =
+      processor->cache.l3 ? processor->cache.l3->size : 0;
+  iree_task_topology_set_affinity_from_processor(
+      processor, &out_group->ideal_thread_affinity);
+}
+
+// Populates |out_group| with the information from |core|.
+static void iree_task_topology_group_initialize_from_core(
+    uint32_t group_index, const struct cpuinfo_core* core,
+    iree_task_topology_group_t* out_group) {
+  // Guess: always pick the first processor in a core.
+  // When pinning to threads we'll take into account whether the core is SMT
+  // and use all threads anyway so this alignment is just helpful for debugging.
+  uint32_t processor_i = core->processor_start;
+  const struct cpuinfo_processor* processor =
+      cpuinfo_get_processor(processor_i);
+  iree_task_topology_group_initialize_from_processor(group_index, processor,
+                                                     out_group);
 }
 
 // Returns a bitset with all *processors* that share the same |cache|.
@@ -162,30 +235,13 @@ static uint64_t iree_task_topology_calculate_constructive_sharing_mask(
   return mask;
 }
 
-// Populates |our_group| with the information from |core|.
-static void iree_task_topology_group_initialize_from_core(
-    uint32_t group_index, const struct cpuinfo_core* core,
-    iree_task_topology_group_t* out_group) {
-  iree_task_topology_group_initialize(group_index, out_group);
-
-  // Guess: always pick the first processor in a core.
-  // When pinning to threads we'll take into account whether the core is SMT
-  // and use all threads anyway so this alignment is just helpful for debugging.
-  uint32_t processor_i = core->processor_start;
-  out_group->processor_index = processor_i;
-
-  const struct cpuinfo_processor* processor =
-      cpuinfo_get_processor(processor_i);
-  iree_task_topology_set_affinity_from_processor(
-      processor, &out_group->ideal_thread_affinity);
-}
-
-// Fixes constructive_sharing_mask values such that they represent other chosen
-// topology groups instead of processor indices. We do this so that code using
-// the topology groups doesn't need to know anything about which physical
-// processor IDs a particular group is mapped to.
-static void iree_task_topology_fixup_constructive_sharing_masks(
+iree_status_t iree_task_topology_fixup_constructive_sharing_masks(
     iree_task_topology_t* topology) {
+  if (!iree_task_topology_is_cpuinfo_available()) {
+    // No-op when cpuinfo is unavailable.
+    return iree_ok_status();
+  }
+
   // O(n^2), but n is always <= 64 (and often <= 8).
   for (iree_host_size_t i = 0; i < topology->group_count; ++i) {
     iree_task_topology_group_t* group = &topology->groups[i];
@@ -197,7 +253,6 @@ static void iree_task_topology_fixup_constructive_sharing_masks(
 
     iree_task_topology_group_mask_t group_mask = 0;
     for (iree_host_size_t j = 0; j < topology->group_count; ++j) {
-      if (i == j) continue;
       const iree_task_topology_group_t* other_group = &topology->groups[j];
       uint64_t group_processor_bits =
           iree_math_rotl_u64(1ull, other_group->processor_index);
@@ -208,42 +263,125 @@ static void iree_task_topology_fixup_constructive_sharing_masks(
 
     group->constructive_sharing_mask = group_mask;
   }
+
+  return iree_ok_status();
+}
+
+iree_status_t iree_task_topology_initialize_from_logical_cpu_set(
+    iree_host_size_t cpu_count, const uint32_t* cpu_ids,
+    iree_task_topology_t* out_topology) {
+  // Ensure cpuinfo is available; if not we fall back to random.
+  if (!iree_task_topology_is_cpuinfo_available()) {
+    iree_task_topology_initialize_fallback(cpu_count, out_topology);
+    return iree_ok_status();
+  }
+
+  // Today we have a fixed limit on the number of groups within a particular
+  // topology.
+  if (cpu_count >= IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "too many CPUs specified (%" PRIhsz
+                            " provided for a max capacity of %zu)",
+                            cpu_count, IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT);
+  }
+
+  // Validate the CPU IDs provided.
+  const uint32_t processor_count = cpuinfo_get_processors_count();
+  for (iree_host_size_t i = 0; i < cpu_count; ++i) {
+    if (cpu_ids[i] >= processor_count) {
+      return iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "cpu_ids[%" PRIhsz
+          "] %u out of bounds, only %u logical processors available",
+          i, cpu_ids[i], processor_count);
+    }
+  }
+
+  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, cpu_count);
+
+  iree_task_topology_initialize(out_topology);
+
+  out_topology->group_count = cpu_count;
+  for (iree_host_size_t i = 0; i < cpu_count; ++i) {
+    const struct cpuinfo_processor* processor =
+        cpuinfo_get_processor(cpu_ids[i]);
+    iree_task_topology_group_initialize_from_processor(
+        i, processor, &out_topology->groups[i]);
+  }
+
+  iree_status_t status =
+      iree_task_topology_fixup_constructive_sharing_masks(out_topology);
+  IREE_TRACE_ZONE_END(z0);
+  return status;
 }
 
 // Returns true if the given |core| passes the filter and should be included.
 // |user_data| is the value passed alongside the filter function.
 typedef bool (*iree_task_topology_core_filter_t)(
-    const struct cpuinfo_core* core, uintptr_t user_data);
+    const struct cpuinfo_core* core, void* user_data);
 
-// Matches all cores.
-static bool iree_task_topology_core_filter_all(const struct cpuinfo_core* core,
-                                               uintptr_t user_data) {
-  return true;
-}
+typedef struct iree_task_topology_core_filter_params_t {
+  uint32_t cluster_id;
+  iree_task_topology_performance_level_t performance_level;
+} iree_task_topology_core_filter_params_t;
 
 // Matches all cores that have the provided cluster ID.
 static bool iree_task_topology_core_filter_by_cluster_id(
-    const struct cpuinfo_core* core, uintptr_t user_data) {
-  uint32_t cluster_id = (uint32_t)user_data;
-  if (cluster_id == IREE_TASK_TOPOLOGY_NODE_ID_ANY) return true;
-  return core->cluster->cluster_id == cluster_id;
+    const struct cpuinfo_core* core, void* user_data) {
+  const iree_task_topology_core_filter_params_t* params =
+      (const iree_task_topology_core_filter_params_t*)user_data;
+  if (params->cluster_id != IREE_TASK_TOPOLOGY_NODE_ID_ANY &&
+      core->cluster->cluster_id != params->cluster_id) {
+    return false;
+  }
+  // cpuinfo doesn't expose performance levels and instead we have to switch on
+  // uarch - yuck.
+  iree_task_topology_performance_level_t core_performance_level =
+      IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_ANY;
+  switch (core->uarch) {
+    default:
+      // Unknown or homogeneous.
+      core_performance_level = IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_ANY;
+      break;
+    case cpuinfo_uarch_monsoon:    // Apple A11 big core
+    case cpuinfo_uarch_vortex:     // Apple A12 big core
+    case cpuinfo_uarch_lightning:  // Apple A13 big core
+    case cpuinfo_uarch_firestorm:  // Apple A14 big core
+    case cpuinfo_uarch_avalanche:  // Apple A15 big core
+      core_performance_level = IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_HIGH;
+      break;
+    case cpuinfo_uarch_mistral:   // Apple A11 little core
+    case cpuinfo_uarch_tempest:   // Apple A12 little core
+    case cpuinfo_uarch_thunder:   // Apple A13 little core
+    case cpuinfo_uarch_icestorm:  // Apple A14 little core
+    case cpuinfo_uarch_blizzard:  // Apple A15 little core
+      core_performance_level = IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_LOW;
+      break;
+  }
+  if (core_performance_level == IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_ANY) {
+    // Unable to distinguish/homogenous cores, always match.
+    return true;
+  }
+  return core_performance_level == params->performance_level;
 }
 
 // Initializes a topology with one group for each core that matches |filter_fn|.
 //
 // If cpuinfo is not available this falls back to the same behavior as
 // iree_task_topology_initialize_from_physical_cores.
-static void iree_task_topology_initialize_from_physical_cores_with_filter(
-    iree_task_topology_core_filter_t filter_fn, uintptr_t filter_fn_data,
+static iree_status_t
+iree_task_topology_initialize_from_physical_cores_with_filter(
+    iree_task_topology_core_filter_t filter_fn, void* filter_fn_data,
     iree_host_size_t max_core_count, iree_task_topology_t* out_topology) {
-  max_core_count = iree_min(max_core_count, IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT);
   if (!iree_task_topology_is_cpuinfo_available()) {
     iree_task_topology_initialize_fallback(max_core_count, out_topology);
-    return;
+    return iree_ok_status();
   }
 
+  max_core_count = iree_min(max_core_count, IREE_TASK_TOPOLOGY_GROUP_BIT_COUNT);
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, max_core_count);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, max_core_count);
 
   // Count cores that match the filter.
   iree_host_size_t core_count = 0;
@@ -275,16 +413,26 @@ static void iree_task_topology_initialize_from_physical_cores_with_filter(
     }
   }
 
-  iree_task_topology_fixup_constructive_sharing_masks(out_topology);
+  iree_status_t status =
+      iree_task_topology_fixup_constructive_sharing_masks(out_topology);
   IREE_TRACE_ZONE_END(z0);
+  return status;
 }
 
-void iree_task_topology_initialize_from_physical_cores(
-    iree_task_topology_node_id_t node_id, iree_host_size_t max_core_count,
-    iree_task_topology_t* out_topology) {
-  iree_task_topology_initialize_from_physical_cores_with_filter(
-      iree_task_topology_core_filter_by_cluster_id, (uintptr_t)node_id,
-      max_core_count, out_topology);
+iree_status_t iree_task_topology_initialize_from_physical_cores(
+    iree_task_topology_node_id_t node_id,
+    iree_task_topology_performance_level_t performance_level,
+    iree_host_size_t max_core_count, iree_task_topology_t* out_topology) {
+  iree_task_topology_core_filter_params_t params = {
+      .cluster_id = node_id,
+      .performance_level = performance_level,
+  };
+  return iree_task_topology_initialize_from_physical_cores_with_filter(
+      iree_task_topology_core_filter_by_cluster_id, &params, max_core_count,
+      out_topology);
 }
 
 #endif  // IREE_TASK_CPUINFO_DISABLED
+
+#endif  // !IREE_PLATFORM_APPLE && !IREE_PLATFORM_EMSCRIPTEN &&
+        // !IREE_PLATFORM_WINDOWS

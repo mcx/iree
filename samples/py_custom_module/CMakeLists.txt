@@ -8,6 +8,11 @@ if(NOT IREE_BUILD_PYTHON_BINDINGS)
   return()
 endif()
 
+# These tests use compiler APIs as well as runtime APIs.
+if(NOT IREE_BUILD_COMPILER)
+  return()
+endif()
+
 iree_py_test(
   NAME
     decode_secret_message_sample

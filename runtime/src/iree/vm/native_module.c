@@ -57,12 +57,12 @@ static iree_status_t iree_vm_native_module_verify_descriptor(
     iree_string_view_t export_name = module_descriptor->exports[i].local_name;
     int cmp = iree_string_view_compare(prev_export_name, export_name);
     if (IREE_UNLIKELY(cmp >= 0)) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "module export table is not sorted by name "
-                              "(export %zu ('%.*s') >= %zu ('%.*s'))",
-                              i - 1, (int)prev_export_name.size,
-                              prev_export_name.data, i, (int)export_name.size,
-                              export_name.data);
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "module export table is not sorted by name "
+          "(export %" PRIhsz " ('%.*s') >= %" PRIhsz " ('%.*s'))",
+          i - 1, (int)prev_export_name.size, prev_export_name.data, i,
+          (int)export_name.size, export_name.data);
     }
   }
   return iree_ok_status();
@@ -140,7 +140,8 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_get_import_function(
     iree_vm_function_signature_t* out_signature) {
   if (IREE_UNLIKELY(ordinal >= module->descriptor->import_count)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "import ordinal out of range (0 < %zu < %zu)",
+                            "import ordinal out of range (0 < %" PRIhsz
+                            " < %" PRIhsz ")",
                             ordinal, module->descriptor->import_count);
   }
   const iree_vm_native_import_descriptor_t* import_descriptor =
@@ -165,7 +166,8 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_get_export_function(
     iree_vm_function_signature_t* out_signature) {
   if (IREE_UNLIKELY(ordinal >= module->descriptor->export_count)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "export ordinal out of range (0 < %zu < %zu)",
+                            "export ordinal out of range (0 < %" PRIhsz
+                            " < %" PRIhsz ")",
                             ordinal, module->descriptor->export_count);
   }
   if (out_function) {
@@ -202,6 +204,7 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_get_function(
       return iree_vm_native_module_get_import_function(
           module, ordinal, out_function, out_name, out_signature);
     case IREE_VM_FUNCTION_LINKAGE_EXPORT:
+    case IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL:
       return iree_vm_native_module_get_export_function(
           module, ordinal, out_function, out_name, out_signature);
     default:
@@ -219,22 +222,38 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_get_function_attr(
     return module->user_interface.get_function_attr(module->self, linkage,
                                                     ordinal, index, out_attr);
   }
-  // TODO(benvanik): implement native module reflection.
-  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                          "reflection not yet implemented");
+  if (linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT &&
+      linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "only exported functions can be queried");
+  } else if (ordinal >= module->descriptor->export_count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "function ordinal out of range (0 < %" PRIhsz
+                            " < %" PRIhsz ")",
+                            ordinal, module->descriptor->export_count);
+  }
+  const iree_vm_native_export_descriptor_t* descriptor =
+      &module->descriptor->exports[ordinal];
+  if (index >= descriptor->attr_count) {
+    return iree_status_from_code(IREE_STATUS_OUT_OF_RANGE);
+  }
+  *out_attr = descriptor->attrs[index];
+  return iree_ok_status();
 }
 
 static iree_status_t IREE_API_PTR iree_vm_native_module_lookup_function(
     void* self, iree_vm_function_linkage_t linkage, iree_string_view_t name,
+    const iree_vm_function_signature_t* expected_signature,
     iree_vm_function_t* out_function) {
   iree_vm_native_module_t* module = (iree_vm_native_module_t*)self;
   memset(out_function, 0, sizeof(*out_function));
   if (module->user_interface.lookup_function) {
-    return module->user_interface.lookup_function(module->self, linkage, name,
-                                                  out_function);
+    return module->user_interface.lookup_function(
+        module->self, linkage, name, expected_signature, out_function);
   }
 
-  if (IREE_UNLIKELY(linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT)) {
+  if (IREE_UNLIKELY(linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT &&
+                    linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL)) {
     // NOTE: we could support imports if required.
     return iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
@@ -258,10 +277,13 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_lookup_function(
       max_ordinal = ordinal - 1;
     }
   }
+  if (linkage == IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL) {
+    return iree_status_from_code(IREE_STATUS_NOT_FOUND);  // lightweight fail
+  }
   return iree_make_status(
-      IREE_STATUS_NOT_FOUND, "no function %.*s.%.*s exported by module",
-      (int)module->descriptor->name.size, module->descriptor->name.data,
-      (int)name.size, name.data);
+      IREE_STATUS_NOT_FOUND, "no function `%.*s` exported by module `%.*s`",
+      (int)name.size, name.data, (int)module->descriptor->name.size,
+      module->descriptor->name.data);
 }
 
 static iree_status_t IREE_API_PTR
@@ -286,6 +308,24 @@ static void IREE_API_PTR iree_vm_native_module_free_state(
   }
   // No-op in the default implementation.
   IREE_ASSERT_EQ(module_state, NULL);
+}
+
+static iree_status_t IREE_API_PTR iree_vm_native_module_fork_state(
+    void* self, iree_vm_module_state_t* parent_state,
+    iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+  iree_vm_native_module_t* module = (iree_vm_native_module_t*)self;
+  if (module->user_interface.fork_state) {
+    return module->user_interface.fork_state(module->self, parent_state,
+                                             allocator, out_child_state);
+  }
+  // No-op in the default implementation. If any state is allocated the target
+  // must implement the fork_state function.
+  IREE_ASSERT_EQ(parent_state, NULL);
+  return parent_state
+             ? iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                                "native module must implement fork_state if it "
+                                "provides module state")
+             : iree_ok_status();
 }
 
 static iree_status_t IREE_API_PTR iree_vm_native_module_resolve_import(
@@ -322,7 +362,7 @@ static iree_status_t iree_vm_native_module_issue_call(
       &module->descriptor->functions[function_ordinal];
   iree_status_t status =
       function_ptr->shim(stack, flags, args_storage, rets_storage,
-                         function_ptr->target, module, module_state);
+                         function_ptr->target, module->self, module_state);
   if (iree_status_is_deferred(status)) {
     // Call deferred; bail and return to the scheduler.
     // Note that we preserve the stack.
@@ -353,11 +393,13 @@ static iree_status_t iree_vm_native_module_issue_call(
 static iree_status_t IREE_API_PTR iree_vm_native_module_begin_call(
     void* self, iree_vm_stack_t* stack, iree_vm_function_call_t call) {
   iree_vm_native_module_t* module = (iree_vm_native_module_t*)self;
-  if (IREE_UNLIKELY(call.function.linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT) ||
+  if (IREE_UNLIKELY(call.function.linkage != IREE_VM_FUNCTION_LINKAGE_EXPORT &&
+                    call.function.linkage !=
+                        IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL) ||
       IREE_UNLIKELY(call.function.ordinal >=
                     module->descriptor->export_count)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "function ordinal out of bounds: 0 < %u < %zu",
+                            "function ordinal out of bounds: 0 < %u < %" PRIhsz,
                             call.function.ordinal,
                             module->descriptor->export_count);
   }
@@ -400,22 +442,22 @@ static iree_status_t IREE_API_PTR iree_vm_native_module_resume_call(
 }
 
 IREE_API_EXPORT iree_status_t iree_vm_native_module_create(
-    const iree_vm_module_t* interface,
+    const iree_vm_module_t* module_interface,
     const iree_vm_native_module_descriptor_t* module_descriptor,
     iree_vm_instance_t* instance, iree_allocator_t allocator,
     iree_vm_module_t** out_module) {
-  IREE_ASSERT_ARGUMENT(interface);
+  IREE_ASSERT_ARGUMENT(module_interface);
   IREE_ASSERT_ARGUMENT(module_descriptor);
   IREE_ASSERT_ARGUMENT(instance);
   IREE_ASSERT_ARGUMENT(out_module);
   *out_module = NULL;
 
-  if (IREE_UNLIKELY(!interface->begin_call) &&
+  if (IREE_UNLIKELY(!module_interface->begin_call) &&
       IREE_UNLIKELY(!module_descriptor->functions)) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "native modules must provide call support or function pointers");
-  } else if (IREE_UNLIKELY(!interface->begin_call) &&
+  } else if (IREE_UNLIKELY(!module_interface->begin_call) &&
              IREE_UNLIKELY(module_descriptor->export_count !=
                            module_descriptor->function_count)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -438,9 +480,9 @@ IREE_API_EXPORT iree_status_t iree_vm_native_module_create(
   IREE_RETURN_IF_ERROR(
       iree_allocator_malloc(allocator, sizeof(*module), (void**)&module));
 
-  iree_status_t status =
-      iree_vm_native_module_initialize(interface, module_descriptor, instance,
-                                       allocator, (iree_vm_module_t*)module);
+  iree_status_t status = iree_vm_native_module_initialize(
+      module_interface, module_descriptor, instance, allocator,
+      (iree_vm_module_t*)module);
   if (!iree_status_is_ok(status)) {
     iree_allocator_free(allocator, module);
     return status;
@@ -451,22 +493,22 @@ IREE_API_EXPORT iree_status_t iree_vm_native_module_create(
 }
 
 IREE_API_EXPORT iree_status_t iree_vm_native_module_initialize(
-    const iree_vm_module_t* interface,
+    const iree_vm_module_t* module_interface,
     const iree_vm_native_module_descriptor_t* module_descriptor,
     iree_vm_instance_t* instance, iree_allocator_t allocator,
     iree_vm_module_t* base_module) {
-  IREE_ASSERT_ARGUMENT(interface);
+  IREE_ASSERT_ARGUMENT(module_interface);
   IREE_ASSERT_ARGUMENT(module_descriptor);
   IREE_ASSERT_ARGUMENT(instance);
   IREE_ASSERT_ARGUMENT(base_module);
   iree_vm_native_module_t* module = (iree_vm_native_module_t*)base_module;
 
-  if (IREE_UNLIKELY(!interface->begin_call) &&
+  if (IREE_UNLIKELY(!module_interface->begin_call) &&
       IREE_UNLIKELY(!module_descriptor->functions)) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "native modules must provide call support or function pointers");
-  } else if (IREE_UNLIKELY(!interface->begin_call) &&
+  } else if (IREE_UNLIKELY(!module_interface->begin_call) &&
              IREE_UNLIKELY(module_descriptor->export_count !=
                            module_descriptor->function_count)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -483,7 +525,7 @@ IREE_API_EXPORT iree_status_t iree_vm_native_module_initialize(
   module->descriptor = module_descriptor;
 
   // TODO(benvanik): version interface and copy only valid bytes.
-  memcpy(&module->user_interface, interface, sizeof(*interface));
+  memcpy(&module->user_interface, module_interface, sizeof(*module_interface));
   module->self =
       module->user_interface.self ? module->user_interface.self : module;
 
@@ -503,6 +545,7 @@ IREE_API_EXPORT iree_status_t iree_vm_native_module_initialize(
       iree_vm_native_module_get_function_attr;
   module->base_interface.alloc_state = iree_vm_native_module_alloc_state;
   module->base_interface.free_state = iree_vm_native_module_free_state;
+  module->base_interface.fork_state = iree_vm_native_module_fork_state;
   module->base_interface.resolve_import = iree_vm_native_module_resolve_import;
   module->base_interface.notify = iree_vm_native_module_notify;
   module->base_interface.begin_call = iree_vm_native_module_begin_call;

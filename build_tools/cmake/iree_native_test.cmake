@@ -16,6 +16,7 @@ include(CMakeParseArguments)
 # NAME: name of target
 # DRIVER: If specified, will pass --device=DRIVER to the test binary and adds
 #     a driver label to the test.
+#     TODO(scotttodd): Remove automatic args/labels, push those up a level
 # DATA: Additional input files needed by the test binary. When running tests on
 #     a separate device (e.g. Android), these files will be pushed to the
 #     device. TEST_INPUT_FILE_ARG is automatically added if specified.
@@ -26,6 +27,7 @@ include(CMakeParseArguments)
 #     pass the file arguments to tests and add the file to DATA.
 # SRC: binary target to run as the test.
 # WILL_FAIL: The target will run, but its pass/fail status will be inverted.
+# DISABLED: The target will be skipped and its status will be 'Not Run'.
 # LABELS: Additional labels to apply to the test. The package path is added
 #     automatically.
 # TIMEOUT: Test target timeout in seconds.
@@ -56,7 +58,7 @@ function(iree_native_test)
   cmake_parse_arguments(
     _RULE
     ""
-    "NAME;SRC;DRIVER;WILL_FAIL"
+    "NAME;SRC;DRIVER;WILL_FAIL;DISABLED"
     "ARGS;LABELS;DATA;TIMEOUT"
     ${ARGN}
   )
@@ -123,8 +125,8 @@ function(iree_native_test)
         "TEST_TMPDIR=${_ANDROID_ABS_DIR}/test_tmpdir"
     )
     set_property(TEST ${_TEST_NAME} PROPERTY ENVIRONMENT ${_ENVIRONMENT_VARS})
-  elseif((CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64" OR
-          CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv32") AND
+  elseif((IREE_ARCH STREQUAL "riscv_64" OR
+          IREE_ARCH STREQUAL "riscv_32") AND
          CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # The test target needs to run within the QEMU emulator for RV64 Linux
     # crosscompile build or on-device.
@@ -133,6 +135,16 @@ function(iree_native_test)
         ${_TEST_NAME}
       COMMAND
         "${IREE_ROOT_DIR}/build_tools/cmake/run_riscv_test.sh"
+        "$<TARGET_FILE:${_SRC_TARGET}>"
+        ${_TEST_ARGS}
+    )
+    iree_configure_test(${_TEST_NAME})
+  elseif(IREE_ARCH STREQUAL "arm_64" AND "requires-arm-sme" IN_LIST _RULE_LABELS)
+    add_test(
+      NAME
+        ${_TEST_NAME}
+      COMMAND
+        "${IREE_ROOT_DIR}/build_tools/cmake/run_arm_sme_test.sh"
         "$<TARGET_FILE:${_SRC_TARGET}>"
         ${_TEST_ARGS}
     )
@@ -158,5 +170,8 @@ function(iree_native_test)
   set_property(TEST ${_TEST_NAME} PROPERTY TIMEOUT ${_RULE_TIMEOUT})
   if(_RULE_WILL_FAIL)
     set_property(TEST ${_TEST_NAME} PROPERTY WILL_FAIL ${_RULE_WILL_FAIL})
+  endif()
+  if(_RULE_DISABLED)
+    set_property(TEST ${_TEST_NAME} PROPERTY DISABLED ${_RULE_DISABLED})
   endif()
 endfunction()

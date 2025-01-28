@@ -6,42 +6,93 @@
 
 #include "iree/compiler/Dialect/Stream/Conversion/PatternUtils.h"
 
+#include "iree/compiler/Dialect/Flow/IR/FlowTypes.h"
+#include "iree/compiler/Dialect/Stream/Analysis/Affinity.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
-ConvertedTensor consumeTensorOperand(Location loc, Value operand,
-                                     OpBuilder &builder) {
-  auto operandType = operand.getType();
-  if (operandType.isa<IREE::Stream::ResourceType>()) {
-    // Prior to https://reviews.llvm.org/D111620 this is the path we'd take;
-    // the tensor operands would be remapped into their new resource types.
-    // This is still possible during rewriting if we ourselves produce a new
-    // resource type, but the automatic materialization will go down the
-    // unrealized_conversion_cast path below.
-    return {
-        operand,
-        builder.createOrFold<IREE::Stream::ResourceSizeOp>(
-            loc, builder.getIndexType(), operand),
-    };
-  } else if (auto castOp =
-                 operand.getDefiningOp<mlir::UnrealizedConversionCastOp>()) {
-    // We only have a single tensor type conversion and it expands to (resource,
-    // size) so that's all we look for here.
-    assert(castOp.getNumOperands() == 2 && "expected (resource, size)");
-    return {
-        castOp.getOperand(0),
-        castOp.getOperand(1),
-    };
+TypedAttr convertAttributeToStream(TypedAttr attr) {
+  if (!attr)
+    return {};
+  if (auto parameterAttr = dyn_cast<IREE::Flow::NamedParameterAttr>(attr)) {
+    return IREE::Stream::NamedParameterAttr::get(
+        attr.getContext(), parameterAttr.getType(), parameterAttr.getScope(),
+        parameterAttr.getKey(), parameterAttr.getConfig());
   }
-  assert(false &&
-         "unexpected operand; expected either a IREE::Stream::ResourceType or "
-         "the result of a mlir::UnrealizedConversionCastOp");
-  return ConvertedTensor();
+  return attr;
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+IREE::Stream::AffinityAttr
+tryLookupGlobalAffinity(Operation *op,
+                        IREE::Stream::AffinityAnalysis *affinityAnalysis) {
+  return affinityAnalysis->lookupGlobalAffinity(op);
+}
+
+IREE::Stream::AffinityAttr
+tryLookupExecutionAffinity(Operation *op,
+                           IREE::Stream::AffinityAnalysis *affinityAnalysis) {
+  assert(llvm::isa<IREE::Stream::AffinityOpInterface>(op) &&
+         "must be an affinity op");
+  return affinityAnalysis->lookupExecutionAffinity(op);
+}
+
+IREE::Stream::AffinityAttr
+tryLookupResultAffinity(Value value,
+                        IREE::Stream::AffinityAnalysis *affinityAnalysis) {
+  return affinityAnalysis->lookupResourceAffinity(value);
+}
+
+ConvertedTensor resolveTensorOperands(
+    Location loc, Value originalOperand, ValueRange convertedOperand,
+    IREE::Stream::AffinityAnalysis *affinityAnalysis, OpBuilder &builder) {
+  assert(convertedOperand.size() == 2 &&
+         "expected tensor operands to be converted to `!stream.resource<*>, "
+         "index`");
+  auto affinityAttr = affinityAnalysis->lookupResourceAffinity(originalOperand);
+  return {affinityAttr, convertedOperand[0], convertedOperand[1]};
+}
+
+ConvertedTensor transferTensorOperands(
+    Location loc, Value originalOperand, ValueRange convertedOperand,
+    IREE::Stream::AffinityAttr requiredAffinityAttr,
+    IREE::Stream::AffinityAnalysis *affinityAnalysis, OpBuilder &builder) {
+  assert(convertedOperand.size() == 2 &&
+         "expected tensor operands to be converted to `!stream.resource<*>, "
+         "index`");
+  Value resource = convertedOperand[0];
+  Value resourceSize = convertedOperand[1];
+  auto affinityAttr = affinityAnalysis->lookupResourceAffinity(originalOperand);
+  bool isBarrier = resource.getDefiningOp() &&
+                   isa<IREE::Stream::AsyncBarrierOp>(resource.getDefiningOp());
+  if (affinityAttr != requiredAffinityAttr && !isBarrier) {
+    resource = builder.create<IREE::Stream::AsyncTransferOp>(
+        loc, resource.getType(), resource, resourceSize, resourceSize,
+        affinityAttr, requiredAffinityAttr);
+  }
+  return {requiredAffinityAttr, resource, resourceSize};
+}
+
+void replaceOpWithMultiple(Operation *op,
+                           ArrayRef<SmallVector<Value>> replacements,
+                           ConversionPatternRewriter &rewriter) {
+  auto r = llvm::map_to_vector(
+      replacements, [](ArrayRef<Value> v) -> ValueRange { return v; });
+  rewriter.replaceOpWithMultiple(op, r);
+}
+
+void replaceOpWithMultiple(Operation *op, ValueRange resources,
+                           ValueRange sizes,
+                           ConversionPatternRewriter &rewriter) {
+  SmallVector<SmallVector<Value>> replacements = llvm::map_to_vector(
+      llvm::zip_equal(resources, sizes), [](auto it) -> SmallVector<Value> {
+        if (std::get<1>(it)) {
+          return {std::get<0>(it), std::get<1>(it)};
+        }
+        return {std::get<0>(it)};
+      });
+  replaceOpWithMultiple(op, replacements, rewriter);
+}
+
+} // namespace mlir::iree_compiler

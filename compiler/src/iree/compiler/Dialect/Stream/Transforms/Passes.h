@@ -8,24 +8,68 @@
 #define IREE_COMPILER_DIALECT_STREAM_TRANSFORMS_PASSES_H_
 
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "llvm/ADT/StringMap.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::func {
+class FuncDialect;
+} // namespace mlir::func
+
+namespace mlir::iree_compiler::IREE::Stream {
 
 //===----------------------------------------------------------------------===//
 // Pipelines
 //===----------------------------------------------------------------------===//
 
+// TODO(benvanik): find a way to share option enums with the top-level Options.h
+// w/o circular deps.
+
+// Defines the behavior of initialization.
+enum class InitializationMode {
+  // Synchronously initialize all parameters and globals prior to returning
+  // from the module initializer.
+  Synchronous = 0,
+  // Asynchronously initialize all parameters and globals and return
+  // immediately from the module initializer without waiting for them to
+  // complete. Subsequent invocations will queue waiting for any dependencies
+  // they have on the initialized values.
+  Asynchronous = 1,
+};
+
+// TODO(benvanik): find a way to share this with Options.h w/o circular deps.
+// Defines the output format of a dump pass.
+enum class DumpOutputFormat {
+  // Dumping disabled.
+  None = 0,
+  // Human-readable pretty printing.
+  Pretty = 1,
+  // Pretty printing with additional information that can result in large dumps.
+  Verbose = 2,
+  // Comma separated values for throwing into Sheets.
+  CSV = 3,
+  // JSON format for better structure and data exchange.
+  JSON = 4,
+};
+
 struct TransformOptions : public PassPipelineOptions<TransformOptions> {
-  // TODO(benvanik): options for async/sync overrides.
+  Option<InitializationMode> initializationMode{
+      *this,
+      "initialization-mode",
+      llvm::cl::desc(
+          "Specifies the initialization mode for parameters and globals."),
+      llvm::cl::init(InitializationMode::Synchronous),
+      llvm::cl::values(
+          clEnumValN(InitializationMode::Synchronous, "sync",
+                     "Synchronously initialize all parameters and globals "
+                     "prior to returning from the module initializer."),
+          clEnumValN(InitializationMode::Asynchronous, "async",
+                     "Asynchronously initialize all parameters and globals and "
+                     "return immediately from the module initializer without "
+                     "waiting for them to complete.")),
+  };
 
   Option<bool> optimizeBindings{
       *this,
@@ -92,96 +136,14 @@ void buildStreamOptimizationPassPipeline(
 void registerStreamTransformPassPipelines();
 
 //===----------------------------------------------------------------------===//
-// Optimizations
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createOutlineConstantsPass();
-
-//===----------------------------------------------------------------------===//
-// Conversion
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createConvertToStreamPass();
-
-//===----------------------------------------------------------------------===//
-// Tensor lowering and resource management
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<>> createEncodeHostTensorsPass();
-std::unique_ptr<OperationPass<>> createEncodeDeviceTensorsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createMaterializeBuiltinsPass();
-std::unique_ptr<OperationPass<>> createMaterializeCopyOnWritePass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createElideAsyncCopiesPass();
-std::unique_ptr<OperationPass<>> createEmplaceAllocationsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createRefineUsagePass();
-
-//===----------------------------------------------------------------------===//
-// Stream formation and scheduling
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<InterfacePass<CallableOpInterface>>
-createScheduleExecutionPass();
-std::unique_ptr<InterfacePass<CallableOpInterface>>
-createScheduleConcurrencyPass();
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createPropagateTimepointsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createElideTimepointsPass();
-
-//===----------------------------------------------------------------------===//
-// Allocation and command issuing
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<InterfacePass<CallableOpInterface>>
-createScheduleAllocationPass();
-
-std::unique_ptr<InterfacePass<CallableOpInterface>> createPackConstantsPass();
-std::unique_ptr<InterfacePass<CallableOpInterface>> createPackAllocationsPass();
-std::unique_ptr<InterfacePass<CallableOpInterface>> createLayoutSlicesPass();
-
-//===----------------------------------------------------------------------===//
-// Memoization
-//===----------------------------------------------------------------------===//
-
-// TODO(benvanik): outline streams (ala dispatch regions).
-// TODO(benvanik): deduplicate outlined streams.
-
-std::unique_ptr<OperationPass<ModuleOp>> createMemoizeChannelsPass();
-
-//===----------------------------------------------------------------------===//
-// Dispatch optimization
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createFoldUniformOperandsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createFuseDispatchBindingsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createSpecializeDispatchesPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createAnnotateDispatchArgumentsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createPackDispatchOperandsPass();
-
-//===----------------------------------------------------------------------===//
-// Diagnostics
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createDumpStatisticsPass(
-    DumpOutputFormat outputFormat = DumpOutputFormat::Pretty,
-    std::string outputFile = "");
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createVerifyInputPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createVerifyLoweringToTensorsPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createVerifyLoweringToAsyncPass();
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createVerifyLoweringToCmdPass();
-
-//===----------------------------------------------------------------------===//
 // Register all Passes
 //===----------------------------------------------------------------------===//
 
+#define GEN_PASS_DECL
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc" // IWYU pragma: keep
+
 void registerStreamPasses();
 
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream
 
-#endif  // IREE_COMPILER_DIALECT_STREAM_TRANSFORMS_PASSES_H_
+#endif // IREE_COMPILER_DIALECT_STREAM_TRANSFORMS_PASSES_H_

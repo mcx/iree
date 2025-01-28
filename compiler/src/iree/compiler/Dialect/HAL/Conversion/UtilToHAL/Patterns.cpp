@@ -9,25 +9,24 @@
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/Util/Conversion/ConversionPatterns.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 namespace {
 
 struct GlobalConversionPattern
     : public OpConversionPattern<IREE::Util::GlobalOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::GlobalOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::GlobalOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto newType = getTypeConverter()->convertType(op.getType());
-    if (newType == op.getType()) return failure();
-    rewriter.updateRootInPlace(op, [&]() {
+    if (newType == op.getType())
+      return failure();
+    rewriter.modifyOpInPlace(op, [&]() {
       // NOTE: the initial value may be invalid here! We rely on
       // dialect-specific conversions to handle it.
       op.setTypeAttr(TypeAttr::get(newType));
@@ -36,7 +35,7 @@ struct GlobalConversionPattern
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateUtilToHALPatterns(MLIRContext *context,
                                ConversionTarget &conversionTarget,
@@ -62,5 +61,4 @@ void populateUtilToHALPatterns(MLIRContext *context,
                                               typeConverter, patterns);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

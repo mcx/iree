@@ -1,5 +1,4 @@
-// RUN: iree-compile --iree-hal-target-backends=vmvx %s | iree-check-module --device=local-task -
-// RUN: [[ $IREE_VULKAN_DISABLE == 1 ]] || (iree-compile --iree-hal-target-backends=vulkan-spirv %s | iree-check-module --device=vulkan -)
+// RUN: iree-compile --iree-hal-target-backends=vmvx %s | iree-check-module --device=local-task --module=-
 
 func.func @expect_true() {
   %true = util.unfoldable_constant 1 : i32
@@ -14,9 +13,11 @@ func.func @expect_false() {
 }
 
 func.func @expect_all_true() {
+  %c0 = arith.constant 0 : index
+  %device = hal.devices.get %c0 : !hal.device
   %all_true = util.unfoldable_constant dense<1> : tensor<2x2xi32>
   %all_true_view = hal.tensor.export %all_true : tensor<2x2xi32> -> !hal.buffer_view
-  check.expect_all_true(%all_true_view) : !hal.buffer_view
+  check.expect_all_true<%device>(%all_true_view) : !hal.buffer_view
   return
 }
 
@@ -72,7 +73,6 @@ func.func @floats() {
   %p8 = arith.addf %p7, %cp1 : tensor<f32>
   %p9 = arith.addf %p8, %cp1 : tensor<f32>
   %approximately_1 = arith.addf %p9, %cp1 : tensor<f32>
-
   check.expect_almost_eq(%approximately_1, %c1) : tensor<f32>
   return
 }

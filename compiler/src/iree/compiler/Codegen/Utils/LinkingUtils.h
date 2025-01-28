@@ -8,27 +8,60 @@
 #define IREE_COMPILER_CODEGEN_UTILS_LINKINGUTILS_H_
 
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Returns a uniqued set of all targets in |executableOps|.
-SetVector<IREE::HAL::ExecutableTargetAttr> gatherExecutableTargets(
-    ArrayRef<IREE::HAL::ExecutableOp> executableOps);
+SetVector<IREE::HAL::ExecutableTargetAttr>
+gatherExecutableTargets(ArrayRef<IREE::HAL::ExecutableOp> executableOps);
+
+// Returns a set of executables that contain one or more variants for the given
+// target backend name.
+SmallVector<IREE::HAL::ExecutableOp>
+gatherExecutablesForTarget(mlir::ModuleOp moduleOp, StringRef targetName);
+
+static inline bool allowRenamingPrivateSymbols(Operation *op) {
+  return SymbolTable::getSymbolVisibility(op) ==
+         SymbolTable::Visibility::Private;
+}
+
+// Destructively merges |sourceModuleOp| into |targetModuleOp|.
+// |targetSymbolMap| is updated with the new symbols.
+//
+// If a private symbol in |sourceModuleOp| conflicts with another symbol
+// (public or private) tracked in |targetSymbolMap|, it will be renamed.
+//
+// Fails if a public symbol in |sourceModuleOp| conflicts with another public
+// symbol tracked in |targetSymbolMap|.
+//
+// TODO(benvanik): replace with iree/compiler/Utils/ModuleUtils.h version.
+// Only difference is one has the symbol map that we don't even need.
+LogicalResult
+mergeModuleInto(Operation *sourceModuleOp, Operation *targetModuleOp,
+                DenseMap<StringRef, Operation *> &targetSymbolMap,
+                std::function<bool(mlir::Operation *op)> canRenameSymbol =
+                    allowRenamingPrivateSymbols);
 
 // Links all executables for the current target found in |moduleOp| into
-// |linkedExecutableOp|. Functions will be cloned into |linkedModuleOp|.
+// |linkedExecutableOp|. Functions will be moved into |linkedModuleOp|.
+//
+// |sourceExecutableOps| will be updated to remove source executable ops once
+// they are fully merged into |linkedModuleOp|.
+//
+// |mergeInnerModuleFn| is a function that specifies how to merge the contents
+// in |sourceInnerModule| into the |linkedInnerModule|, and updates the
+// |symbolMap| along the way.
 LogicalResult linkExecutablesInto(
     mlir::ModuleOp moduleOp,
-    ArrayRef<IREE::HAL::ExecutableOp> sourceExecutableOps,
+    SmallVectorImpl<IREE::HAL::ExecutableOp> &sourceExecutableOps,
     IREE::HAL::ExecutableOp linkedExecutableOp,
     IREE::HAL::ExecutableVariantOp linkedTargetOp,
-    std::function<Operation *(mlir::ModuleOp moduleOp)> getInnerModuleFn,
-    OpBuilder &builder);
+    std::function<LogicalResult(mlir::ModuleOp sourceInnerModule,
+                                mlir::ModuleOp linkedInnerModule,
+                                DenseMap<StringRef, Operation *> &symbolMap)>
+        mergeInnerModuleFn);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_CODEGEN_UTILS_LINKINGUTILS_H_
+#endif // IREE_COMPILER_CODEGEN_UTILS_LINKINGUTILS_H_

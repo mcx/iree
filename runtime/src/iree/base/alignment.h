@@ -49,6 +49,18 @@ static_assert(sizeof(void*) == sizeof(uintptr_t),
 // Alignment utilities
 //===----------------------------------------------------------------------===//
 
+// Returns the number of elements in an array as a compile-time constant, which
+// can be used in defining new arrays. Fails at compile-time if |arr| is not a
+// static array (such as if used on a pointer type). Similar to `countof()`.
+//
+// Example:
+//  uint8_t kConstantArray[512];
+//  assert(IREE_ARRAYSIZE(kConstantArray) == 512);
+#define IREE_ARRAYSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
+
+#define iree_min(lhs, rhs) ((lhs) <= (rhs) ? (lhs) : (rhs))
+#define iree_max(lhs, rhs) ((lhs) <= (rhs) ? (rhs) : (lhs))
+
 // https://en.cppreference.com/w/c/types/max_align_t
 #if defined(IREE_PLATFORM_WINDOWS)
 // NOTE: 16 is a specified Microsoft API requirement for some functions.
@@ -103,6 +115,17 @@ static inline bool iree_device_size_has_alignment(
   return iree_device_align(value, alignment) == value;
 }
 
+// Returns true if |value| is a power-of-two.
+static inline bool iree_is_power_of_two_uint64(uint64_t value) {
+  return (value != 0) && ((value & (value - 1)) == 0);
+}
+
+// Aligns |value| up to the given power-of-two |alignment| if required.
+// https://en.wikipedia.org/wiki/Data_structure_alignment#Computing_padding
+static inline uint64_t iree_align_uint64(uint64_t value, uint64_t alignment) {
+  return (value + (alignment - 1)) & ~(alignment - 1);
+}
+
 // Returns the size of a struct padded out to iree_max_align_t.
 // This must be used when performing manual trailing allocation packing to
 // ensure the alignment requirements of the trailing data are satisfied.
@@ -116,6 +139,136 @@ static inline bool iree_device_size_has_alignment(
 //  iree_host_size_t total_size = iree_sizeof_struct(*buffer) + extra_data_size;
 //  IREE_CHECK_OK(iree_allocator_malloc(allocator, total_size, (void**)&p));
 #define iree_sizeof_struct(t) iree_host_align(sizeof(t), iree_max_align_t)
+
+// Returns the ceil-divide of |lhs| by non-zero |rhs|.
+static inline iree_host_size_t iree_host_size_ceil_div(iree_host_size_t lhs,
+                                                       iree_host_size_t rhs) {
+  return ((lhs != 0) && (lhs > 0) == (rhs > 0))
+             ? ((lhs + ((rhs > 0) ? -1 : 1)) / rhs) + 1
+             : -(-lhs / rhs);
+}
+
+// Returns the floor-divide of |lhs| by non-zero |rhs|.
+static inline iree_host_size_t iree_host_size_floor_div(iree_host_size_t lhs,
+                                                        iree_host_size_t rhs) {
+  return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+             ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+             : lhs / rhs;
+}
+
+// Returns the ceil-divide of |lhs| by non-zero |rhs|.
+static inline iree_device_size_t iree_device_size_ceil_div(
+    iree_device_size_t lhs, iree_device_size_t rhs) {
+  return ((lhs != 0) && (lhs > 0) == (rhs > 0))
+             ? ((lhs + ((rhs > 0) ? -1 : 1)) / rhs) + 1
+             : -(-lhs / rhs);
+}
+
+// Returns the floor-divide of |lhs| by non-zero |rhs|.
+static inline iree_device_size_t iree_device_size_floor_div(
+    iree_device_size_t lhs, iree_device_size_t rhs) {
+  return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+             ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+             : lhs / rhs;
+}
+
+// Returns the greatest common divisor between two values.
+//
+// See: https://en.wikipedia.org/wiki/Greatest_common_divisor
+//
+// Examples:
+//  gcd(8, 16) = 8
+//  gcd(3, 5) = 1
+static inline iree_device_size_t iree_device_size_gcd(iree_device_size_t a,
+                                                      iree_device_size_t b) {
+  if (b == 0) return a;
+  return iree_device_size_gcd(b, a % b);
+}
+
+// Returns the least common multiple between two values, often used for
+// finding a common alignment.
+//
+// See: https://en.wikipedia.org/wiki/Least_common_multiple
+//
+// Examples:
+//  lcm(8, 16) = 16
+//  lcm(3, 5) = 15 (15 % 3 == 0, 15 % 5 == 0)
+static inline iree_device_size_t iree_device_size_lcm(iree_device_size_t a,
+                                                      iree_device_size_t b) {
+  return a * (b / iree_device_size_gcd(a, b));
+}
+
+//===----------------------------------------------------------------------===//
+// Byte and page range manipulation
+//===----------------------------------------------------------------------===//
+
+// Defines a range of bytes with any arbitrary alignment.
+// Most operations will adjust this range by the allocation granularity, meaning
+// that a range that straddles a page boundary will be specifying multiple pages
+// (such as offset=1, length=4096 with a page size of 4096 indicating 2 pages).
+typedef struct iree_byte_range_t {
+  iree_host_size_t offset;
+  iree_host_size_t length;
+} iree_byte_range_t;
+
+// Defines a range of bytes with page-appropriate alignment.
+// Any operation taking page ranges requires that the offset and length respect
+// the size and granularity requirements of the page mode the memory was defined
+// with. For example, if an allocation is using large pages then both offset and
+// length must be multiples of the iree_memory_info_t::large_page_granularity.
+typedef struct iree_page_range_t {
+  iree_host_size_t offset;
+  iree_host_size_t length;
+} iree_page_range_t;
+
+// Aligns |addr| up to |page_alignment|.
+static inline uintptr_t iree_page_align_start(uintptr_t addr,
+                                              iree_host_size_t page_alignment) {
+  return addr & (~(page_alignment - 1));
+}
+
+// Aligns |addr| down to |page_alignment|.
+static inline uintptr_t iree_page_align_end(uintptr_t addr,
+                                            iree_host_size_t page_alignment) {
+  return iree_page_align_start(addr + (page_alignment - 1), page_alignment);
+}
+
+// Unions two page ranges to create the min/max extents of both.
+static inline iree_page_range_t iree_page_range_union(
+    const iree_page_range_t a, const iree_page_range_t b) {
+  iree_host_size_t start = iree_min(a.offset, b.offset);
+  iree_host_size_t end = iree_max(a.offset + a.length, b.offset + b.length);
+  iree_page_range_t page_range = {0};
+  page_range.offset = start;
+  page_range.length = end - start;
+  return page_range;
+}
+
+// Aligns a byte range to page boundaries defined by |page_alignment|.
+static inline iree_page_range_t iree_align_byte_range_to_pages(
+    const iree_byte_range_t byte_range, iree_host_size_t page_alignment) {
+  iree_page_range_t page_range = {0};
+  page_range.offset = iree_host_align(byte_range.offset, page_alignment);
+  page_range.length = iree_host_align(byte_range.length, page_alignment);
+  return page_range;
+}
+
+// Computes a page-aligned range base and total length from a range.
+// This will produce a starting address <= the range offset and a length >=
+// the range length.
+static inline void iree_page_align_range(void* base_address,
+                                         iree_byte_range_t range,
+                                         iree_host_size_t page_alignment,
+                                         void** out_start_address,
+                                         iree_host_size_t* out_aligned_length) {
+  void* range_start = (void*)iree_page_align_start(
+      (uintptr_t)base_address + range.offset, page_alignment);
+  void* range_end = (void*)iree_page_align_end(
+      (uintptr_t)base_address + range.offset + range.length, page_alignment);
+  *out_start_address = range_start;
+  *out_aligned_length =
+      (iree_host_size_t)range_end - (iree_host_size_t)range_start;
+}
 
 //===----------------------------------------------------------------------===//
 // Alignment intrinsics

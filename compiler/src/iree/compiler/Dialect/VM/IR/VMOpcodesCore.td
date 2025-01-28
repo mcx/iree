@@ -47,7 +47,7 @@ class VM_OPC_EnumAttr<string name, string enumName, string enumTag,
   string opcodeEnumTag = enumTag;
 }
 
-// Next available opcode: 0x82
+// Next available opcode: 0x85
 
 // Globals:
 def VM_OPC_GlobalLoadI32         : VM_OPC<0x00, "GlobalLoadI32">;
@@ -161,6 +161,7 @@ def VM_OPC_ExtI16I32S            : VM_OPC<0x45, "ExtI16I32S">;
 def VM_OPC_ExtI16I32U            : VM_OPC<0x46, "ExtI16I32U">;
 def VM_OPC_ExtI32I64S            : VM_OPC<0x47, "ExtI32I64S">;
 def VM_OPC_ExtI32I64U            : VM_OPC<0x48, "ExtI32I64U">;
+def VM_OPC_CastAnyRef            : VM_OPC<0x82, "CastAnyRef">;
 
 // Reduction arithmetic:
 
@@ -183,6 +184,7 @@ def VM_OPC_CmpNZRef              : VM_OPC<0x55, "CmpNZRef">;
 def VM_OPC_Block                 : VM_OPC<0x79, "Block">;
 def VM_OPC_Branch                : VM_OPC<0x56, "Branch">;
 def VM_OPC_CondBranch            : VM_OPC<0x57, "CondBranch">;
+def VM_OPC_BranchTable           : VM_OPC<0x83, "BranchTable">;
 def VM_OPC_Call                  : VM_OPC<0x58, "Call">;
 def VM_OPC_CallVariadic          : VM_OPC<0x59, "CallVariadic">;
 def VM_OPC_Return                : VM_OPC<0x5A, "Return">;
@@ -220,6 +222,7 @@ def VM_OPC_BufferFillI8          : VM_OPC<0x71, "BufferFillI8">;
 def VM_OPC_BufferFillI16         : VM_OPC<0x72, "BufferFillI16">;
 def VM_OPC_BufferFillI32         : VM_OPC<0x73, "BufferFillI32">;
 def VM_OPC_BufferFillI64         : VM_OPC<0x74, "BufferFillI64">;
+def VM_OPC_BufferHash            : VM_OPC<0x84, "BufferHash">;
 
 // Extension prefixes:
 def VM_OPC_PrefixExtF32          : VM_OPC<0xE0, "PrefixExtF32">;
@@ -328,6 +331,7 @@ def VM_CoreOpcodeAttr :
     VM_OPC_ExtI16I32U,
     VM_OPC_ExtI32I64S,
     VM_OPC_ExtI32I64U,
+    VM_OPC_CastAnyRef,
 
     VM_OPC_CmpEQI32,
     VM_OPC_CmpNEI32,
@@ -345,6 +349,7 @@ def VM_CoreOpcodeAttr :
 
     VM_OPC_Branch,
     VM_OPC_CondBranch,
+    VM_OPC_BranchTable,
     VM_OPC_Call,
     VM_OPC_CallVariadic,
     VM_OPC_Return,
@@ -376,6 +381,7 @@ def VM_CoreOpcodeAttr :
     VM_OPC_BufferFillI64,
     VM_OPC_BufferCopy,
     VM_OPC_BufferCompare,
+    VM_OPC_BufferHash,
 
     VM_OPC_Block,
 

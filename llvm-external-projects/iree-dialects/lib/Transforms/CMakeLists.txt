@@ -1,6 +1,5 @@
 
 add_mlir_library(IREEDialectsTransforms
-  ListenerCSE.cpp
   TransformMatchers.cpp
 
   LINK_LIBS PRIVATE
@@ -15,6 +14,6 @@ add_mlir_library(IREEDialectsTransforms
 
   DEPENDS
   mlir-headers
-  IREELinalgExtIncGen
-  IREELinalgExtInterfacesIncGen
 )
+
+iree_dialects_target_includes(IREEDialectsTransforms)

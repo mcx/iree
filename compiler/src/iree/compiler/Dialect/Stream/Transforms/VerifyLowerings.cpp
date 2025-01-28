@@ -10,7 +10,6 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTraits.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
@@ -21,24 +20,30 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_VERIFYINPUTPASS
+#define GEN_PASS_DEF_VERIFYLOWERINGTOTENSORSPASS
+#define GEN_PASS_DEF_VERIFYLOWERINGTOASYNCRESOURCESPASS
+#define GEN_PASS_DEF_VERIFYLOWERINGTOASYNCPASS
+#define GEN_PASS_DEF_VERIFYLOWERINGTOCMDPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
+namespace {
 
 //===----------------------------------------------------------------------===//
 // Base pass utility
 //===----------------------------------------------------------------------===//
 
 class Verifier {
- public:
+public:
   enum class Legality {
     LEGAL,
     RECURSIVELY_LEGAL,
     ILLEGAL,
   };
 
-  using OpVerifierFn = std::function<Optional<Legality>(Operation *op)>;
+  using OpVerifierFn = std::function<std::optional<Legality>(Operation *op)>;
   using TypeVerifierFn = std::function<Legality(Type type)>;
 
   void addIllegalDialect(StringRef dialectName) {
@@ -64,13 +69,13 @@ class Verifier {
     opLegality.insert({OpT::getOperationName(), Legality::ILLEGAL});
   }
 
-  void addOpVerifier(std::function<Optional<Legality>(Operation *)> fn) {
+  void addOpVerifier(std::function<std::optional<Legality>(Operation *)> fn) {
     opVerifiers.push_back(fn);
   }
 
   template <typename OpT>
-  void addOpVerifier(std::function<Optional<Legality>(OpT)> fn) {
-    auto wrapperFn = [=](Operation *baseOp) -> Optional<Legality> {
+  void addOpVerifier(std::function<std::optional<Legality>(OpT)> fn) {
+    auto wrapperFn = [=](Operation *baseOp) -> std::optional<Legality> {
       if (auto op = dyn_cast<OpT>(baseOp)) {
         return fn(op);
       }
@@ -86,7 +91,9 @@ class Verifier {
 
   template <typename TypeT>
   void addTypeVerifier(std::function<Legality(TypeT)> fn) {
-    auto wrapperFn = [=](Type baseType) { return fn(baseType.cast<TypeT>()); };
+    auto wrapperFn = [=](Type baseType) {
+      return fn(llvm::cast<TypeT>(baseType));
+    };
     if (typeVerifiers.insert({TypeID::get<TypeT>(), wrapperFn}).second ==
         false) {
       assert(false && "already registered for this type");
@@ -101,29 +108,31 @@ class Verifier {
       // Check for op legality - can skip the expensive work if known-illegal.
       auto legality = getOpLegality(op);
       switch (legality) {
-        case Legality::LEGAL:
-          // Op itself is legal but may not have valid operands/results.
-          break;
-        case Legality::RECURSIVELY_LEGAL:
-          // If the entire op w/ nested ops is legal then skip.
-          return WalkResult::skip();
-        default:
-        case Legality::ILLEGAL:
-          // Early-exit on illegal ops without recursing.
-          emitIllegalOpError(op);
-          foundAnyIllegal = true;
-          return WalkResult::skip();
+      case Legality::LEGAL:
+        // Op itself is legal but may not have valid operands/results.
+        break;
+      case Legality::RECURSIVELY_LEGAL:
+        // If the entire op w/ nested ops is legal then skip.
+        return WalkResult::skip();
+      default:
+      case Legality::ILLEGAL:
+        // Early-exit on illegal ops without recursing.
+        emitIllegalOpError(op);
+        foundAnyIllegal = true;
+        return WalkResult::skip();
       }
 
       // Check types for operands/results.
       for (auto operandType : llvm::enumerate(op->getOperandTypes())) {
-        if (isTypeLegal(operandType.value())) continue;
+        if (isTypeLegal(operandType.value()))
+          continue;
         emitIllegalTypeError(op, "operand", operandType.index(),
                              operandType.value());
         foundAnyIllegal = true;
       }
       for (auto resultType : llvm::enumerate(op->getResultTypes())) {
-        if (isTypeLegal(resultType.value())) continue;
+        if (isTypeLegal(resultType.value()))
+          continue;
         emitIllegalTypeError(op, "result", resultType.index(),
                              resultType.value());
         foundAnyIllegal = true;
@@ -134,7 +143,7 @@ class Verifier {
     return success(!foundAnyIllegal);
   }
 
- private:
+private:
   Legality getOpLegality(Operation *op) {
     auto opName = op->getName();
 
@@ -213,42 +222,31 @@ static void setupDefaultOpLegality(Verifier &verifier) {
 }
 
 static void markStreamTensorOpsIllegal(Verifier &verifier) {
-  verifier.addOpVerifier([](Operation *op) -> Optional<Verifier::Legality> {
-    if (op->hasTrait<OpTrait::IREE::Stream::TensorPhaseOp>()) {
-      return Verifier::Legality::ILLEGAL;
-    }
-    return std::nullopt;
-  });
+  verifier.addOpVerifier(
+      [](Operation *op) -> std::optional<Verifier::Legality> {
+        if (op->hasTrait<OpTrait::IREE::Stream::TensorPhaseOp>()) {
+          return Verifier::Legality::ILLEGAL;
+        }
+        return std::nullopt;
+      });
 }
 
 static void markStreamAsyncOpsIllegal(Verifier &verifier) {
-  verifier.addOpVerifier([](Operation *op) -> Optional<Verifier::Legality> {
-    if (op->hasTrait<OpTrait::IREE::Stream::AsyncPhaseOp>()) {
-      return Verifier::Legality::ILLEGAL;
-    }
-    return std::nullopt;
-  });
-}
-
-static void markStreamCmdOpsIllegal(Verifier &verifier) {
-  verifier.addOpVerifier([](Operation *op) -> Optional<Verifier::Legality> {
-    if (op->hasTrait<OpTrait::IREE::Stream::CmdPhaseOp>()) {
-      return Verifier::Legality::ILLEGAL;
-    }
-    return std::nullopt;
-  });
+  verifier.addOpVerifier(
+      [](Operation *op) -> std::optional<Verifier::Legality> {
+        if (op->hasTrait<OpTrait::IREE::Stream::AsyncPhaseOp>()) {
+          return Verifier::Legality::ILLEGAL;
+        }
+        return std::nullopt;
+      });
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-verify-input
+// --iree-stream-verify-input
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-class VerifyInputPass : public VerifyInputBase<VerifyInputPass> {
- public:
-  VerifyInputPass() = default;
-
+struct VerifyInputPass
+    : public IREE::Stream::impl::VerifyInputPassBase<VerifyInputPass> {
   void runOnOperation() override {
     Verifier verifier;
     setupDefaultOpLegality(verifier);
@@ -264,14 +262,8 @@ class VerifyInputPass : public VerifyInputBase<VerifyInputPass> {
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createVerifyInputPass() {
-  return std::make_unique<VerifyInputPass>();
-}
-
 //===----------------------------------------------------------------------===//
-// -iree-stream-verify-lowering-to-tensors
+// --iree-stream-verify-lowering-to-tensors
 //===----------------------------------------------------------------------===//
 
 static void markTensorInputsIllegal(Verifier &verifier) {
@@ -289,18 +281,9 @@ static void markTensorInputsIllegal(Verifier &verifier) {
   verifier.addRecursivelyLegalOp<IREE::Stream::ExecutableOp>();
 }
 
-namespace {
-
-class VerifyLoweringToTensorsPass
-    : public VerifyLoweringToTensorsBase<VerifyLoweringToTensorsPass> {
- public:
-  VerifyLoweringToTensorsPass() = default;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
-  }
-
+struct VerifyLoweringToTensorsPass
+    : public IREE::Stream::impl::VerifyLoweringToTensorsPassBase<
+          VerifyLoweringToTensorsPass> {
   void runOnOperation() override {
     // We cannot have stream.cmd.* ops mixed with stream.tensor/async.* ops
     // as they use different memory models. We need to allow them through,
@@ -314,29 +297,34 @@ class VerifyLoweringToTensorsPass
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createVerifyLoweringToTensorsPass() {
-  return std::make_unique<VerifyLoweringToTensorsPass>();
-}
-
 //===----------------------------------------------------------------------===//
-// -iree-stream-verify-lowering-to-tensors
+// --iree-stream-verify-lowering-to-async-resources
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-class VerifyLoweringToAsyncPass
-    : public VerifyLoweringToAsyncBase<VerifyLoweringToAsyncPass> {
- public:
-  VerifyLoweringToAsyncPass() = default;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
+struct VerifyLoweringToAsyncResourcesPass
+    : public IREE::Stream::impl::VerifyLoweringToAsyncResourcesPassBase<
+          VerifyLoweringToAsyncResourcesPass> {
+  void runOnOperation() override {
+    // We cannot have stream.cmd.* ops mixed with stream.tensor/async.* ops
+    // as they use different memory models. We need to allow them through,
+    // though, to allow for compiler re-entrancy.
+    Verifier verifier;
+    setupDefaultOpLegality(verifier);
+    markTensorInputsIllegal(verifier);
+    markStreamTensorOpsIllegal(verifier);
+    if (failed(verifier.run(getOperation()))) {
+      return signalPassFailure();
+    }
   }
+};
 
+//===----------------------------------------------------------------------===//
+// --iree-stream-verify-lowering-to-async
+//===----------------------------------------------------------------------===//
+
+struct VerifyLoweringToAsyncPass
+    : public IREE::Stream::impl::VerifyLoweringToAsyncPassBase<
+          VerifyLoweringToAsyncPass> {
   void runOnOperation() override {
     // We cannot have stream.cmd.* ops mixed with stream.tensor/async.* ops
     // as they use different memory models. We need to allow them through,
@@ -356,14 +344,15 @@ class VerifyLoweringToAsyncPass
 
     // All streamable ops should be inside of execution regions.
     verifier.addOpVerifier<IREE::Stream::StreamableOpInterface>(
-        [](auto op) -> Optional<Verifier::Legality> {
+        [](auto op) -> std::optional<Verifier::Legality> {
           // Skip cmd ops that may exist.
           if (op->template hasTrait<OpTrait::IREE::Stream::CmdPhaseOp>()) {
             return Verifier::Legality::LEGAL;
           }
 
           // Allow metadata ops outside of execution regions.
-          if (op.isMetadata()) return Verifier::Legality::LEGAL;
+          if (op.isMetadata())
+            return Verifier::Legality::LEGAL;
 
           // TODO(benvanik): execution region interface to make this generic.
           if (!op->template getParentOfType<IREE::Stream::AsyncExecuteOp>()) {
@@ -380,29 +369,13 @@ class VerifyLoweringToAsyncPass
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createVerifyLoweringToAsyncPass() {
-  return std::make_unique<VerifyLoweringToAsyncPass>();
-}
-
 //===----------------------------------------------------------------------===//
-// -iree-stream-verify-lowering-to-cmd
+// --iree-stream-verify-lowering-to-cmd
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-class VerifyLoweringToCmdPass
-    : public VerifyLoweringToCmdBase<VerifyLoweringToCmdPass> {
- public:
-  VerifyLoweringToCmdPass() = default;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
-  }
-
+struct VerifyLoweringToCmdPass
+    : public IREE::Stream::impl::VerifyLoweringToCmdPassBase<
+          VerifyLoweringToCmdPass> {
   void runOnOperation() override {
     Verifier verifier;
     setupDefaultOpLegality(verifier);
@@ -424,13 +397,6 @@ class VerifyLoweringToCmdPass
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createVerifyLoweringToCmdPass() {
-  return std::make_unique<VerifyLoweringToCmdPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

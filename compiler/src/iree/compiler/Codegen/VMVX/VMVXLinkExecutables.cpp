@@ -4,36 +4,36 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
 #include "iree/compiler/Codegen/Utils/LinkingUtils.h"
+#include "iree/compiler/Codegen/VMVX/Passes.h"
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "iree/compiler/Utils/ModuleUtils.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_VMVXLINKEXECUTABLESPASS
+#include "iree/compiler/Codegen/VMVX/Passes.h.inc"
 
 namespace {
 
 struct VMVXLinkExecutablesPass
-    : public VMVXLinkExecutablesBase<VMVXLinkExecutablesPass> {
-  VMVXLinkExecutablesPass() = default;
+    : public impl::VMVXLinkExecutablesPassBase<VMVXLinkExecutablesPass> {
   void runOnOperation() override {
     auto moduleOp = getOperation();
     auto moduleBuilder = OpBuilder::atBlockBegin(moduleOp.getBody());
 
-    auto sourceExecutableOps =
-        llvm::to_vector<8>(moduleOp.getOps<IREE::HAL::ExecutableOp>());
-    if (sourceExecutableOps.size() <= 1) return;
+    auto sourceExecutableOps = gatherExecutablesForTarget(moduleOp, "vmvx");
+    if (sourceExecutableOps.size() <= 1)
+      return;
 
     // Guess a module name, if needed, to make the output files readable.
     auto moduleName = guessModuleName(moduleOp, "vmvx_module");
 
     // Create our new "linked" hal.executable.
     std::string linkedExecutableName =
-        llvm::formatv("{0}_linked_{1}", moduleName, "vmvx");
+        llvm::formatv("{}_linked_{}", moduleName, "vmvx");
     auto linkedExecutableOp = moduleBuilder.create<IREE::HAL::ExecutableOp>(
         moduleOp.getLoc(), linkedExecutableName);
     linkedExecutableOp.setVisibility(
@@ -43,12 +43,16 @@ struct VMVXLinkExecutablesPass
 
     // Gather all unique executable targets - we may have multiple.
     auto executableTargetAttrs = gatherExecutableTargets(sourceExecutableOps);
-    for (auto executableTargetAttr : executableTargetAttrs) {
+    for (auto [index, targetAttr] : llvm::enumerate(executableTargetAttrs)) {
       // Add our VMVX hal.executable.variant with an empty module.
+      std::string linkedVariantName =
+          executableTargetAttrs.size() == 1
+              ? targetAttr.getSymbolNameFragment()
+              : llvm::formatv("{}_{}", targetAttr.getSymbolNameFragment(),
+                              index);
       auto linkedTargetOp =
           executableBuilder.create<IREE::HAL::ExecutableVariantOp>(
-              moduleOp.getLoc(), executableTargetAttr.getSymbolNameFragment(),
-              executableTargetAttr);
+              moduleOp.getLoc(), linkedVariantName, targetAttr);
       auto targetBuilder = OpBuilder::atBlockBegin(&linkedTargetOp.getBlock());
       auto linkedModuleOp = targetBuilder.create<ModuleOp>(moduleOp.getLoc());
 
@@ -57,24 +61,23 @@ struct VMVXLinkExecutablesPass
       nestedBuilder.create<IREE::VM::ModuleOp>(moduleOp.getLoc(),
                                                "linked_module");
 
+      auto mergeModuleFn = [](mlir::ModuleOp sourceInnerModule,
+                              mlir::ModuleOp linkedInnerModule,
+                              DenseMap<StringRef, Operation *> &symbolMap) {
+        auto srcModule = sourceInnerModule.getOps<IREE::VM::ModuleOp>().begin();
+        auto dstModule = linkedInnerModule.getOps<IREE::VM::ModuleOp>().begin();
+        return mergeModuleInto(*srcModule, *dstModule, symbolMap);
+      };
+
       // Try linking together all executable variants for this target.
-      if (failed(linkExecutablesInto(
-              moduleOp, sourceExecutableOps, linkedExecutableOp, linkedTargetOp,
-              [](mlir::ModuleOp moduleOp) {
-                return *moduleOp.getOps<IREE::VM::ModuleOp>().begin();
-              },
-              nestedBuilder))) {
+      if (failed(linkExecutablesInto(moduleOp, sourceExecutableOps,
+                                     linkedExecutableOp, linkedTargetOp,
+                                     mergeModuleFn))) {
         return signalPassFailure();
       }
     }
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createVMVXLinkExecutablesPass() {
-  return std::make_unique<VMVXLinkExecutablesPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

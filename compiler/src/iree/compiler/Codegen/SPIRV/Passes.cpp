@@ -11,28 +11,32 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 
-#include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree-dialects/Dialect/LinalgTransform/Passes.h"
+#include "iree/compiler/Codegen/Common/GPU/Passes.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
-#include "iree/compiler/Codegen/SPIRV/Utils.h"
+#include "iree/compiler/Codegen/SPIRV/Passes.h"
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h"
+#include "iree/compiler/Utils/PassUtils.h"
+#include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/ComplexToStandard/ComplexToStandard.h"
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRVPass.h"
 #include "mlir/Conversion/TosaToArith/TosaToArith.h"
-#include "mlir/Dialect/Arith/Transforms/Passes.h"
-#include "mlir/Dialect/Func/Transforms/Passes.h"
-#include "mlir/Dialect/GPU/Transforms/Passes.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVEnums.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
 #include "mlir/Dialect/SPIRV/Transforms/Passes.h"
-#include "mlir/Dialect/SPIRV/Transforms/SPIRVConversion.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
@@ -41,15 +45,17 @@
 
 #define DEBUG_TYPE "iree-spirv-lowering-pass-pipeline"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 static llvm::cl::opt<int> clSPIRVIndexingBits(
     "iree-spirv-index-bits",
     llvm::cl::desc("Set the bit width of indices in SPIR-V."),
     llvm::cl::init(32));
 
-// Allocation callbacks to use with upstream comprehensive bufferization
+//===----------------------------------------------------------------------===//
+// Bufferization Configuration
+//===----------------------------------------------------------------------===//
+
 static FailureOr<Value> gpuAllocateWorkgroupMemoryFn(OpBuilder &builder,
                                                      Location loc,
                                                      MemRefType memRefType,
@@ -60,10 +66,9 @@ static FailureOr<Value> gpuAllocateWorkgroupMemoryFn(OpBuilder &builder,
   MemRefType allocType =
       MemRefType::get(memRefType.getShape(), memRefType.getElementType(),
                       AffineMap(), workgroupSpace);
-  return builder
-      .create<memref::AllocOp>(loc, allocType, dynamicSizes,
-                               builder.getI64IntegerAttr(alignment))
-      .getResult();
+  auto allocOp = builder.create<memref::AllocOp>(
+      loc, allocType, dynamicSizes, builder.getI64IntegerAttr(alignment));
+  return allocOp.getResult();
 }
 
 static FailureOr<Value> gpuAllocateFunctionMemoryFn(OpBuilder &builder,
@@ -71,29 +76,24 @@ static FailureOr<Value> gpuAllocateFunctionMemoryFn(OpBuilder &builder,
                                                     MemRefType memRefType,
                                                     ValueRange dynamicSizes,
                                                     unsigned alignment) {
-  Optional<unsigned> space =
+  std::optional<unsigned> space =
       spirv::mapVulkanStorageClassToMemorySpace(spirv::StorageClass::Function);
   MemRefType allocType = MemRefType::get(
       memRefType.getShape(), memRefType.getElementType(), {}, *space);
-  return builder
-      .create<memref::AllocaOp>(loc, allocType, dynamicSizes,
-                                builder.getI64IntegerAttr(alignment))
-      .getResult();
-}
-
-static LogicalResult gpuDeallocationFn(OpBuilder &builder, Location loc,
-                                       Value allocation) {
-  return success();
+  auto allocaOp = builder.create<memref::AllocaOp>(
+      loc, allocType, dynamicSizes, builder.getI64IntegerAttr(alignment));
+  return allocaOp.getResult();
 }
 
 static LogicalResult gpuCopyFn(OpBuilder &builder, Location loc, Value from,
                                Value to) {
-  auto fromType = from.getType().cast<MemRefType>();
-  auto toType = to.getType().cast<MemRefType>();
+  auto fromType = llvm::cast<MemRefType>(from.getType());
+  auto toType = llvm::cast<MemRefType>(to.getType());
 
-  bool needsBarrier =
-      isInWorkgroupMemory(fromType) || isInWorkgroupMemory(toType);
-  if (needsBarrier) builder.create<gpu::BarrierOp>(loc);
+  bool needsBarrier = hasSharedMemoryAddressSpace(fromType) ||
+                      hasSharedMemoryAddressSpace(toType);
+  if (needsBarrier)
+    builder.create<gpu::BarrierOp>(loc);
   Operation *copy = builder.create<memref::CopyOp>(loc, from, to);
   if (needsBarrier) {
     setMarker(copy, getCopyToWorkgroupMemoryMarker());
@@ -102,261 +102,375 @@ static LogicalResult gpuCopyFn(OpBuilder &builder, Location loc, Value from,
   return success();
 }
 
-static void addBufferizePasses(OpPassManager &passManager,
-                               BufferizationOptions::AllocationFn fn) {
-  BufferizationOptions::AllocationFn allocationFn = fn;
-  BufferizationOptions::DeallocationFn deallocationFn = gpuDeallocationFn;
-  BufferizationOptions::MemCpyFn memcpyFn = gpuCopyFn;
-  addIREEComprehensiveBufferizePasses(passManager, allocationFn, deallocationFn,
-                                      memcpyFn);
-}
-
 //===----------------------------------------------------------------------===//
 // Common Pass Recipes
 //===----------------------------------------------------------------------===//
 
 static void addTileAndDistributeToWorkgroupsPasses(
-    OpPassManager &passManager, bool useFuseTensorPadWithConsumerPass = false,
+    OpPassManager &funcPassManager,
+    bool useFuseTensorPadWithConsumerPass = false,
     bool useWARForCooperativeMatrixCodegen = false) {
-  passManager.addPass(createTileAndDistributeToWorkgroupsPass());
-  auto &nestedModulePM = passManager.nest<ModuleOp>();
+  funcPassManager.addPass(createTileAndDistributeToWorkgroupsPass(
+      kNumMaxParallelDims,
+      linalg::DistributionMethod::CyclicNumProcsEqNumIters));
+  funcPassManager.addPass(createCSEPass());
   if (useFuseTensorPadWithConsumerPass) {
-    nestedModulePM.addNestedPass<func::FuncOp>(
-        createFuseTensorPadWithConsumerPass());
+    funcPassManager.addPass(createFuseTensorPadWithConsumerPass());
   }
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConvertToDestinationPassingStylePass(
-          useWARForCooperativeMatrixCodegen));
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  funcPassManager.addPass(createConvertToDestinationPassingStylePass(
+      useWARForCooperativeMatrixCodegen));
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 }
 
-static void addSPIRVBufferizePasses(
-    OpPassManager &passManager,
-    BufferizationOptions::AllocationFn allocationFn) {
+/// Adds passes to lower vector ops to meet SPIR-V requirements.
+void addSPIRVVectorLoweringPasses(OpPassManager &funcPassManager) {
+  funcPassManager.addPass(createSPIRVInitialVectorLoweringPass());
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+  funcPassManager.addPass(createSPIRVFinalVectorLoweringPass());
+}
+
+static void addBufferizePasses(OpPassManager &funcPassManager,
+                               BufferizationOptions::AllocationFn fn) {
+  BufferizationOptions::AllocationFn allocationFn = fn;
+  BufferizationOptions::MemCpyFn memcpyFn = gpuCopyFn;
+  addIREEComprehensiveBufferizePasses(funcPassManager, allocationFn, memcpyFn);
+}
+
+static void
+addSPIRVBufferizePasses(OpPassManager &funcPassManager,
+                        BufferizationOptions::AllocationFn allocationFn) {
   // Resolve dim ops first so that we don't have compute Linalg ops lingering on
   // becuase of dim op usage. This avoids bufferizing those compute ops just for
   // their shape dimensions.
-  passManager.addPass(memref::createResolveShapedTypeResultDimsPass());
-  addBufferizePasses(passManager, allocationFn);
+  funcPassManager.addPass(memref::createResolveShapedTypeResultDimsPass());
+  addBufferizePasses(funcPassManager, allocationFn);
   // Distribute immediately after bufferization to avoid losing attribute
   // annotations in subsequent transformations. This is a bit fragile right now
   // but we expect upstream for loops to eventually recognize distribution as a
   // first-class attribute then we don't need this.
-  passManager.addNestedPass<func::FuncOp>(createSPIRVDistributePass());
-  passManager.addPass(memref::createResolveShapedTypeResultDimsPass());
-  passManager.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  passManager.addNestedPass<func::FuncOp>(createCSEPass());
-  passManager.addNestedPass<func::FuncOp>(createCleanupBufferAllocViewPass());
+  funcPassManager.addPass(createGPUDistributeScfForPass());
+  funcPassManager.addPass(memref::createResolveShapedTypeResultDimsPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createCleanupBufferAllocViewPass());
 }
 
 /// Adds passes to materialize structured ops as loops. This replaces structured
 /// ops with loop nests containing payloads, so it should be invoked after
 /// tiling and vectorization and before buffer transformations.
-static void addLoopMaterializationPasses(OpPassManager &pm) {
-  pm.addNestedPass<func::FuncOp>(IREE::LinalgExt::createLinalgExtToLoopsPass());
-  pm.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
-  pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
-  pm.addNestedPass<func::FuncOp>(createRemoveSingleIterationLoopPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+static void addLoopMaterializationPasses(OpPassManager &funcPassManager) {
+  funcPassManager.addPass(IREE::LinalgExt::createLinalgExtToLoopsPass());
+  funcPassManager.addPass(createMemrefCopyToLinalgPass());
+  funcPassManager.addPass(createConvertLinalgToLoopsPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  funcPassManager.addPass(createRemoveSingleIterationLoopPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 }
 
 /// Adds passes to lowering MemRefs. This folds MemRef subviews, flattens n-D
 /// MemRef into 1-D ones, vectorizes load/store when possible, and performs
 /// cross loop nest optimizations. This should be invoked after structured op
 /// lowering and before final SPIR-V conversion.
-static void addMemRefLoweringPasses(OpPassManager &pm) {
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+static void addMemRefLoweringPasses(OpPassManager &modulePassManager) {
+  FunctionLikeNest funcPassManager(modulePassManager);
 
-  // math dialect elementry functions -> polynomial form.
-  pm.addNestedPass<func::FuncOp>(createPolynomialApproximationPass());
+  funcPassManager.addPass(createCanonicalizerPass)
+      .addPass(createCSEPass)
+      .addPass(createConvertComplexToStandardPass)
 
-  pm.addNestedPass<func::FuncOp>(createPadDynamicAlloc());
+      // Math dialect elementry functions -> polynomial form.
+      .addPass(createPolynomialApproximationPass)
 
-  // Fold load/store from/to subview ops into the original memref when possible.
-  // In SPIR-V we don't use memref descriptor so it's not possible to handle
-  // subview ops.
-  pm.addPass(memref::createFoldMemRefAliasOpsPass());
-  pm.addNestedPass<func::FuncOp>(memref::createExpandOpsPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+      .addPass(createPadDynamicAllocPass);
 
-  // Turn scalar load/store from memrefs into vectorized ones if possible. This
-  // gives better memory access patterns, which is very important for perf.
-  pm.addPass(createSPIRVVectorizeLoadStore());
-  // Perform various vector-level cross-op optimizations like load-store
-  // forwarding, shape casting and casting op cancelling.
-  pm.addNestedPass<func::FuncOp>(createOptimizeVectorTransferPass());
-  pm.addNestedPass<func::FuncOp>(createSPIRVBreakDownLargeVectorPass());
+  // TODO: query this from the target.
+  auto getIndexBitwidth = [](mlir::FunctionOpInterface) { return 32; };
+  funcPassManager
+      .addPass(
+          [&]() { return createGPUCheckResourceUsagePass(getIndexBitwidth); })
 
-  // Perform optimizations that need to across the scf.for region boundary.
-  pm.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-  pm.addNestedPass<func::FuncOp>(createOptimizeVectorTransferPass());
+      // Fold load/store from/to subview ops into the original memref when
+      // possible. In SPIR-V we don't use memref descriptor so it's not possible
+      // to handle subview ops.
+      .addPass(memref::createFoldMemRefAliasOpsPass)
+      .addPass(createEmulateNarrowTypePass)
+      .addPass(memref::createExpandOpsPass)
+      .addPass(createCanonicalizerPass)
+      .addPass(createCSEPass)
 
-  // Turn multi-dimension memref into one-dimension. This is needed for SPIR-V
-  // because we don't use upstream memref descriptors.
-  pm.addPass(createFlattenMemRefSubspanPass());
+      // Turn scalar load/store from memrefs into vectorized ones if possible.
+      // This gives better memory access patterns, which is very important for
+      // perf.
+      .addPass(createSPIRVVectorizeLoadStorePass)
+      // Perform optimizations that need to across the scf.for region boundary.
+      .addPass(createForOpCanonicalizationPass)
+      // Perform various vector-level cross-op optimizations like load-store
+      // forwarding, shape casting and casting op cancelling.
+      .addPass([&]() { return createOptimizeVectorTransferPass(); })
+      .addPass(createSPIRVBreakDownLargeVectorPass)
+
+      // Perform optimizations that need to across the scf.for region boundary.
+      .addPass(createForOpCanonicalizationPass)
+      .addPass(createCanonicalizerPass)
+      .addPass(createCSEPass)
+      .addPass([&]() { return createOptimizeVectorTransferPass(); });
+
+  // Turn multi-dimension memref into one-dimension. This is needed for
+  // SPIR-V because we don't use upstream memref descriptors.
+  modulePassManager.addPass(createFlattenMemRefSubspanPass());
+
+  FunctionLikeNest(modulePassManager)
+      .addPass(createSPIRVEraseStorageBufferStaticShapePass);
 }
 
 /// Adds passes to perform the final SPIR-V conversion.
-static void addSPIRVLoweringPasses(OpPassManager &pm, bool enableFastMath) {
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+static void addSPIRVLoweringPasses(OpPassManager &modulePassManager) {
+  FunctionLikeNest(modulePassManager)
+      .addPass(createPropagateDispatchSizeBoundsPass)
+      .addPass(createCanonicalizerPass)
+      .addPass(createCSEPass)
+      .addPass(createLowerAffinePass)
+      .addPass([]() {
+        return IREE::Util::createOptimizeIntArithmeticPass(
+            IREE::Util::OptimizeIntArithmeticPassOptions{/*narrowToI32=*/true});
+      })
 
-  pm.addPass(createLowerAffinePass());
+      // Lower ApplyScale before the i64 Emulation Pass so that new 64-bit ops
+      // are also emulated if not supported by the target.
+      .addPass([&]() {
+        return tosa::createTosaToArith(/*includeApplyRescale=*/true,
+                                       /*use32BitApplyRescale=*/true);
+      })
+      .addPass(createCanonicalizerPass)
+      .addPass(createCSEPass)
+      .addPass(createSPIRVMapMemRefStorageClassPass)
+      .addPass(createSPIRVEmulateI64Pass)
+      .addPass(createConvertBf16ArithToF32Pass)
+      .addPass(createConvertBf16ToUInt16BuffersPass)
+      .addPass(createCanonicalizerPass)
+      .addPass(createCSEPass);
 
-  // Lower ApplyScale before the i64 Emulation Pass so that new 64-bit ops are
-  // also emulated if not supported by the target.
-  pm.addPass(tosa::createTosaToArith(/*includeApplyRescale=*/true,
-                                     /*use32BitApplyRescale=*/true));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-
-  pm.addNestedPass<func::FuncOp>(createSPIRVMapMemRefStorageClassPass());
-  pm.addPass(createSPIRVEmulateI64Pass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-
-  pm.addPass(createConvertToSPIRVPass(enableFastMath, clSPIRVIndexingBits));
+  modulePassManager.addPass(createSPIRVConvertGPUTargetPass());
+  modulePassManager.addPass(createConvertToSPIRVPass(clSPIRVIndexingBits));
 
   auto getTargetEnv = [](spirv::ModuleOp moduleOp) {
-    return getSPIRVTargetEnvAttr(moduleOp);
+    return moduleOp->getParentOfType<mlir::ModuleOp>()
+        ->getAttrOfType<spirv::TargetEnvAttr>(spirv::getTargetEnvAttrName());
   };
 
-  OpPassManager &spirvPM = pm.nest<spirv::ModuleOp>();
-  spirvPM.addPass(spirv::createUnifyAliasedResourcePass(getTargetEnv));
-  spirvPM.addPass(spirv::createSPIRVLowerABIAttributesPass());
-  spirvPM.addPass(createCanonicalizerPass());
-  spirvPM.addPass(createCSEPass());
-  spirvPM.addPass(spirv::createSPIRVRewriteInsertsPass());
-  spirvPM.addPass(spirv::createSPIRVCanonicalizeGLPass());
-  spirvPM.addPass(spirv::createSPIRVUpdateVCEPass());
+  OpPassManager &spirvModulePassManager =
+      modulePassManager.nest<spirv::ModuleOp>();
+  spirvModulePassManager.addPass(
+      spirv::createUnifyAliasedResourcePass(getTargetEnv));
+  spirvModulePassManager.addPass(spirv::createSPIRVLowerABIAttributesPass());
+  spirvModulePassManager.addPass(createCanonicalizerPass());
+  spirvModulePassManager.addPass(createCSEPass());
+  spirvModulePassManager.addPass(spirv::createSPIRVRewriteInsertsPass());
+  spirvModulePassManager.addPass(spirv::createSPIRVCanonicalizeGLPass());
+  spirvModulePassManager.addPass(spirv::createSPIRVUpdateVCEPass());
 }
 
 //===----------------------------------------------------------------------===//
 // Pass Pipelines
 //===----------------------------------------------------------------------===//
 
-void addSPIRVBaseVectorizePassPipeline(OpPassManager &pm) {
-  addTileAndDistributeToWorkgroupsPasses(
-      pm, /*useFuseTensorPadWithConsumerPass=*/true);
+void addSPIRVBaseLoweringPassPipeline(OpPassManager &funcPassManager) {
+  funcPassManager.addPass(createConvertToDestinationPassingStylePass(
+      /*useWARForCooperativeMatrixCodegen=*/false));
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
-  auto &nestedModulePM = pm.nest<ModuleOp>();
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFoldAffineMinInDistributedLoopsPass());
-  nestedModulePM.addPass(memref::createResolveShapedTypeResultDimsPass());
+  addBufferizePasses(funcPassManager, gpuAllocateWorkgroupMemoryFn);
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-
-  // Tile to GPU invocations and vectorize.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVCreateFastSlowPathPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVTilePass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-
-  // Bufferize and distribute.
-  addSPIRVBufferizePasses(nestedModulePM, gpuAllocateFunctionMemoryFn);
-
-  // Generate loop nests for all remaining ops and remove trivial loops.
-  addLoopMaterializationPasses(nestedModulePM);
-
-  // Perform various vector-level cross-op optimizations like load-store
-  // forwarding, shape casting and casting op cancelling.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createOptimizeVectorTransferPass());
+  addLoopMaterializationPasses(funcPassManager);
 }
 
-void addSPIRVCooperativeMatrixVectorizePassPipeline(OpPassManager &pm,
-                                                    unsigned pipelineDepth,
-                                                    unsigned storeStage) {
+void addSPIRVBaseDistributePassPipeline(OpPassManager &funcPassManager) {
+  addTileAndDistributeToWorkgroupsPasses(funcPassManager);
+
+  addBufferizePasses(funcPassManager, gpuAllocateWorkgroupMemoryFn);
+
+  // Tile and distribute to GPU invocations.
+  funcPassManager.addPass(createSPIRVTileAndDistributePass());
+  funcPassManager.addPass(createMemrefCopyToLinalgPass());
+  funcPassManager.addPass(createGPUDistributeSharedMemoryCopyPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  addLoopMaterializationPasses(funcPassManager);
+}
+
+void addSPIRVBaseVectorizePassPipeline(OpPassManager &funcPassManager) {
   addTileAndDistributeToWorkgroupsPasses(
-      pm, /*useFuseTensorPadWithConsumerPass=*/false,
-      /*useWARForCooperativeMatrixCodegen=*/true);
+      funcPassManager, /*useFuseTensorPadWithConsumerPass=*/true);
 
-  auto &nestedModulePM = pm.nest<ModuleOp>();
+  funcPassManager.addPass(createFoldAffineMinInDistributedLoopsPass());
+  funcPassManager.addPass(memref::createResolveShapedTypeResultDimsPass());
 
-  addBufferizePasses(nestedModulePM, gpuAllocateWorkgroupMemoryFn);
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
-  // Tile to GPU workgroups and promote.
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVTileAndPromotePass(
-      /*promoteCMatrix=*/true, /*skipThreadLevel=*/true));
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRemoveSingleIterationLoopPass());
-  // Run canonicalization patterns to propagate constant shape sizes after
-  // removing trip-one loops.
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  // Tile to GPU invocations and vectorize.
+  funcPassManager.addPass(createGPUCreateFastSlowPathPass());
+  funcPassManager.addPass(createGPUTilePass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  {
+    GenericVectorizationPassOptions options;
+    options.vectorizeGatherAccesses = true;
+    funcPassManager.addPass(createGenericVectorizationPass(options));
+  }
+  addSPIRVVectorLoweringPasses(funcPassManager);
+  funcPassManager.addPass(createForOpCanonicalizationPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
-  // Tile and distribute to GPU subgroups.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVTileToCooperativeOpsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRemoveSingleIterationLoopPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  // Bufferize and distribute.
+  addSPIRVBufferizePasses(funcPassManager, gpuAllocateFunctionMemoryFn);
 
-  // Multi-buffer depending on pipeline depth and distribute to shared memory.
-  if (pipelineDepth > 0)
-    nestedModulePM.addNestedPass<func::FuncOp>(
-        createGPUMultiBuffering(pipelineDepth + 1));
-  nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUDistributeSharedMemoryCopy());
-
-  // Reduce bank conflicts by padding.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUReduceSharedMemoryBankConflicts(
-          detail::bankConflictReductionPaddingBits));
-
-  // Vectorize to cooperative ops.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVVectorizeToCooperativeOpsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRemoveSingleIterationLoopPass());
-
-  // Run canonicalization patterns to propagate constant shape sizes after
-  // removing trip-one loops.
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  // Generate loop nests for all remaining ops and remove trivial loops.
+  addLoopMaterializationPasses(funcPassManager);
 
   // Perform various vector-level cross-op optimizations like load-store
   // forwarding, shape casting and casting op cancelling.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createOptimizeVectorTransferPass());
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
+}
 
-  // Fold subview ops is reqiured for converting vector transfer ops into SPIR-V
-  // cooperative ops in the next step.
-  nestedModulePM.addPass(memref::createFoldMemRefAliasOpsPass());
+void addSPIRVWinogradVectorizePassPipeline(OpPassManager &funcPassManager) {
+  addTileAndDistributeToWorkgroupsPasses(
+      funcPassManager, /*useFuseTensorPadWithConsumerPass=*/true);
 
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVVectorToGPUSubgroupMMAOpsPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
+  funcPassManager.addPass(createFoldAffineMinInDistributedLoopsPass());
+  funcPassManager.addPass(memref::createResolveShapedTypeResultDimsPass());
+
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  funcPassManager.addPass(createGPUTilePass());
+  funcPassManager.addPass(
+      IREE::LinalgExt::createDecomposeWinogradTransformPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Tile to GPU invocations and vectorize.
+  funcPassManager.addPass(createSPIRVAnnotateWinogradLoopsPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  {
+    GenericVectorizationPassOptions options;
+    options.vectorizeGatherAccesses = true;
+    options.enableCleanup = true;
+    funcPassManager.addPass(createGenericVectorizationPass(options));
+  }
+  addSPIRVVectorLoweringPasses(funcPassManager);
+  funcPassManager.addPass(createForOpCanonicalizationPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Bufferize and distribute.
+  addSPIRVBufferizePasses(funcPassManager, gpuAllocateFunctionMemoryFn);
+
+  // Generate loop nests for all remaining ops and remove trivial loops.
+  addLoopMaterializationPasses(funcPassManager);
+
+  // Perform various vector-level cross-op optimizations like load-store
+  // forwarding, shape casting and casting op cancelling.
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
+}
+
+void addSPIRVCooperativeMatrixVectorizePassPipeline(
+    OpPassManager &funcPassManager, unsigned pipelineDepth,
+    unsigned storeStage) {
+  addTileAndDistributeToWorkgroupsPasses(
+      funcPassManager, /*useFuseTensorPadWithConsumerPass=*/false,
+      /*useWARForCooperativeMatrixCodegen=*/true);
+
+  addBufferizePasses(funcPassManager, gpuAllocateWorkgroupMemoryFn);
+
+  // Tile to GPU workgroups and promote.
+  funcPassManager.addPass(
+      createSPIRVTileAndPromotePass(SPIRVTileAndPromotePassOptions{
+          /*promoteCMatrix=*/true, /*skipThreadLevel=*/true}));
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  funcPassManager.addPass(createRemoveSingleIterationLoopPass());
+  // Run canonicalization patterns to propagate constant shape sizes after
+  // removing trip-one loops.
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Tile and distribute to GPU subgroups.
+  funcPassManager.addPass(createSPIRVTileToCooperativeOpsPass());
+  funcPassManager.addPass(createRemoveSingleIterationLoopPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Multi-buffer depending on pipeline depth and distribute to shared memory.
+  if (pipelineDepth > 0) {
+    funcPassManager.addPass(createGPUMultiBufferingPass(
+        GPUMultiBufferingPassOptions{pipelineDepth + 1}));
+  }
+  funcPassManager.addPass(createMemrefCopyToLinalgPass());
+  funcPassManager.addPass(createGPUDistributeSharedMemoryCopyPass());
+
+  // Reduce bank conflicts by padding.
+  {
+    GPUReduceBankConflictsPassOptions options = {};
+    options.paddingBits = detail::bankConflictReductionPaddingBits;
+    funcPassManager.addPass(createGPUReduceBankConflictsPass(options));
+  }
+
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  // Performs high-level n-D mechanical vectorization. This does not perform
+  // unrolling or lowering, which is done later.
+  {
+    GenericVectorizationPassOptions options;
+    funcPassManager.addPass(createGenericVectorizationPass(options));
+  }
+
+  // With subview ops, vector hoisting won't kick in. So fold memref subview ops
+  // before performing vector unrolling and hoisting.
+  funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
+
+  // Vectorize to cooperative ops.
+  funcPassManager.addPass(createSPIRVVectorizeToCooperativeOpsPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+  funcPassManager.addPass(createRemoveSingleIterationLoopPass());
+
+  // Run canonicalization patterns to propagate constant shape sizes after
+  // removing trip-one loops.
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+
+  // Perform various vector-level cross-op optimizations like load-store
+  // forwarding, shape casting and casting op cancelling.
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
+
+  funcPassManager.addPass(createForOpCanonicalizationPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createSPIRVVectorToGPUSubgroupMMAPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  addSPIRVVectorLoweringPasses(funcPassManager);
 
   if (pipelineDepth > 0) {
     PipeliningSchedulingStrategy schedule =
         storeStage == 0 ? PipeliningSchedulingStrategy::loadStoreStage0
                         : PipeliningSchedulingStrategy::loadGlobalStage0;
-    nestedModulePM.addNestedPass<func::FuncOp>(createGPUPipeliningPass(
-        /*epiloguePeeling=*/true, pipelineDepth, schedule));
+    GPUPipeliningPassOptions pipelieningOptions = {};
+    pipelieningOptions.epiloguePeeling = true;
+    pipelieningOptions.depth = pipelineDepth;
+    pipelieningOptions.scheduleIndex = llvm::to_underlying(schedule);
+    funcPassManager.addPass(createGPUPipeliningPass(pipelieningOptions));
   }
 }
 
-void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
+void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &funcPassManager,
                                                 unsigned pipelineDepth,
                                                 unsigned storeStage) {
   // Guards against 0 for consistency with older user provided tuning configs.
@@ -364,184 +478,239 @@ void addSPIRVMatmulPromoteVectorizePassPipeline(OpPassManager &pm,
   LLVM_DEBUG(llvm::dbgs() << "Non-zero Pipeline Depth: " << pipelineDepth
                           << "\n";);
   addTileAndDistributeToWorkgroupsPasses(
-      pm, /*useFuseTensorPadWithConsumerPass=*/false,
+      funcPassManager, /*useFuseTensorPadWithConsumerPass=*/false,
       /*useWARForCooperativeMatrixCodegen=*/true);
 
-  auto &nestedModulePM = pm.nest<ModuleOp>();
-  addBufferizePasses(nestedModulePM, gpuAllocateWorkgroupMemoryFn);
+  // Promote to workgroups and tile to threads.
+  funcPassManager.addPass(createGPUTensorTileToSerialLoopsPass());
+  funcPassManager.addPass(createGPUTensorAlloc());
+  funcPassManager.addPass(createGPUTensorTilePass());
 
-  // Tile and distribute to GPU invocations.
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVTileAndPromotePass());
+  // Performs high-level n-D mechanical vectorization. This does not perform
+  // unrolling or lowering, which is done later.
+  {
+    GenericVectorizationPassOptions options;
+    options.vectorizePadding = true;
+    options.vectorizeGatherAccesses = true;
+    options.enableCleanup = false;
+    options.maxVectorSize = 4096;
+    funcPassManager.addPass(createGenericVectorizationPass(options));
+    funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+    funcPassManager.addPass(createCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
 
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRemoveSingleIterationLoopPass());
-  if (pipelineDepth > 1 || storeStage == 0)
-    nestedModulePM.addNestedPass<func::FuncOp>(createGPUMultiBuffering(
-        storeStage == 0 ? pipelineDepth + 1 : pipelineDepth));
+  // Bufferize.
+  addBufferizePasses(funcPassManager, gpuAllocateWorkgroupMemoryFn);
 
-  nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUDistributeSharedMemoryCopy());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
+  // Distribute scf.forall to GPU threads.
+  funcPassManager.addPass(createGPUDistributePass());
 
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUReduceSharedMemoryBankConflicts(
-          detail::bankConflictReductionPaddingBits));
+  if (pipelineDepth > 1 || storeStage == 0) {
+    GPUMultiBufferingPassOptions multibufferingOptions = {
+        storeStage == 0 ? pipelineDepth + 1 : pipelineDepth};
+    funcPassManager.addPass(createGPUMultiBufferingPass(multibufferingOptions));
+  }
 
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      memref::createFoldMemRefAliasOpsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createOptimizeVectorTransferPass());
+  funcPassManager.addPass(createMemrefCopyToLinalgPass());
+  funcPassManager.addPass(createGPUDistributeSharedMemoryCopyPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
 
+  {
+    GPUReduceBankConflictsPassOptions options = {};
+    options.paddingBits = detail::bankConflictReductionPaddingBits;
+    funcPassManager.addPass(createGPUReduceBankConflictsPass(options));
+  }
+
+  // With subview ops, vector hoisting won't kick in. So fold memref subview ops
+  // before performing vector unrolling and hoisting.
+  funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
+
+  funcPassManager.addPass(createSPIRVInitialVectorLoweringPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+  funcPassManager.addPass(createSPIRVFinalVectorLoweringPass());
+
+  funcPassManager.addPass(createForOpCanonicalizationPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
+
+  // Hoist loop invariant code to avoid pipelining it.
+  funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
   PipeliningSchedulingStrategy schedule =
       storeStage == 0 ? PipeliningSchedulingStrategy::loadStoreStage0
                       : PipeliningSchedulingStrategy::loadGlobalStage0;
-  nestedModulePM.addNestedPass<func::FuncOp>(createGPUPipeliningPass(
-      /*epiloguePeeling=*/true, pipelineDepth, schedule));
+  GPUPipeliningPassOptions pipelieningOptions = {};
+  pipelieningOptions.epiloguePeeling = true;
+  pipelieningOptions.depth = pipelineDepth;
+  pipelieningOptions.scheduleIndex = llvm::to_underlying(schedule);
+  funcPassManager.addPass(createGPUPipeliningPass(pipelieningOptions));
 
-  addLoopMaterializationPasses(nestedModulePM);
+  addLoopMaterializationPasses(funcPassManager);
 }
 
-void addSPIRVBaseDistributePassPipeline(OpPassManager &pm) {
-  addTileAndDistributeToWorkgroupsPasses(pm);
-
-  auto &nestedModulePM = pm.nest<ModuleOp>();
-
-  addBufferizePasses(nestedModulePM, gpuAllocateWorkgroupMemoryFn);
-
-  // Tile and distribute to GPU invocations.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVTileAndDistributePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createMemrefCopyToLinalgPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createGPUDistributeSharedMemoryCopy());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-
-  addLoopMaterializationPasses(nestedModulePM);
-}
-
-void addSPIRVSubgroupReducePassPipeline(OpPassManager &pm) {
+void addSPIRVSubgroupReducePassPipeline(OpPassManager &funcPassManager) {
   addTileAndDistributeToWorkgroupsPasses(
-      pm, /*useFuseTensorPadWithConsumerPass=*/true);
+      funcPassManager, /*useFuseTensorPadWithConsumerPass=*/true);
 
-  auto &nestedModulePM = pm.nest<ModuleOp>();
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRematerializeParallelOpsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createRemoveSingleIterationLoopPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createGPUTileReductionPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
+  // Fuse input parallel ops into the reduction op so that we don't need to
+  // create temporary allocations during bufferization.
+  funcPassManager.addPass(createRematerializeParallelOpsPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
 
-  // Performs mechanical vectorization. This does not perform unrolling or
-  // lowering, which is done later.
-  nestedModulePM.addNestedPass<func::FuncOp>(createGPUVectorizationPass(
-      /*generateContract=*/false, /*maxVectorSize=*/32768));
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createLoopInvariantCodeMotionPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
+  funcPassManager.addPass(createGPUTileReductionPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+
+  // Performs high-level n-D mechanical vectorization. This does not perform
+  // unrolling or lowering, which is done later.
+  {
+    GenericVectorizationPassOptions options;
+    options.enableVectorMasking = true;
+    options.useConfiguredVectorSizes = false;
+    options.vectorizePadding = true;
+    options.vectorizeGatherAccesses = true;
+    options.enableCleanup = false;
+    options.generateContract = false;
+    funcPassManager.addPass(createGenericVectorizationPass(options));
+    funcPassManager.addPass(createOptimizeTensorInsertExtractSlicesPass());
+    funcPassManager.addPass(createCanonicalizerPass());
+    funcPassManager.addPass(createCSEPass());
+  }
+
+  funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 
   // Bufferize and distribute.
-  addSPIRVBufferizePasses(nestedModulePM, gpuAllocateFunctionMemoryFn);
+  // We bufferize before distributing to threads there; so we are still at the
+  // block level. Therefore, need to allocate workgroup memory.
+  addSPIRVBufferizePasses(funcPassManager, gpuAllocateWorkgroupMemoryFn);
 
   // Perform various vector-level cross-op optimizations like load-store
   // forwarding, shape casting and casting op cancelling.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createOptimizeVectorTransferPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
+  funcPassManager.addPass(createOptimizeVectorTransferPass());
 
   // Simplify the IR for vector distribution.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      memref::createFoldMemRefAliasOpsPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createLoopInvariantCodeMotionPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-
-  auto getWarpSize = [](func::FuncOp func) {
-    auto moduleOp = func->getParentOfType<ModuleOp>();
-    spirv::TargetEnvAttr target = getSPIRVTargetEnvAttr(moduleOp);
-    return target.getResourceLimits().getSubgroupSize();
-  };
+  funcPassManager.addPass(memref::createFoldMemRefAliasOpsPass());
+  funcPassManager.addPass(createIREELoopInvariantCodeMotionPass());
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  funcPassManager.addPass(createForOpCanonicalizationPass());
+  funcPassManager.addPass(createCanonicalizerPass());
 
   // Handle vector reduction operations specifically.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createConvertVectorReductionToGPUPass(getWarpSize));
+  funcPassManager.addPass(createConvertVectorReductionToGPUPass(
+      /*expandSubgroupReduction=*/false));
   // Perform normal vector unrolling and lowering transformations. This breaks
   // vectors down to native machine size.
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-}
-
-void addSPIRVWinogradVectorizePassPipeline(OpPassManager &pm) {
-  addTileAndDistributeToWorkgroupsPasses(
-      pm, /*useFuseTensorPadWithConsumerPass=*/true);
-
-  auto &nestedModulePM = pm.nest<ModuleOp>();
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      IREE::LinalgExt::createTileAndDecomposeWinogradTransformPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createFoldAffineMinInDistributedLoopsPass());
-  nestedModulePM.addPass(memref::createResolveShapedTypeResultDimsPass());
-
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-
-  // Tile to GPU invocations and vectorize.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createSPIRVAnnotateWinogradLoopsPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createSPIRVVectorizePass());
-  nestedModulePM.addNestedPass<func::FuncOp>(createForOpCanonicalizationPass());
-  nestedModulePM.addPass(createCanonicalizerPass());
-  nestedModulePM.addPass(createCSEPass());
-
-  // Bufferize and distribute.
-  addSPIRVBufferizePasses(nestedModulePM, gpuAllocateFunctionMemoryFn);
-
-  // Generate loop nests for all remaining ops and remove trivial loops.
-  addLoopMaterializationPasses(nestedModulePM);
-
-  // Perform various vector-level cross-op optimizations like load-store
-  // forwarding, shape casting and casting op cancelling.
-  nestedModulePM.addNestedPass<func::FuncOp>(
-      createOptimizeVectorTransferPass());
+  addSPIRVVectorLoweringPasses(funcPassManager);
+  funcPassManager.addPass(createCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
 }
 
 //===----------------------------------------------------------------------===//
 // Entry Point
 //===----------------------------------------------------------------------===//
 
-void buildSPIRVCodegenPassPipeline(OpPassManager &pm, bool enableFastMath) {
-  pm.nest<ModuleOp>().nest<func::FuncOp>().addPass(createTypePropagationPass());
-  pm.nest<ModuleOp>().addPass(createBufferizeCopyOnlyDispatchesPass());
-  pm.nest<ModuleOp>().addNestedPass<func::FuncOp>(
-      IREE::LinalgExt::createDecomposeSoftmaxPass());
-  // Temporary solution to avoid large allocations due to softmax lowering.
-  pm.nest<ModuleOp>().addNestedPass<func::FuncOp>(
-      createRematerializeParallelOpsPass());
-  pm.addPass(createSPIRVLowerExecutableTargetPass());
+static void buildSPIRVCodegenConfigurationPassPipelineImpl(
+    OpPassManager &modulePassManager) {
+  {
+    FunctionLikeNest funcPassManager(modulePassManager);
+    funcPassManager.addPass(createGPUGeneralizeNamedOpsPass);
+    addCommonTargetExecutablePreprocessingPasses(funcPassManager);
+    addEncodingToNopPasses(funcPassManager);
+  }
+  modulePassManager.addPass(createMaterializeUserConfigsPass());
+  modulePassManager.addPass(createSPIRVSelectLoweringStrategyPass());
+}
 
-  addMemRefLoweringPasses(pm.nest<ModuleOp>());
-  addSPIRVLoweringPasses(pm.nest<ModuleOp>(), enableFastMath);
+void buildSPIRVCodegenConfigurationPassPipeline(
+    OpPassManager &variantPassManager) {
+  OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
+  buildSPIRVCodegenConfigurationPassPipelineImpl(modulePassManager);
+}
+
+void buildSPIRVCodegenPassPipeline(OpPassManager &variantPassManager) {
+  {
+    OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
+    modulePassManager.addPass(
+        createSPIRVLowerExecutableUsingTransformDialectPass());
+    FunctionLikeNest(modulePassManager)
+        .addPass(createSPIRVLowerExecutableTargetPass)
+        .addPass(createVerifyWorkgroupDistributionPass);
+    addMemRefLoweringPasses(modulePassManager);
+  }
+  variantPassManager.addPass(createReconcileTranslationInfoPass());
+  variantPassManager.addPass(IREE::Util::createDropCompilerHintsPass());
+
+  {
+    OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
+    addSPIRVLoweringPasses(modulePassManager);
+  }
 
   LLVM_DEBUG({
     llvm::dbgs() << "Using SPIR-V pass pipeline:\n";
-    pm.printAsTextualPipeline(llvm::dbgs());
+    variantPassManager.printAsTextualPipeline(llvm::dbgs());
     llvm::dbgs() << "\n";
   });
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+// NOTE: this runs on the top-level program module containing all hal.executable
+// ops.
+void buildSPIRVLinkingPassPipeline(OpPassManager &modulePassManager) {
+  auto &executablePassManager =
+      modulePassManager.nest<IREE::HAL::ExecutableOp>();
+  // Trim the allowed target environment (version/capability/extension/etc.) to
+  // the minimal requirement needed by compiled spirv.module ops. This helps to
+  // increase the chance of linking different variant ops together.
+  executablePassManager.addNestedPass<IREE::HAL::ExecutableVariantOp>(
+      createSPIRVTrimExecutableTargetEnvPass());
+  // Materialize the minimal required target environment into proper device
+  // queries to execute in the runtime.
+  executablePassManager.addNestedPass<IREE::HAL::ExecutableVariantOp>(
+      createSPIRVMaterializeExecutableConditionsPass());
+  // Link together executables. This may produce some IR duplication.
+  modulePassManager.addPass(createSPIRVLinkExecutablesPass());
+
+  // Cleanup IR duplication.
+  modulePassManager.addNestedPass<IREE::HAL::ExecutableOp>(
+      mlir::createCanonicalizerPass());
+}
+
+//===---------------------------------------------------------------------===//
+// Register SPIR-V Passes
+//===---------------------------------------------------------------------===//
+
+namespace {
+#define GEN_PASS_REGISTRATION
+#include "iree/compiler/Codegen/SPIRV/Passes.h.inc"
+} // namespace
+
+void registerCodegenSPIRVPasses() {
+  // Generated.
+  registerPasses();
+
+  static PassPipelineRegistration<> SPIRVConfigPipeline(
+      "iree-codegen-spirv-configuration-pipeline",
+      "Runs the pipeline for configuring the lowering from linalg to SPIR-V on "
+      "all functions in a module",
+      [](OpPassManager &modulePassManager) {
+        buildSPIRVCodegenConfigurationPassPipelineImpl(modulePassManager);
+      });
+
+  static PassPipelineRegistration<> LinalgSPIRVPipeline(
+      "iree-codegen-linalg-to-spirv-pipeline",
+      "Runs the progressive lowering pipeline from linalg to SPIR-V",
+      [](OpPassManager &variantPassManager) {
+        buildSPIRVCodegenPassPipeline(variantPassManager);
+      });
+}
+
+} // namespace mlir::iree_compiler

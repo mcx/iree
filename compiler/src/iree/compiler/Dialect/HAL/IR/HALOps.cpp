@@ -8,26 +8,42 @@
 
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Support/SMLoc.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/IRMapping.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpImplementation.h"
-#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
+
+namespace {
+
+// We aribtrarily say that unbounded dimensions in a torch program cannot
+// exceed 53bits, making the maximum safe dimension 9007199254740991. The
+// astute reader will note that this is also the maximum safe value in
+// JavaScript, which also "happens" to be the largest mantissa value in a
+// 64bit double. We need a maximum and in the absence of a better choice,
+// with this one we are at least in good company. This limit is also used
+// in the frontends.
+static constexpr uint64_t MAX_DIM_VALUE = (static_cast<uint64_t>(1) << 53) - 1;
+
+// Similarly we use a very conservative maximum rank value for specifying
+// ranges of runtime rank resolution functions. Various frameworks have hard
+// and practical limits ranging from 32 (numpy) to hundreds. At the time of
+// writing, PyTorch throws weird errors if trying to print a tensor with a rank
+// greater than 992. We really just want a smallish integer value to bound
+// arithmetic, so we use an arbitrary maximum.
+static constexpr uint64_t MAX_RANK_VALUE = 4096;
+
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // custom<DescriptorType>($descriptor_type)
@@ -38,9 +54,12 @@ namespace HAL {
 static ParseResult parseDescriptorType(OpAsmParser &parser,
                                        DescriptorTypeAttr &dtAttr) {
   StringRef enumKeyword;
-  if (failed(parser.parseKeyword(&enumKeyword))) return failure();
-  Optional<DescriptorType> maybeEnum = symbolizeDescriptorType(enumKeyword);
-  if (!maybeEnum) return failure();
+  if (failed(parser.parseKeyword(&enumKeyword)))
+    return failure();
+  std::optional<DescriptorType> maybeEnum =
+      symbolizeDescriptorType(enumKeyword);
+  if (!maybeEnum)
+    return failure();
   dtAttr = DescriptorTypeAttr::get(parser.getContext(), *maybeEnum);
   return success();
 }
@@ -51,14 +70,14 @@ static void printDescriptorType(OpAsmPrinter &p, Operation *,
 }
 
 //===----------------------------------------------------------------------===//
-// custom<DescriptorSetBindings>($binding_ordinals,
-//                               $binding_buffers,
-//                               type($binding_buffers),
-//                               $binding_offsets,
-//                               $binding_lengths)
+// custom<PipelineBindings>($binding_ordinals,
+//                          $binding_buffers,
+//                          type($binding_buffers),
+//                          $binding_offsets,
+//                          $binding_lengths)
 //===----------------------------------------------------------------------===//
 
-static ParseResult parseDescriptorSetBindings(
+static ParseResult parsePipelineBindings(
     OpAsmParser &parser,
     SmallVectorImpl<OpAsmParser::UnresolvedOperand> &ordinals,
     SmallVectorImpl<OpAsmParser::UnresolvedOperand> &buffers,
@@ -90,11 +109,11 @@ static ParseResult parseDescriptorSetBindings(
   return success();
 }
 
-static void printDescriptorSetBindings(OpAsmPrinter &p, Operation *op,
-                                       ValueRange ordinals, ValueRange buffers,
-                                       TypeRange bufferTypes,
-                                       ValueRange bufferOffsets,
-                                       ValueRange bufferLengths) {
+static void printPipelineBindings(OpAsmPrinter &p, Operation *op,
+                                  ValueRange ordinals, ValueRange buffers,
+                                  TypeRange bufferTypes,
+                                  ValueRange bufferOffsets,
+                                  ValueRange bufferLengths) {
   llvm::interleaveComma(llvm::zip_equal(ordinals, buffers, bufferTypes,
                                         bufferOffsets, bufferLengths),
                         p,
@@ -116,12 +135,342 @@ static void printDescriptorSetBindings(OpAsmPrinter &p, Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
-// hal.ex.shared_device
+// custom<Bindings>($binding_buffers,
+//                  type($binding_buffers),
+//                  $binding_offsets,
+//                  $binding_lengths)
 //===----------------------------------------------------------------------===//
 
-void ExSharedDeviceOp::getAsmResultNames(
+static ParseResult
+parseBindings(OpAsmParser &parser,
+              SmallVectorImpl<OpAsmParser::UnresolvedOperand> &buffers,
+              SmallVectorImpl<Type> &bufferTypes,
+              SmallVectorImpl<OpAsmParser::UnresolvedOperand> &bufferOffsets,
+              SmallVectorImpl<OpAsmParser::UnresolvedOperand> &bufferLengths) {
+  do {
+    OpAsmParser::UnresolvedOperand buffer;
+    Type bufferType;
+    OpAsmParser::UnresolvedOperand bufferOffset;
+    OpAsmParser::UnresolvedOperand bufferLength;
+    if (failed(parser.parseLParen()) || failed(parser.parseOperand(buffer)) ||
+        failed(parser.parseColonType(bufferType)) ||
+        failed(parser.parseRParen()) || failed(parser.parseLSquare()) ||
+        failed(parser.parseOperand(bufferOffset)) ||
+        failed(parser.parseComma()) ||
+        failed(parser.parseOperand(bufferLength)) ||
+        failed(parser.parseRSquare())) {
+      return failure();
+    }
+    buffers.push_back(buffer);
+    bufferTypes.push_back(bufferType);
+    bufferOffsets.push_back(bufferOffset);
+    bufferLengths.push_back(bufferLength);
+  } while (succeeded(parser.parseOptionalComma()));
+  return success();
+}
+
+static void printBindings(OpAsmPrinter &p, Operation *op, ValueRange buffers,
+                          TypeRange bufferTypes, ValueRange bufferOffsets,
+                          ValueRange bufferLengths) {
+  llvm::interleaveComma(
+      llvm::zip_equal(buffers, bufferTypes, bufferOffsets, bufferLengths), p,
+      [&](std::tuple<Value, Type, Value, Value> it) {
+        p.printNewline();
+        p << "  (";
+        p.printOperand(std::get<0>(it));
+        p << " : ";
+        p.printType(std::get<1>(it));
+        p << ")[";
+        p.printOperand(std::get<2>(it));
+        p << ", ";
+        p.printOperand(std::get<3>(it));
+        p << "]";
+      });
+  p.printNewline();
+}
+
+//===----------------------------------------------------------------------===//
+// custom<BindingTable>($binding_buffers,
+//                      type($binding_buffers),
+//                      $binding_offsets,
+//                      $binding_lengths)
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseBindingTable(
+    OpAsmParser &parser,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &buffers,
+    SmallVectorImpl<Type> &bufferTypes,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &bufferOffsets,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &bufferLengths) {
+  do {
+    OpAsmParser::UnresolvedOperand buffer;
+    Type bufferType;
+    OpAsmParser::UnresolvedOperand bufferOffset;
+    OpAsmParser::UnresolvedOperand bufferLength;
+    if (failed(parser.parseLParen()) || failed(parser.parseOperand(buffer)) ||
+        failed(parser.parseColonType(bufferType)) ||
+        failed(parser.parseRParen()) || failed(parser.parseLSquare()) ||
+        failed(parser.parseOperand(bufferOffset)) ||
+        failed(parser.parseComma()) ||
+        failed(parser.parseOperand(bufferLength)) ||
+        failed(parser.parseRSquare())) {
+      return failure();
+    }
+    buffers.push_back(buffer);
+    bufferTypes.push_back(bufferType);
+    bufferOffsets.push_back(bufferOffset);
+    bufferLengths.push_back(bufferLength);
+  } while (succeeded(parser.parseOptionalComma()));
+  return success();
+}
+
+static void printBindingTable(OpAsmPrinter &p, Operation *op,
+                              ValueRange buffers, TypeRange bufferTypes,
+                              ValueRange bufferOffsets,
+                              ValueRange bufferLengths) {
+  llvm::interleaveComma(
+      llvm::zip_equal(buffers, bufferTypes, bufferOffsets, bufferLengths), p,
+      [&](std::tuple<Value, Type, Value, Value> it) {
+        p.printNewline();
+        p << "  ";
+        p << "(";
+        p.printOperand(std::get<0>(it));
+        p << " : ";
+        p.printType(std::get<1>(it));
+        p << ")[";
+        p.printOperand(std::get<2>(it));
+        p << ", ";
+        p.printOperand(std::get<3>(it));
+        p << "]";
+      });
+  p.printNewline();
+}
+
+//===----------------------------------------------------------------------===//
+// custom<TargetConditionRegion>($body)
+//===----------------------------------------------------------------------===//
+
+static FunctionType getTargetConditionRegionType(MLIRContext *context) {
+  return FunctionType::get(context,
+                           {
+                               IREE::HAL::DeviceType::get(context),
+                           },
+                           {
+                               IntegerType::get(context, 1),
+                           });
+}
+
+static LogicalResult verifyTargetConditionRegion(Operation *op,
+                                                 Region &region) {
+  // Ignore if empty.
+  if (region.empty()) {
+    return success();
+  }
+
+  // Verify region takes a !hal.device.
+  if (region.getNumArguments() != 1 ||
+      !isa<IREE::HAL::DeviceType>(region.getArgumentTypes().front())) {
+    return op->emitOpError()
+           << "target condition region must take a !hal.device";
+  }
+
+  // Verify i1 return.
+  for (auto returnOp : region.getOps<IREE::HAL::ReturnOp>()) {
+    if (returnOp.getNumOperands() != 1) {
+      return returnOp.emitOpError()
+             << "target condition region must return a single i1 result";
+    }
+    for (auto returnType : returnOp.getOperandTypes()) {
+      if (!returnType.isInteger(1)) {
+        return returnOp.emitOpError()
+               << "target condition region must return a single i1 result";
+      }
+    }
+  }
+
+  return success();
+}
+
+static ParseResult parseTargetConditionRegion(OpAsmParser &parser,
+                                              Region &body) {
+  SmallVector<OpAsmParser::Argument> args;
+  if (failed(parser.parseArgumentList(args, AsmParser::Delimiter::Paren,
+                                      /*allowType=*/true,
+                                      /*allowAttrs=*/true))) {
+    return failure();
+  }
+
+  SmallVector<Type> returnTypes;
+  if (failed(parser.parseArrowTypeList(returnTypes))) {
+    return failure();
+  }
+  if (returnTypes.size() != 1 ||
+      !llvm::all_of(returnTypes, [](Type type) { return type.isInteger(1); })) {
+    return parser.emitError(parser.getCurrentLocation())
+           << "target condition region must return one i1";
+  }
+
+  return parser.parseRegion(body, args, /*enableNameShadowing=*/false);
+}
+
+static void printTargetConditionRegion(OpAsmPrinter &p, Operation *op,
+                                       Region &body) {
+  if (body.empty())
+    return;
+  p << "(";
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ")";
+  p.printArrowTypeList(TypeRange{IntegerType::get(body.getContext(), 1)});
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+}
+
+static ParseResult parseTargetConditionObjects(
+    OpAsmParser &parser, ArrayAttr &targetsAttr, ArrayAttr &targetOrdinalsAttr,
+    ArrayAttr &targetObjectsAttr,
+    SmallVector<std::unique_ptr<Region>, 2> &targetRegions) {
+  SmallVector<Attribute> targetsAttrs;
+  SmallVector<Attribute> targetOrdinalsAttrs;
+  SmallVector<Attribute> targetObjectsAttrs;
+  do {
+    // #hal.executable.target<...>
+    Attribute targetAttr;
+    if (failed(parser.parseAttribute(targetAttr)))
+      return failure();
+    targetsAttrs.push_back(targetAttr);
+
+    // if(...) -> i1 { ... }
+    auto region = std::make_unique<Region>();
+    if (succeeded(parser.parseOptionalKeyword("if"))) {
+      if (failed(parseTargetConditionRegion(parser, *region)))
+        return failure();
+    }
+    targetRegions.push_back(std::move(region));
+
+    // ordinal(#)
+    Attribute targetOrdinalAttr;
+    if (failed(parser.parseKeyword("ordinal")) ||
+        failed(parser.parseLParen()) ||
+        failed(parser.parseAttribute(targetOrdinalAttr,
+                                     IndexType::get(parser.getContext()))) ||
+        failed(parser.parseRParen()))
+      return failure();
+    targetOrdinalsAttrs.push_back(targetOrdinalAttr);
+
+    // = [#hal.executable.object<...>, ...]
+    ArrayAttr targetObjectsAttr;
+    if (failed(parser.parseEqual()) ||
+        failed(parser.parseAttribute(targetObjectsAttr)))
+      return failure();
+    targetObjectsAttrs.push_back(targetObjectsAttr);
+  } while (succeeded(parser.parseOptionalComma()));
+  targetsAttr = ArrayAttr::get(parser.getContext(), targetsAttrs);
+  targetOrdinalsAttr = ArrayAttr::get(parser.getContext(), targetOrdinalsAttrs);
+  targetObjectsAttr = ArrayAttr::get(parser.getContext(), targetObjectsAttrs);
+  return success();
+}
+
+static void printTargetConditionObjects(OpAsmPrinter &p, Operation *op,
+                                        ArrayAttr targetsAttr,
+                                        ArrayAttr targetOrdinalsAttr,
+                                        ArrayAttr targetObjectsAttr,
+                                        MutableArrayRef<Region> targetRegions) {
+  p.increaseIndent();
+  p.printNewline();
+
+  llvm::interleave(
+      llvm::zip_equal(targetsAttr, targetOrdinalsAttr, targetObjectsAttr,
+                      targetRegions),
+      [&](auto it) {
+        auto &[targetAttr, targetOrdinalAttr, targetObjectsAttr, targetRegion] =
+            it;
+        p.printAttribute(targetAttr);
+        if (!targetRegion.empty()) {
+          p << " if";
+          printTargetConditionRegion(p, op, targetRegion);
+        }
+        p << " ordinal(";
+        p.printAttributeWithoutType(targetOrdinalAttr);
+        p << ")";
+        p << " = ";
+        p.printAttribute(targetObjectsAttr);
+      },
+      [&]() {
+        p << ",";
+        p.printNewline();
+      });
+
+  p.decreaseIndent();
+  p.printNewline();
+}
+
+//===----------------------------------------------------------------------===//
+// custom<WorkgroupCountRegion>($body)
+//===----------------------------------------------------------------------===//
+
+static ParseResult parseWorkgroupCountRegion(OpAsmParser &parser,
+                                             Region &body) {
+  SmallVector<OpAsmParser::Argument> args;
+  if (failed(parser.parseArgumentList(args, AsmParser::Delimiter::Paren,
+                                      /*allowType=*/true,
+                                      /*allowAttrs=*/true))) {
+    return failure();
+  }
+
+  // Return types must be 3 dimensions (workgroup count XYZ).
+  SmallVector<Type> returnTypes;
+  if (failed(parser.parseArrowTypeList(returnTypes))) {
+    return failure();
+  }
+  if (returnTypes.size() != 3 ||
+      !llvm::all_of(returnTypes, [](Type type) { return type.isIndex(); })) {
+    return parser.emitError(parser.getCurrentLocation())
+           << "workgroup count region must return the XYZ dimension counts";
+  }
+
+  // Parse region contents.
+  if (failed(parser.parseRegion(body, args, /*enableNameShadowing=*/false))) {
+    return failure();
+  }
+
+  // Verify the return types match.
+  for (auto returnOp : body.getOps<IREE::HAL::ReturnOp>()) {
+    for (auto [resultType, returnType] :
+         llvm::zip_equal(returnTypes, returnOp.getOperandTypes())) {
+      if (resultType != returnType) {
+        return returnOp.emitOpError()
+               << "operands do not match expected region return types";
+      }
+    }
+  }
+
+  return success();
+}
+
+static void printWorkgroupCountRegion(OpAsmPrinter &p, Operation *op,
+                                      Region &body) {
+  if (body.empty())
+    return;
+  p << "(";
+  llvm::interleaveComma(body.getArguments(), p,
+                        [&](BlockArgument arg) { p.printRegionArgument(arg); });
+  p << ")";
+  Type indexType = IndexType::get(body.getContext());
+  p.printArrowTypeList(TypeRange{indexType, indexType, indexType});
+  p << " ";
+  p.printRegion(body, /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/true);
+}
+
+//===----------------------------------------------------------------------===//
+// hal.ex.*
+//===----------------------------------------------------------------------===//
+
+void ExFileFromMemoryOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "device");
+  setNameFn(getResult(), "memory_file");
 }
 
 //===----------------------------------------------------------------------===//
@@ -131,7 +480,8 @@ void ExSharedDeviceOp::getAsmResultNames(
 LogicalResult ReturnOp::verify() {
   ReturnOp op = *this;
 
-  auto parentFuncOp = dyn_cast_or_null<FunctionOpInterface>(op->getParentOp());
+  auto parentFuncOp =
+      dyn_cast_or_null<mlir::FunctionOpInterface>(op->getParentOp());
   if (parentFuncOp) {
     auto expectedTypes = parentFuncOp.getResultTypes();
     if (op.getNumOperands() != expectedTypes.size()) {
@@ -159,48 +509,43 @@ LogicalResult ReturnOp::verify() {
 //===----------------------------------------------------------------------===//
 
 void TensorImportOp::build(OpBuilder &builder, OperationState &result,
-                           Type resultType, Value source) {
-  build(builder, result, resultType, source, /*waitFence=*/Value{});
+                           Type resultType, Value source,
+                           TypeAttr targetEncoding, StringAttr name,
+                           Attribute affinity) {
+  build(builder, result, resultType, source, targetEncoding,
+        /*waitFence=*/Value{}, name, affinity);
 }
 
 void TensorImportOp::build(OpBuilder &builder, OperationState &result,
-                           Type resultType, Value source, Value waitFence) {
-  auto shapedType = resultType.cast<ShapedType>();
-  assert((source.getType().isa<IREE::HAL::BufferViewType>() ||
+                           Type resultType, Value source,
+                           TypeAttr targetEncoding, Value waitFence,
+                           StringAttr name, Attribute affinity) {
+  auto shapedType = llvm::cast<ShapedType>(resultType);
+  assert((isa<IREE::HAL::BufferViewType>(source.getType()) ||
           shapedType.hasStaticShape()) &&
          "can only use this constructor for buffer views when shape "
          "information is required");
   SmallVector<Value> dynamicDims;
   for (int64_t i = 0; i < shapedType.getRank(); ++i) {
-    if (!shapedType.isDynamicDim(i)) continue;
+    if (!shapedType.isDynamicDim(i))
+      continue;
     dynamicDims.push_back(builder.createOrFold<IREE::HAL::BufferViewDimOp>(
         result.location, builder.getIndexType(), source,
         builder.getIndexAttr(i)));
   }
-  build(builder, result, resultType, source, TypeAttr::get(shapedType),
-        dynamicDims, waitFence);
-}
-
-Value TensorImportOp::getTiedResult(unsigned resultIndex) {
-  return IREE::Util::TiedOpInterface::findTiedBaseValue(getSource());
-}
-
-::llvm::Optional<unsigned> TensorImportOp::getTiedResultOperandIndex(
-    unsigned resultIndex) {
-  return {0};  // source
-}
-
-SmallVector<int64_t, 4> TensorImportOp::getTiedResultOperandIndices() {
-  return {0};  // source
+  build(builder, result, resultType, source, targetEncoding, dynamicDims,
+        waitFence, name, affinity);
 }
 
 static LogicalResult verifyTypeStorageCompatibility(Operation *op,
                                                     Type encodingType,
                                                     Type storageType) {
-  if (encodingType == storageType) return success();
-  auto encodingShapedType = encodingType.dyn_cast<ShapedType>();
-  auto storageShapedType = storageType.dyn_cast<ShapedType>();
-  if (!encodingShapedType || !storageShapedType) return success();
+  if (encodingType == storageType)
+    return success();
+  auto encodingShapedType = llvm::dyn_cast<ShapedType>(encodingType);
+  auto storageShapedType = llvm::dyn_cast<ShapedType>(storageType);
+  if (!encodingShapedType || !storageShapedType)
+    return success();
 
   if (IREE::Util::getRoundedElementByteWidth(
           encodingShapedType.getElementType()) !=
@@ -242,7 +587,7 @@ static LogicalResult verifyTypeStorageCompatibility(Operation *op,
 
 LogicalResult TensorImportOp::verify() {
   TensorImportOp op = *this;
-  auto targetType = op.getTarget().getType().cast<TensorType>();
+  auto targetType = llvm::cast<TensorType>(op.getTarget().getType());
   if (targetType.getNumDynamicDims() != op.getTargetDims().size()) {
     return op->emitOpError() << "number of target_dims must match number of "
                                 "dynamic dims in target type";
@@ -251,29 +596,18 @@ LogicalResult TensorImportOp::verify() {
 }
 
 void TensorExportOp::build(OpBuilder &builder, OperationState &result,
-                           Type resultType, Value source) {
+                           Type resultType, Value source,
+                           TypeAttr sourceEncoding, StringAttr name,
+                           Attribute affinity) {
   auto dynamicDims =
       IREE::Util::buildDynamicDimsForValue(result.location, source, builder);
-  build(builder, result, resultType, source, TypeAttr::get(source.getType()),
-        dynamicDims, /*target_storage=*/nullptr);
-}
-
-Value TensorExportOp::getTiedResult(unsigned resultIndex) {
-  return IREE::Util::TiedOpInterface::findTiedBaseValue(getSource());
-}
-
-::llvm::Optional<unsigned> TensorExportOp::getTiedResultOperandIndex(
-    unsigned resultIndex) {
-  return {0};  // source
-}
-
-SmallVector<int64_t, 4> TensorExportOp::getTiedResultOperandIndices() {
-  return {0};  // source
+  build(builder, result, resultType, source, sourceEncoding, dynamicDims, name,
+        affinity);
 }
 
 LogicalResult TensorExportOp::verify() {
   TensorExportOp op = *this;
-  auto sourceType = op.getSource().getType().cast<TensorType>();
+  auto sourceType = llvm::cast<TensorType>(op.getSource().getType());
   if (sourceType.getNumDynamicDims() != op.getSourceDims().size()) {
     return op->emitOpError() << "number of source_dims must match number of "
                                 "dynamic dims in source type";
@@ -283,13 +617,40 @@ LogicalResult TensorExportOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// hal.tensor.alias
+//===----------------------------------------------------------------------===//
+
+Value TensorAliasOp::getTiedResult(unsigned resultIndex) {
+  return IREE::Util::TiedOpInterface::findTiedBaseValue(getSource());
+}
+
+::std::optional<unsigned>
+TensorAliasOp::getTiedResultOperandIndex(unsigned resultIndex) {
+  return {0}; // source
+}
+
+SmallVector<int64_t> TensorAliasOp::getTiedResultOperandIndices() {
+  return {0}; // source
+}
+
+LogicalResult TensorAliasOp::verify() {
+  TensorAliasOp op = *this;
+  auto type = llvm::cast<TensorType>(op.getSource().getType());
+  if (type.getNumDynamicDims() != op.getSourceDims().size()) {
+    return op->emitOpError()
+           << "number of dynamic dims must match the operand type";
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // hal.tensor.barrier
 //===----------------------------------------------------------------------===//
 
 void TensorBarrierOp::build(OpBuilder &builder, OperationState &result,
                             ValueRange sources, Value signalFence) {
-  auto resultTypes = llvm::to_vector(
-      llvm::map_range(sources, [](Value source) { return source.getType(); }));
+  auto resultTypes = llvm::map_to_vector(
+      sources, [](Value source) { return source.getType(); });
   build(builder, result, resultTypes, sources, signalFence);
 }
 
@@ -298,14 +659,180 @@ Value TensorBarrierOp::getTiedResult(unsigned resultIndex) {
       getSources()[resultIndex]);
 }
 
-::llvm::Optional<unsigned> TensorBarrierOp::getTiedResultOperandIndex(
-    unsigned resultIndex) {
-  return {resultIndex};  // sources[i]
+::std::optional<unsigned>
+TensorBarrierOp::getTiedResultOperandIndex(unsigned resultIndex) {
+  return {resultIndex}; // sources[i]
 }
 
-SmallVector<int64_t, 4> TensorBarrierOp::getTiedResultOperandIndices() {
+SmallVector<int64_t> TensorBarrierOp::getTiedResultOperandIndices() {
   size_t numSources = getSources().size();
-  return llvm::to_vector<4>(llvm::seq<int64_t>(0, numSources));
+  return llvm::to_vector(llvm::seq<int64_t>(0, numSources));
+}
+
+//===----------------------------------------------------------------------===//
+// hal.dispatch.extern
+//===----------------------------------------------------------------------===//
+
+void DispatchExternOp::build(OpBuilder &builder, OperationState &state,
+                             ValueRange workload, TypeRange resultTypes,
+                             ValueRange resultDims, ValueRange arguments,
+                             ValueRange argumentDims,
+                             ArrayRef<int64_t> tiedOperands,
+                             IREE::HAL::ExecutableObjectsAttr targetObjects,
+                             ArrayRef<NamedAttribute> attributes) {
+  state.addTypes(resultTypes);
+  state.addOperands(workload);
+  state.addOperands(arguments);
+  state.addOperands(argumentDims);
+  state.addOperands(resultDims);
+  state.addAttributes(attributes);
+  state.attributes.erase(IREE::Util::TiedOpInterface::getStorageAttrName());
+  state.addAttribute(IREE::Util::TiedOpInterface::getStorageAttrName(),
+                     builder.getIndexArrayAttr(tiedOperands));
+  state.addAttribute("targets", targetObjects.getTargets());
+  state.addAttribute("target_objects", targetObjects.getTargetObjects());
+  state.attributes.erase(getOperandSegmentSizeAttr());
+  state.addAttribute(getOperandSegmentSizeAttr(),
+                     builder.getDenseI32ArrayAttr({
+                         static_cast<int32_t>(workload.size()),
+                         static_cast<int32_t>(arguments.size()),
+                         static_cast<int32_t>(argumentDims.size()),
+                         static_cast<int32_t>(resultDims.size()),
+                     }));
+
+  // NOTE: workgroup count region is empty; callers are expected to populate it.
+  state.addRegion();
+
+  // Add one empty region per target.
+  for (size_t i = 0; i < targetObjects.getTargets().size(); ++i)
+    state.addRegion();
+}
+
+// Verifies that |dynamicDims| contains the appropriate number of dims for all
+// of the dynamic dimensions in |values|.
+static LogicalResult verifyOpDynamicDims(Operation *op, ValueRange values,
+                                         ValueRange dynamicDims) {
+  unsigned requiredCount = 0;
+  for (auto value : values) {
+    if (auto shapedType = llvm::dyn_cast<ShapedType>(value.getType())) {
+      requiredCount += shapedType.getNumDynamicDims();
+    }
+  }
+  if (dynamicDims.size() != requiredCount) {
+    return op->emitOpError()
+           << "value set has " << requiredCount
+           << " dynamic dimensions but only " << dynamicDims.size()
+           << " dimension values are attached";
+  }
+  return success();
+}
+
+static LogicalResult
+verifyWorkgroupCountRegion(Operation *op, ValueRange workload, Region &region) {
+  // Verify the workload operands match the expected capture args.
+  auto regionArguments =
+      llvm::make_filter_range(region.getArgumentTypes(), [](Type type) {
+        return !isa<IREE::HAL::DeviceType>(type);
+      });
+  if (workload.size() != llvm::range_size(regionArguments)) {
+    return op->emitOpError()
+           << "workload operands and workgroup count args mismatch ("
+           << workload.size() << " vs " << llvm::range_size(regionArguments)
+           << ")";
+  }
+  for (auto [index, values] :
+       llvm::enumerate(llvm::zip_equal(workload, regionArguments))) {
+    auto [workloadValue, capturedType] = values;
+    if (workloadValue.getType() != capturedType) {
+      return op->emitOpError()
+             << "workload value " << index << " type mismatch; operand is "
+             << workloadValue.getType() << " but region captures "
+             << capturedType;
+    }
+  }
+  return success();
+}
+
+LogicalResult DispatchExternOp::verify() {
+  Operation *op = getOperation();
+
+  if (failed(verifyOpDynamicDims(getOperation(), getArguments(),
+                                 getArgumentDims())) ||
+      failed(
+          verifyOpDynamicDims(getOperation(), getResults(), getResultDims()))) {
+    return failure();
+  }
+
+  auto verifyIOType = [&](Type type) -> LogicalResult {
+    if (auto shapedType = llvm::dyn_cast<ShapedType>(type)) {
+      if (shapedType.getElementType().isIndex()) {
+        return op->emitOpError() << "I/O type " << type
+                                 << " is invalid: index types must not cross "
+                                    "the dispatch boundary";
+      }
+    }
+    return success();
+  };
+  for (auto type : getOperandTypes()) {
+    if (failed(verifyIOType(type)))
+      return failure();
+  }
+  for (auto type : getResultTypes()) {
+    if (failed(verifyIOType(type)))
+      return failure();
+  }
+
+  if (failed(
+          verifyWorkgroupCountRegion(op, getWorkload(), getWorkgroupCount()))) {
+    return failure();
+  }
+
+  if (getTargets().size() != getTargetObjects().size()) {
+    return op->emitOpError() << "target and objects arrays must match";
+  }
+  if (getTargets().size() != getTargetRegions().size()) {
+    return op->emitOpError()
+           << "target and condition regions must match (but they may be empty)";
+  }
+  for (auto &targetRegion : getTargetRegions()) {
+    if (failed(verifyTargetConditionRegion(op, targetRegion))) {
+      return failure();
+    }
+  }
+
+  return success();
+}
+
+std::pair<unsigned, unsigned>
+DispatchExternOp::getTiedOperandsIndexAndLength() {
+  return getODSOperandIndexAndLength(1);
+}
+
+//===----------------------------------------------------------------------===//
+// hal.device.memoize
+//===----------------------------------------------------------------------===//
+
+void DeviceMemoizeOp::build(OpBuilder &builder, OperationState &state,
+                            TypeRange resultTypes, Value device,
+                            Value queueAffinity,
+                            ArrayRef<NamedAttribute> attributes) {
+  state.addTypes(resultTypes);
+  state.addOperands(device);
+  state.addOperands(queueAffinity);
+  state.addAttributes(attributes);
+  state.addRegion();
+}
+
+void DeviceMemoizeOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  // Unconditional control flow into the region and back to the parent, so
+  // return the correct RegionSuccessor purely based on the index being None or
+  // 0.
+  if (!point.isParent()) {
+    regions.push_back(RegionSuccessor({}));
+  } else {
+    regions.push_back(RegionSuccessor(&getBody(), getBody().getArguments()));
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -324,35 +851,18 @@ Value AllocatorAllocateOp::getResultSize(unsigned idx) {
 }
 
 //===----------------------------------------------------------------------===//
-// hal.allocator.allocate.initialized
+// hal.allocator.import
 //===----------------------------------------------------------------------===//
 
-void AllocatorAllocateInitializedOp::getAsmResultNames(
+void AllocatorImportOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getDidImport(), "did_import");
   setNameFn(getResult(), "mapped");
 }
 
-Value AllocatorAllocateInitializedOp::getOperandSize(unsigned idx) {
-  return {};
-}
+Value AllocatorImportOp::getOperandSize(unsigned idx) { return {}; }
 
-Value AllocatorAllocateInitializedOp::getResultSize(unsigned idx) {
-  return getLength();
-}
-
-//===----------------------------------------------------------------------===//
-// hal.allocator.try_map
-//===----------------------------------------------------------------------===//
-
-void AllocatorTryMapOp::getAsmResultNames(
-    function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getDidMap(), "did_map");
-  setNameFn(getResult(), "mapped");
-}
-
-Value AllocatorTryMapOp::getOperandSize(unsigned idx) { return {}; }
-
-Value AllocatorTryMapOp::getResultSize(unsigned idx) { return getLength(); }
+Value AllocatorImportOp::getResultSize(unsigned idx) { return getLength(); }
 
 //===----------------------------------------------------------------------===//
 // hal.buffer.subspan
@@ -373,7 +883,128 @@ Value BufferSubspanOp::getResultSize(unsigned idx) { return getLength(); }
 
 void BufferLengthOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "len");
+  setNameFn(getResult(), "length");
+}
+
+//===----------------------------------------------------------------------===//
+// hal.element_type
+//===----------------------------------------------------------------------===//
+
+// Keep these in sync with iree/hal/buffer_view.h
+enum class NumericalType : uint32_t {
+  kUnknown = 0x00,
+  kInteger = 0x10,
+  kIntegerSigned = kInteger | 0x01,
+  kIntegerUnsigned = kInteger | 0x02,
+  kBoolean = kInteger | 0x03,
+  kFloat = 0x20,
+  kFloatIEEE = kFloat | 0x01,
+  kFloatBrain = kFloat | 0x02,
+  kFloatComplex = kFloat | 0x03,
+  kFloat8E5M2 = kFloat | 0x04,
+  kFloat8E4M3 = kFloat | 0x05,
+  kFloat8E5M2FNUZ = kFloat | 0x06,
+  kFloat8E4M3FNUZ = kFloat | 0x07,
+};
+
+constexpr inline int32_t makeElementTypeValue(NumericalType numericalType,
+                                              int32_t bitCount) {
+  return (static_cast<uint32_t>(numericalType) << 24) | bitCount;
+}
+
+// static
+std::optional<int32_t> ElementTypeOp::getTypeValue(Type type) {
+  if (auto intType = llvm::dyn_cast_if_present<IntegerType>(type)) {
+    NumericalType numericalType;
+    if (intType.isInteger(1)) {
+      return makeElementTypeValue(NumericalType::kBoolean, 8);
+    } else if (intType.isSigned()) {
+      numericalType = NumericalType::kIntegerSigned;
+    } else if (intType.isUnsigned()) {
+      numericalType = NumericalType::kIntegerUnsigned;
+    } else {
+      // There's no such thing as a signless integer in machine types but we
+      // need to be able to round-trip the format through the ABI. Exact
+      // numerical type equality comparisons may fail if the frontend assumes
+      // signed/unsigned but the compiler is propagating signless.
+      numericalType = NumericalType::kInteger;
+    }
+    return makeElementTypeValue(numericalType, intType.getWidth());
+  } else if (auto floatType = llvm::dyn_cast_if_present<FloatType>(type)) {
+    switch (APFloat::SemanticsToEnum(floatType.getFloatSemantics())) {
+    case APFloat::S_Float8E5M2:
+      return makeElementTypeValue(NumericalType::kFloat8E5M2, 8);
+    case APFloat::S_Float8E4M3:
+      return makeElementTypeValue(NumericalType::kFloat8E4M3, 8);
+    case APFloat::S_Float8E5M2FNUZ:
+      return makeElementTypeValue(NumericalType::kFloat8E5M2FNUZ, 8);
+    case APFloat::S_Float8E4M3FNUZ:
+      return makeElementTypeValue(NumericalType::kFloat8E4M3FNUZ, 8);
+    case APFloat::S_IEEEhalf:
+    case APFloat::S_IEEEsingle:
+    case APFloat::S_IEEEdouble:
+    case APFloat::S_IEEEquad:
+      return makeElementTypeValue(NumericalType::kFloatIEEE,
+                                  floatType.getWidth());
+    case APFloat::S_BFloat:
+      return makeElementTypeValue(NumericalType::kFloatBrain,
+                                  floatType.getWidth());
+    default:
+      return std::nullopt;
+    }
+  } else if (auto complexType = llvm::dyn_cast_if_present<ComplexType>(type)) {
+    return makeElementTypeValue(
+        NumericalType::kFloatComplex,
+        complexType.getElementType().getIntOrFloatBitWidth() * 2);
+  }
+  return std::nullopt;
+}
+
+void ElementTypeOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  // We could make this match the C names.
+  std::string name;
+  llvm::raw_string_ostream os(name);
+  os << "element_type_";
+  os << getTypeAttr();
+  setNameFn(getResult(), name);
+}
+
+LogicalResult ElementTypeOp::verify() {
+  ElementTypeOp op = *this;
+  auto value = getTypeValue(getTypeAttr().getValue());
+  if (!value.has_value()) {
+    return op.emitOpError("unsupported element type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// hal.encoding_type
+//===----------------------------------------------------------------------===//
+
+// static
+std::optional<int32_t> EncodingTypeOp::getTypeValue(Attribute attr) {
+  // TODO(#6762): encoding attribute handling/mapping to enums.
+  if (attr)
+    return std::nullopt;
+  // Default to IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR for now.
+  return 1;
+}
+
+void EncodingTypeOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  if (!getEncodingAttr())
+    setNameFn(getResult(), "dense_row_major");
+}
+
+LogicalResult EncodingTypeOp::verify() {
+  EncodingTypeOp op = *this;
+  auto value = getTypeValue(getEncodingAttr());
+  if (!value.has_value()) {
+    return op.emitOpError("unsupported encoding type");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -417,13 +1048,50 @@ void BufferViewBufferOp::getAsmResultNames(
 }
 
 //===----------------------------------------------------------------------===//
-// hal.channel.rank_and_count
+// hal.buffer_view.dim
+//===----------------------------------------------------------------------===//
+
+void BufferViewDimOp::inferResultRangesFromOptional(
+    ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
+  const unsigned indexTypeNumBits = 64;
+  setResultRange(getResult(), IntegerValueRange(ConstantIntRanges::fromUnsigned(
+                                  APInt::getZero(indexTypeNumBits),
+                                  APInt(indexTypeNumBits, MAX_DIM_VALUE))));
+}
+
+//===----------------------------------------------------------------------===//
+// hal.buffer_view.dim
+//===----------------------------------------------------------------------===//
+
+void BufferViewRankOp::inferResultRangesFromOptional(
+    ArrayRef<IntegerValueRange> argRanges, SetIntLatticeFn setResultRange) {
+  const unsigned indexTypeNumBits = 64;
+  setResultRange(getResult(), IntegerValueRange(ConstantIntRanges::fromUnsigned(
+                                  APInt::getZero(indexTypeNumBits),
+                                  APInt(indexTypeNumBits, MAX_RANK_VALUE))));
+}
+
+//===----------------------------------------------------------------------===//
+// hal.channel.create
 //===----------------------------------------------------------------------===//
 
 void ChannelCreateOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
   setNameFn(getResult(), "channel");
 }
+
+//===----------------------------------------------------------------------===//
+// hal.channel.split
+//===----------------------------------------------------------------------===//
+
+void ChannelSplitOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "channel");
+}
+
+//===----------------------------------------------------------------------===//
+// hal.channel.rank_and_count
+//===----------------------------------------------------------------------===//
 
 void ChannelRankAndCountOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
@@ -441,55 +1109,146 @@ void CommandBufferCreateOp::getAsmResultNames(
 }
 
 //===----------------------------------------------------------------------===//
-// hal.command_buffer.push_descriptor_set
+// hal.command_buffer.update_buffer
 //===----------------------------------------------------------------------===//
 
-void CommandBufferPushDescriptorSetOp::build(
-    OpBuilder &builder, OperationState &state, Value commandBuffer,
-    Value pipelineLayout, int64_t set,
-    ArrayRef<DescriptorSetBindingValue> bindings) {
-  build(builder, state, commandBuffer, pipelineLayout,
-        builder.createOrFold<arith::ConstantIndexOp>(state.location, set),
-        bindings);
+IREE::Util::SubrangeOperand
+CommandBufferUpdateBufferOp::getSubrangeOperand(unsigned operandIndex) {
+  if (operandIndex == 1) {
+    return IREE::Util::SubrangeOperand{getSourceBuffer(), getSourceSize(),
+                                       getSourceOffset(), getLength()};
+  } else {
+    assert(false && "only source is a subrange");
+    return {};
+  }
 }
 
-void CommandBufferPushDescriptorSetOp::build(
-    OpBuilder &builder, OperationState &state, Value commandBuffer,
-    Value pipelineLayout, Value set,
-    ArrayRef<DescriptorSetBindingValue> bindings) {
-  state.addOperands({commandBuffer, pipelineLayout, set});
-  SmallVector<Value, 4> bindingOrdinals;
-  SmallVector<Value, 4> bindingBuffers;
-  SmallVector<Value, 4> bindingOffsets;
-  SmallVector<Value, 4> bindingLengths;
+void CommandBufferUpdateBufferOp::setSubrangeOperand(
+    unsigned operandIndex, IREE::Util::SubrangeOperand operand) {
+  if (operandIndex == 1) {
+    getSourceBufferMutable().assign(operand.resource);
+    getSourceSizeMutable().assign(operand.resourceSize);
+    getSourceOffsetMutable().assign(operand.offset);
+  } else {
+    assert(false && "only source is a subrange");
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// hal.command_buffer.dispatch + .indirect
+//===----------------------------------------------------------------------===//
+
+void CommandBufferDispatchOp::build(OpBuilder &builder, OperationState &state,
+                                    Value commandBuffer, Value executable,
+                                    Value entryPoint, ValueRange workgroups,
+                                    ValueRange constants,
+                                    ArrayRef<BindingValue> bindings,
+                                    IREE::HAL::DispatchFlags flags) {
+  state.addOperands({commandBuffer, executable, entryPoint});
+  state.addOperands(workgroups);
+  state.addOperands(constants);
+  SmallVector<Value> bindingBuffers;
+  SmallVector<Value> bindingOffsets;
+  SmallVector<Value> bindingLengths;
   for (auto binding : bindings) {
-    bindingOrdinals.push_back(binding.ordinal);
     bindingBuffers.push_back(binding.buffer);
     bindingOffsets.push_back(binding.byteOffset);
     bindingLengths.push_back(binding.byteLength);
   }
-  state.addOperands(bindingOrdinals);
   state.addOperands(bindingBuffers);
   state.addOperands(bindingOffsets);
   state.addOperands(bindingLengths);
+  state.addAttribute("flags",
+                     builder.getAttr<IREE::HAL::DispatchFlagsAttr>(flags));
+  state.addAttribute(getOperandSegmentSizeAttr(),
+                     builder.getDenseI32ArrayAttr({
+                         1,
+                         1,
+                         1,
+                         1,
+                         1,
+                         1,
+                         static_cast<int32_t>(constants.size()),
+                         static_cast<int32_t>(bindingBuffers.size()),
+                         static_cast<int32_t>(bindingOffsets.size()),
+                         static_cast<int32_t>(bindingLengths.size()),
+                     }));
+}
+
+void CommandBufferDispatchIndirectOp::build(
+    OpBuilder &builder, OperationState &state, Value commandBuffer,
+    Value executable, Value entryPoint, Value workgroupsBuffer,
+    Value workgroupsOffset, ValueRange constants,
+    ArrayRef<BindingValue> bindings, IREE::HAL::DispatchFlags flags) {
+  state.addOperands({commandBuffer, executable, entryPoint, workgroupsBuffer,
+                     workgroupsOffset});
+  state.addOperands(constants);
+  SmallVector<Value> bindingBuffers;
+  SmallVector<Value> bindingOffsets;
+  SmallVector<Value> bindingLengths;
+  for (auto binding : bindings) {
+    bindingBuffers.push_back(binding.buffer);
+    bindingOffsets.push_back(binding.byteOffset);
+    bindingLengths.push_back(binding.byteLength);
+  }
+  state.addOperands(bindingBuffers);
+  state.addOperands(bindingOffsets);
+  state.addOperands(bindingLengths);
+  state.addAttribute("flags",
+                     builder.getAttr<IREE::HAL::DispatchFlagsAttr>(flags));
+  state.addAttribute(getOperandSegmentSizeAttr(),
+                     builder.getDenseI32ArrayAttr({
+                         1,
+                         1,
+                         1,
+                         1,
+                         1,
+                         static_cast<int32_t>(constants.size()),
+                         static_cast<int32_t>(bindingBuffers.size()),
+                         static_cast<int32_t>(bindingOffsets.size()),
+                         static_cast<int32_t>(bindingLengths.size()),
+                     }));
+}
+
+static LogicalResult verifyDispatchBindings(Operation *op,
+                                            ValueRange bindingBuffers,
+                                            ValueRange bindingOffsets,
+                                            ValueRange bindingLengths) {
+  if (bindingBuffers.size() != bindingOffsets.size() ||
+      bindingBuffers.size() != bindingLengths.size()) {
+    return op->emitOpError() << "requires that binding fields all have the "
+                                "same number of elements";
+  }
+  return success();
+}
+
+LogicalResult CommandBufferDispatchOp::verify() {
+  CommandBufferDispatchOp op = *this;
+  return verifyDispatchBindings(op, op.getBindingBuffers(),
+                                op.getBindingOffsets(), op.getBindingLengths());
+}
+
+LogicalResult CommandBufferDispatchIndirectOp::verify() {
+  CommandBufferDispatchIndirectOp op = *this;
+  return verifyDispatchBindings(op, op.getBindingBuffers(),
+                                op.getBindingOffsets(), op.getBindingLengths());
 }
 
 //===----------------------------------------------------------------------===//
-// hal.descriptor_set_layout.create
+// hal.device.resolve
 //===----------------------------------------------------------------------===//
 
-void DescriptorSetLayoutCreateOp::getAsmResultNames(
+void DeviceResolveOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "descriptor_set_layout");
-}
-
-//===----------------------------------------------------------------------===//
-// hal.descriptor_set_layout.lookup
-//===----------------------------------------------------------------------===//
-
-void DescriptorSetLayoutLookupOp::getAsmResultNames(
-    function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "descriptor_set_layout");
+  for (auto result : getResults()) {
+    if (isa<IREE::HAL::DeviceType>(result.getType())) {
+      setNameFn(result, "device");
+    } else if (isa<IREE::HAL::AllocatorType>(result.getType())) {
+      setNameFn(result, "allocator");
+    } else if (isa<IntegerType>(result.getType())) {
+      setNameFn(result, "queue_affinity");
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -516,111 +1275,15 @@ LogicalResult DeviceQueryOp::verify() {
   return success();
 }
 
-//===----------------------------------------------------------------------===//
-// hal.device.switch
-//===----------------------------------------------------------------------===//
-
-void DeviceSwitchOp::build(OpBuilder &builder, OperationState &state,
-                           TypeRange resultTypes, Value device,
-                           ArrayRef<Attribute> conditions,
-                           ArrayRef<NamedAttribute> attributes) {
-  state.addOperands({device});
-  state.addAttribute("conditions", builder.getArrayAttr(conditions));
-  for (size_t i = 0; i < conditions.size(); ++i) {
-    state.addRegion();
-  }
-  state.addTypes(resultTypes);
-  state.addAttributes(attributes);
-}
-
-ParseResult DeviceSwitchOp::parse(OpAsmParser &parser, OperationState &result) {
-  OpAsmParser::UnresolvedOperand device;
-  Type deviceType;
-  if (failed(parser.parseLess()) || failed(parser.parseOperand(device)) ||
-      failed(parser.parseColonType(deviceType)) ||
-      failed(parser.resolveOperand(device, deviceType, result.operands)) ||
-      failed(parser.parseGreater()) ||
-      failed(parser.parseOptionalArrowTypeList(result.types))) {
-    return failure();
-  }
-
-  // Parses each switch condition attribute and region, like:
-  // #hal.device.match.id<"vulkan-v1.?-*"> {
-  //   hal.return %c1 : i32
-  // }, ...
-  SmallVector<Attribute, 4> conditionAttrs;
-  do {
-    Attribute conditionAttr;
-    NamedAttrList dummyAttrs;
-    if (failed(parser.parseAttribute(conditionAttr, "condition", dummyAttrs))) {
-      return failure();
-    }
-    conditionAttrs.push_back(conditionAttr);
-    SmallVector<OpAsmParser::Argument> regionArgs;
-    auto *regionBody = result.addRegion();
-    if (failed(parser.parseRegion(*regionBody, regionArgs))) {
-      return failure();
-    }
-  } while (succeeded(parser.parseOptionalComma()));
-  result.addAttribute("conditions",
-                      ArrayAttr::get(result.getContext(), conditionAttrs));
-
-  if (failed(parser.parseOptionalAttrDictWithKeyword(result.attributes))) {
-    return failure();
-  }
-  return success();
-}
-
-void DeviceSwitchOp::print(OpAsmPrinter &p) {
-  Operation *op = getOperation();
-  p << "<";
-  p.printOperand(getDevice());
-  p << " : ";
-  p.printType(getDevice().getType());
-  p << ">";
-  p.printOptionalArrowTypeList(getResultTypes());
-  p << "\n";
-  p.getStream().indent(4);
-  interleave(
-      llvm::zip_equal(getConditions(), getConditionRegions()),
-      [&](std::tuple<Attribute, Region &> it) {
-        auto &conditionAttr = std::get<0>(it);
-        auto &conditionRegion = std::get<1>(it);
-        p.printAttribute(conditionAttr);
-        p << " ";
-        p.printRegion(conditionRegion,
-                      /*printEntryBlockArgs=*/false,
-                      /*printBlockTerminators=*/true);
-      },
-      [&]() {
-        p << ",\n";
-        p.getStream().indent(4);
-      });
-  p.printOptionalAttrDictWithKeyword(op->getAttrs(),
-                                     /*elidedAttrs=*/{"conditions"});
-}
-
-LogicalResult DeviceSwitchOp::verify() {
-  DeviceSwitchOp op = *this;
-  if (op.getConditions().size() != op.getConditionRegions().size()) {
-    return op.emitOpError() << "requires conditions and regions be matched 1:1";
-  } else if (op.getConditionRegions().empty()) {
-    return op.emitOpError() << "requires at least one condition";
-  }
-  for (auto &region : op.getConditionRegions()) {
-    for (auto &block : region) {
-      if (auto returnOp =
-              dyn_cast_or_null<IREE::HAL::ReturnOp>(block.getTerminator())) {
-        if (!std::equal(returnOp.getOperandTypes().begin(),
-                        returnOp.getOperandTypes().end(),
-                        op.getResultTypes().begin())) {
-          return op.emitOpError()
-                 << "requires all regions return the same types";
-        }
-      }
-    }
-  }
-  return success();
+// static
+Value DeviceQueryOp::createI1(Location loc, Value device, StringRef category,
+                              StringRef key, OpBuilder &builder) {
+  auto i1Type = builder.getI1Type();
+  return builder
+      .create<IREE::HAL::DeviceQueryOp>(
+          loc, i1Type, i1Type, device, builder.getStringAttr(category),
+          builder.getStringAttr(key), builder.getIntegerAttr(i1Type, 0))
+      .getValue();
 }
 
 //===----------------------------------------------------------------------===//
@@ -636,6 +1299,109 @@ Value DeviceQueueAllocaOp::getOperandSize(unsigned idx) { return {}; }
 
 Value DeviceQueueAllocaOp::getResultSize(unsigned idx) {
   return getResultSize();
+}
+
+static LogicalResult verifyDeviceQueueFences(Operation *queueOp,
+                                             Value waitFence,
+                                             Value signalFence) {
+  if (waitFence == signalFence &&
+      !isa<IREE::Util::NullOp>(waitFence.getDefiningOp())) {
+    return queueOp->emitOpError() << "device queue operations cannot wait and "
+                                     "signal on the same fence.";
+  }
+  return success();
+}
+
+LogicalResult DeviceQueueAllocaOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueDeallocaOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueFillOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueUpdateOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueCopyOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueReadOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueWriteOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+LogicalResult DeviceQueueExecuteOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+void DeviceQueueExecuteIndirectOp::build(OpBuilder &builder,
+                                         OperationState &state, Value device,
+                                         Value queueAffinity, Value waitFence,
+                                         Value signalFence, Value commandBuffer,
+                                         ArrayRef<BindingValue> bindings) {
+  state.addOperands(
+      {device, queueAffinity, waitFence, signalFence, commandBuffer});
+  SmallVector<Value> bindingBuffers;
+  SmallVector<Value> bindingOffsets;
+  SmallVector<Value> bindingLengths;
+  for (auto binding : bindings) {
+    bindingBuffers.push_back(binding.buffer);
+    bindingOffsets.push_back(binding.byteOffset);
+    bindingLengths.push_back(binding.byteLength);
+  }
+  state.addOperands(bindingBuffers);
+  state.addOperands(bindingOffsets);
+  state.addOperands(bindingLengths);
+}
+
+LogicalResult DeviceQueueExecuteIndirectOp::verify() {
+  return verifyDeviceQueueFences(*this, getWaitFence(), getSignalFence());
+}
+
+//===----------------------------------------------------------------------===//
+// hal.devices.*
+//===----------------------------------------------------------------------===//
+
+void DevicesCountOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "device_count");
+}
+
+void DevicesGetOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  APInt index;
+  if (matchPattern(getIndex(), m_ConstantInt(&index))) {
+    llvm::SmallString<16> str("device_");
+    index.toStringUnsigned(str);
+    setNameFn(getResult(), str);
+  } else {
+    setNameFn(getResult(), "device_n");
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// hal.executable.source
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExecutableSourceOp::verify() {
+  ExecutableSourceOp op = *this;
+
+  auto conditionOps = getOps<IREE::HAL::ExecutableConditionOp>();
+  if (llvm::range_size(conditionOps) > 1)
+    return op.emitOpError()
+           << "only one condition op is allowed in an executable";
+
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -691,7 +1457,7 @@ ParseResult ExecutableExportOp::parse(OpAsmParser &parser,
   result.addAttribute("layout", layoutAttr);
 
   std::unique_ptr<Region> region;
-  SmallVector<OpAsmParser::Argument, 4> regionOperands;
+  SmallVector<OpAsmParser::Argument> regionOperands;
   // A missing optional region is materialized as an empty region.
   (void)parser.parseOptionalRegion(region, regionOperands);
   result.addRegion(std::move(region));
@@ -716,7 +1482,8 @@ void ExecutableExportOp::print(OpAsmPrinter &p) {
   p.printOptionalAttrDictWithKeyword(
       op->getAttrs(),
       /*elidedAttrs=*/{"sym_name", "layout", "ordinal"});
-  if (getWorkgroupCount().empty()) return;
+  if (getWorkgroupCount().empty())
+    return;
   p << " ";
   p.printRegion(getWorkgroupCount());
 }
@@ -725,7 +1492,8 @@ LogicalResult ExecutableExportOp::verify() {
   ExecutableExportOp op = *this;
   Block *body = getWorkgroupCountBody();
   // When there is no body, nothing to verify.
-  if (!body) return success();
+  if (!body)
+    return success();
 
   if (!llvm::hasSingleElement(getWorkgroupCount())) {
     return op.emitOpError() << "expected a single region block";
@@ -734,13 +1502,14 @@ LogicalResult ExecutableExportOp::verify() {
   if (body->getNumArguments() == 0) {
     // Need at least a !hal.device.
     validArguments = false;
-  } else if (!body->getArgument(0).getType().isa<IREE::HAL::DeviceType>()) {
+  } else if (!llvm::isa<IREE::HAL::DeviceType>(
+                 body->getArgument(0).getType())) {
     // !hal.device must come first.
     validArguments = false;
   } else {
     // All remaining arguments need to be of type index (today).
     for (BlockArgument &blockArg : body->getArguments().drop_front(1)) {
-      if (!blockArg.getType().isa<IndexType>()) {
+      if (!llvm::isa<IndexType>(blockArg.getType())) {
         validArguments = false;
         break;
       }
@@ -764,9 +1533,10 @@ LogicalResult ExecutableExportOp::verify() {
 
 // Calculates the workgroup count (x, y, z) given the total N-dimensional
 // |workload| and specific |workgroupSize|.
-static std::array<Value, 3> calculateWorkloadWorkgroupCount(
-    Location loc, ValueRange workload,
-    const std::array<Value, 3> &workgroupSize, OpBuilder &builder) {
+static std::array<Value, 3>
+calculateWorkloadWorkgroupCount(Location loc, ValueRange workload,
+                                const std::array<Value, 3> &workgroupSize,
+                                OpBuilder &builder) {
   std::array<Value, 3> result;
 
   auto constantOne = builder.createOrFold<arith::ConstantIndexOp>(loc, 1);
@@ -811,9 +1581,9 @@ static std::array<Value, 3> calculateWorkloadWorkgroupCount(
   return result;
 }
 
-static std::array<Value, 3> calculateWorkgroupCountFromRegion(
-    Location loc, Block *body, Value device, ValueRange workload,
-    OpBuilder &builder) {
+static std::array<Value, 3>
+calculateWorkgroupCountFromRegion(Location loc, Block *body, Value device,
+                                  ValueRange workload, OpBuilder &builder) {
   // TODO(benvanik): replace with region inlining util.
   IRMapping bvm;
   bvm.map(body->getArgument(0), device);
@@ -879,15 +1649,120 @@ void ExecutableVariantOp::build(OpBuilder &builder, OperationState &state,
   state.addAttribute("target", target);
 }
 
+LogicalResult ExecutableVariantOp::verify() {
+  ExecutableVariantOp op = *this;
+
+  auto conditionOps = getOps<IREE::HAL::ExecutableConditionOp>();
+  if (llvm::range_size(conditionOps) > 1)
+    return op.emitOpError() << "only one condition op is allowed in a variant";
+
+  return success();
+}
+
 DenseMap<Attribute, int> ExecutableVariantOp::gatherConstantOrdinals() {
   DenseMap<Attribute, int> map;
-  for (auto blockOp : getOps<IREE::HAL::ExecutableConstantBlockOp>()) {
+  for (auto blockOp : getConstantBlockOps()) {
     int baseCount = map.size();
     for (auto [i, keyAttr] : llvm::enumerate(blockOp.getKeys())) {
       map.try_emplace(keyAttr, baseCount + i);
     }
   }
   return map;
+}
+
+Value ExecutableVariantOp::createConditionOp(OpBuilder &builder) {
+  assert(!getConditionOp() && "condition op already exists");
+
+  builder.setInsertionPointToStart(&getRegion().front());
+  auto conditionOp = builder.create<IREE::HAL::ExecutableConditionOp>(getLoc());
+  Block *entryPoint = conditionOp.addEntryBlock();
+  Value device = entryPoint->getArgument(0);
+
+  builder.setInsertionPointToStart(entryPoint);
+  return device;
+}
+
+Value ExecutableVariantOp::buildCondition(Value device, OpBuilder &builder) {
+  // Base case dependent on target information.
+  Value selected = IREE::HAL::DeviceQueryOp::createI1(
+      getLoc(), device, "hal.executable.format",
+      getTarget().getFormat().getValue(), builder);
+
+  // Factor in variant condition region, if any.
+  auto conditionOp = getConditionOp();
+  if (conditionOp) {
+    auto regionOp = builder.create<scf::ExecuteRegionOp>(conditionOp.getLoc(),
+                                                         builder.getI1Type());
+
+    IRMapping mapper;
+    mapper.map(conditionOp.getRegion().getArgument(0), device);
+    conditionOp.getRegion().cloneInto(&regionOp.getRegion(), mapper);
+
+    for (auto returnOp :
+         llvm::make_early_inc_range(regionOp.getOps<IREE::HAL::ReturnOp>())) {
+      OpBuilder(returnOp).create<scf::YieldOp>(returnOp.getLoc(),
+                                               returnOp.getOperands());
+      returnOp.erase();
+    }
+
+    selected = builder.create<arith::AndIOp>(getLoc(), selected,
+                                             regionOp.getResult(0));
+  }
+
+  return selected;
+}
+
+//===----------------------------------------------------------------------===//
+// hal.executable.condition
+//===----------------------------------------------------------------------===//
+
+LogicalResult ExecutableConditionOp::verify() {
+  ExecutableConditionOp op = *this;
+  return verifyTargetConditionRegion(op, op.getBody());
+}
+
+void ExecutableConditionOp::build(OpBuilder &builder, OperationState &result,
+                                  ArrayRef<NamedAttribute> attrs) {
+  result.addAttribute(
+      "function_type",
+      TypeAttr::get(getTargetConditionRegionType(builder.getContext())));
+  result.addRegion();
+  result.attributes.append(attrs.begin(), attrs.end());
+}
+
+ParseResult ExecutableConditionOp::parse(OpAsmParser &parser,
+                                         OperationState &result) {
+  if (parseTargetConditionRegion(parser, *result.addRegion()))
+    return failure();
+  result.addAttribute(
+      "function_type",
+      TypeAttr::get(getTargetConditionRegionType(parser.getContext())));
+  if (parser.parseOptionalAttrDictWithKeyword(result.attributes))
+    return failure();
+  return success();
+}
+
+void ExecutableConditionOp::print(OpAsmPrinter &p) {
+  Operation *op = getOperation();
+  printTargetConditionRegion(p, op, getBody());
+  p.printOptionalAttrDictWithKeyword(op->getAttrs(),
+                                     /*elidedAttrs=*/{"function_type"});
+}
+
+Block *ExecutableConditionOp::addEntryBlock() {
+  assert(empty() && "function already has an entry block");
+  auto *entry = new Block();
+  auto argTypes = getArgumentTypes();
+  SmallVector<Location> argLocs(argTypes.size(), getLoc());
+  entry->addArguments(argTypes, argLocs);
+  push_back(entry);
+  return entry;
+}
+
+Block *ExecutableConditionOp::addBlock() {
+  assert(!empty() && "function should at least have an entry block");
+  push_back(new Block());
+  return &back();
 }
 
 //===----------------------------------------------------------------------===//
@@ -909,7 +1784,8 @@ ParseResult ExecutableConstantBlockOp::parse(OpAsmParser &parser,
     return failure();
   }
   SmallVector<Type> argTypes;
-  for (auto &arg : entryArgs) argTypes.push_back(arg.type);
+  for (auto &arg : entryArgs)
+    argTypes.push_back(arg.type);
   auto fnType = builder.getFunctionType(argTypes, resultTypes);
   result.addAttribute(getFunctionTypeAttrName(result.name),
                       TypeAttr::get(fnType));
@@ -918,17 +1794,20 @@ ParseResult ExecutableConstantBlockOp::parse(OpAsmParser &parser,
   // There must be one key per result. Note that we support omitted parens when
   // only one result is present.
   SmallVector<Attribute> keyAttrs;
-  if (failed(parser.parseKeyword("as"))) return failure();
+  if (failed(parser.parseKeyword("as")))
+    return failure();
   if (resultTypes.size() == 1) {
     std::string key;
-    if (failed(parser.parseString(&key))) return failure();
+    if (failed(parser.parseString(&key)))
+      return failure();
     keyAttrs.push_back(builder.getStringAttr(key));
   } else {
     if (failed(parser.parseCommaSeparatedList(
             AsmParser::Delimiter::OptionalParen,
             [&]() {
               std::string key;
-              if (failed(parser.parseString(&key))) return failure();
+              if (failed(parser.parseString(&key)))
+                return failure();
               keyAttrs.push_back(builder.getStringAttr(key));
               return success();
             },
@@ -972,12 +1851,15 @@ void ExecutableConstantBlockOp::print(OpAsmPrinter &p) {
   ArrayRef<Type> argTypes = getArgumentTypes();
   ArrayRef<Type> resultTypes = getResultTypes();
   mlir::function_interface_impl::printFunctionSignature(
-      p, op, argTypes, /*isVariadic=*/false, resultTypes);
+      p, cast<mlir::FunctionOpInterface>(op), argTypes, /*isVariadic=*/false,
+      resultTypes);
   p << " as ";
-  if (resultTypes.size() != 1) p << '(';
+  if (resultTypes.size() != 1)
+    p << '(';
   llvm::interleaveComma(getKeys().getValue(), p,
                         [&](Attribute attr) { p << attr; });
-  if (resultTypes.size() != 1) p << ')';
+  if (resultTypes.size() != 1)
+    p << ')';
   mlir::function_interface_impl::printFunctionAttributes(
       p, op, {getFunctionTypeAttrName(), getKeysAttrName()});
   p << " ";
@@ -991,7 +1873,7 @@ LogicalResult ExecutableConstantBlockOp::verify() {
   // Verify the function takes either nothing or a device.
   auto argTypes = op.getArgumentTypes();
   if (!argTypes.empty() &&
-      (argTypes.size() > 1 || !argTypes[0].isa<IREE::HAL::DeviceType>())) {
+      (argTypes.size() > 1 || !llvm::isa<IREE::HAL::DeviceType>(argTypes[0]))) {
     return op->emitOpError()
            << "initializer must take a !hal.device or nothing";
   }
@@ -1045,7 +1927,8 @@ void ExecutableBinaryOp::build(OpBuilder &builder, OperationState &state,
 
 void ExecutableCreateOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), StringRef("exe"));
+  // TODO(benvanik): name after sanitized symbol.
+  setNameFn(getResult(), StringRef("executable"));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1054,29 +1937,56 @@ void ExecutableCreateOp::getAsmResultNames(
 
 void ExecutableLookupOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
+  // TODO(benvanik): name after sanitized symbol.
   setNameFn(getResult(), "exe");
+}
+
+//===----------------------------------------------------------------------===//
+// hal.executable.export.ordinal
+//===----------------------------------------------------------------------===//
+
+void ExecutableExportOrdinalOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  // TODO(benvanik): name after sanitized symbol.
+  setNameFn(getResult(), "ordinal");
+}
+
+//===----------------------------------------------------------------------===//
+// hal.interface.constant.load
+//===----------------------------------------------------------------------===//
+
+LogicalResult InterfaceConstantLoadOp::verify() {
+  InterfaceConstantLoadOp op = *this;
+  auto layoutAttr = op.getLayout();
+  if (op.getOrdinal().getZExtValue() >= layoutAttr.getConstants()) {
+    return op.emitOpError("push constant ordinal out of bounds");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
 // hal.interface.binding.subspan
 //===----------------------------------------------------------------------===//
-void InterfaceBindingSubspanOp::build(
-    OpBuilder &builder, OperationState &result, Type resultType, APInt set,
-    APInt binding, IREE::HAL::DescriptorType descriptor_type, Value byte_offset,
-    ValueRange dynamic_dims, IntegerAttr alignment,
-    Optional<DescriptorFlags> flags) {
+
+void InterfaceBindingSubspanOp::build(OpBuilder &builder,
+                                      OperationState &result, Type resultType,
+                                      IREE::HAL::PipelineLayoutAttr layout,
+                                      APInt binding, Value byte_offset,
+                                      ValueRange dynamic_dims,
+                                      IntegerAttr alignment,
+                                      std::optional<DescriptorFlags> flags) {
   IREE::HAL::DescriptorFlagsAttr descriptorAttr;
   if (flags.has_value()) {
     descriptorAttr = IREE::HAL::DescriptorFlagsAttr::get(builder.getContext(),
                                                          flags.value());
   }
-  build(builder, result, resultType, set, binding, descriptor_type, byte_offset,
-        dynamic_dims, alignment, descriptorAttr);
+  build(builder, result, resultType, layout, binding, byte_offset, dynamic_dims,
+        alignment, descriptorAttr);
 }
 
 LogicalResult InterfaceBindingSubspanOp::verify() {
   InterfaceBindingSubspanOp op = *this;
-  if (ShapedType shapedType = op.getType().dyn_cast<ShapedType>()) {
+  if (ShapedType shapedType = llvm::dyn_cast<ShapedType>(op.getType())) {
     if (shapedType.getNumDynamicDims() != op.getDynamicDims().size()) {
       return op.emitOpError("result type ")
              << op.getType() << " has " << shapedType.getNumDynamicDims()
@@ -1084,8 +1994,22 @@ LogicalResult InterfaceBindingSubspanOp::verify() {
              << " associated dimension SSA values";
     }
   }
-
+  uint64_t binding = op.getBinding().getZExtValue();
+  if (binding >= op.getLayout().getBindings().size()) {
+    return op.emitOpError("binding ordinal ")
+           << binding << " out of bounds in layout " << op.getLayout();
+  }
   return success();
+}
+
+IREE::HAL::PipelineBindingAttr
+InterfaceBindingSubspanOp::getPipelineBindingAttr() {
+  return getLayout().getBinding(getBinding());
+}
+
+IREE::HAL::DescriptorType InterfaceBindingSubspanOp::getDescriptorType() {
+  auto bindingAttr = getPipelineBindingAttr();
+  return bindingAttr.getType();
 }
 
 llvm::MaybeAlign InterfaceBindingSubspanOp::getBaseAlignment() {
@@ -1101,29 +2025,44 @@ llvm::Align InterfaceBindingSubspanOp::calculateAlignment() {
   // 4-byte aligned).
   llvm::Align naturalAlignment(1);
   auto resultType = getType();
-  if (auto shapedType = resultType.dyn_cast<ShapedType>()) {
+  if (auto shapedType = llvm::dyn_cast<ShapedType>(resultType)) {
     naturalAlignment = llvm::Align(
         IREE::Util::getRoundedElementByteWidth(shapedType.getElementType()));
   }
 
   // If the binding has no assigned alignment we fall back to natural alignment.
   auto baseAlignment = getBaseAlignment();
-  if (!baseAlignment) return naturalAlignment;
+  if (!baseAlignment)
+    return naturalAlignment;
 
   // If there's no offset specified then we can use the binding alignment
   // directly.
-  if (!getByteOffset()) return baseAlignment.value();
+  if (!getByteOffset())
+    return baseAlignment.value();
 
   // Try to get the alignment of the byte offset. If it's a constant then we can
   // find a common alignment between it and the base and otherwise we need to
   // try to infer the alignment from the IR - otherwise we fall back.
   auto offsetOrAlignment = lookupOffsetOrAlignment(getByteOffset());
-  if (!offsetOrAlignment.has_value()) return naturalAlignment;
+  if (!offsetOrAlignment.has_value())
+    return naturalAlignment;
 
   // Compute the common alignment between that of the binding base and that of
   // the byte offset.
   return llvm::commonAlignment(baseAlignment.value(),
                                offsetOrAlignment.value());
+}
+
+LogicalResult InterfaceBindingSubspanOp::reifyResultShapes(
+    OpBuilder &builder, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  auto resultShapedType = dyn_cast<ShapedType>(getResult().getType());
+  if (!resultShapedType) {
+    return failure();
+  }
+  SmallVector<OpFoldResult> resultShape = mlir::getMixedValues(
+      resultShapedType.getShape(), getDynamicDims(), builder);
+  reifiedReturnShapes.emplace_back(std::move(resultShape));
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1134,16 +2073,33 @@ static void getAsmResultNamesForInterfaceWorkgroupOp(
     StringRef prefix, const APInt &dimension, Value result,
     function_ref<void(Value, StringRef)> setNameFn) {
   switch (dimension.getZExtValue()) {
-    case 0:
-      setNameFn(result, (prefix + "x").str());
-      return;
-    case 1:
-      setNameFn(result, (prefix + "y").str());
-      return;
-    case 2:
-      setNameFn(result, (prefix + "z").str());
-      return;
+  case 0:
+    setNameFn(result, (prefix + "x").str());
+    return;
+  case 1:
+    setNameFn(result, (prefix + "y").str());
+    return;
+  case 2:
+    setNameFn(result, (prefix + "z").str());
+    return;
   }
+}
+
+// Minimum is the smallest possible result we could get. It's 0 for ID-like
+// operations and 1 for count-like ones.
+static void setResultRangesForInterfaceWorkgroupOp(
+    Value result, const std::optional<APInt> &upperBound,
+    SetIntRangeFn setResultRanges, int64_t minimum) {
+  unsigned width = ConstantIntRanges::getStorageBitwidth(result.getType());
+  if (!upperBound.has_value()) {
+    setResultRanges(
+        result, ConstantIntRanges::fromSigned(APInt(width, minimum),
+                                              APInt::getSignedMaxValue(width)));
+    return;
+  }
+  setResultRanges(result,
+                  ConstantIntRanges::fromUnsigned(APInt(width, minimum),
+                                                  *upperBound + minimum - 1));
 }
 
 void InterfaceWorkgroupIDOp::getAsmResultNames(
@@ -1152,10 +2108,22 @@ void InterfaceWorkgroupIDOp::getAsmResultNames(
                                            getResult(), setNameFn);
 }
 
+void InterfaceWorkgroupIDOp::inferResultRanges(
+    ArrayRef<ConstantIntRanges> argRanges, SetIntRangeFn setResultRanges) {
+  setResultRangesForInterfaceWorkgroupOp(getResult(), getUpperBound(),
+                                         setResultRanges, /*minimum=*/0);
+}
+
 void InterfaceWorkgroupCountOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
   getAsmResultNamesForInterfaceWorkgroupOp("workgroup_count_", getDimension(),
                                            getResult(), setNameFn);
+}
+
+void InterfaceWorkgroupCountOp::inferResultRanges(
+    ArrayRef<ConstantIntRanges> argRanges, SetIntRangeFn setResultRanges) {
+  setResultRangesForInterfaceWorkgroupOp(getResult(), getUpperBound(),
+                                         setResultRanges, /*minimum=*/1);
 }
 
 void InterfaceWorkgroupSizeOp::getAsmResultNames(
@@ -1164,22 +2132,10 @@ void InterfaceWorkgroupSizeOp::getAsmResultNames(
                                            getResult(), setNameFn);
 }
 
-//===----------------------------------------------------------------------===//
-// hal.pipeline_layout.create
-//===----------------------------------------------------------------------===//
-
-void PipelineLayoutCreateOp::getAsmResultNames(
-    function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "pipeline_layout");
-}
-
-//===----------------------------------------------------------------------===//
-// hal.pipeline_layout.lookup
-//===----------------------------------------------------------------------===//
-
-void PipelineLayoutLookupOp::getAsmResultNames(
-    function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), "pipeline_layout");
+void InterfaceWorkgroupSizeOp::inferResultRanges(
+    ArrayRef<ConstantIntRanges> argRanges, SetIntRangeFn setResultRanges) {
+  setResultRangesForInterfaceWorkgroupOp(getResult(), getUpperBound(),
+                                         setResultRanges, /*minimum=*/1);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1201,10 +2157,7 @@ void FenceAwaitOp::getAsmResultNames(
   setNameFn(getStatus(), "status");
 }
 
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL
 
 //===----------------------------------------------------------------------===//
 // TableGen definitions (intentionally last)

@@ -5,8 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """Helper functions for configuring IREE and dependent project WORKSPACE files."""
 
-load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 load("@bazel_skylib//lib:paths.bzl", "paths")
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
 CUDA_TOOLKIT_ROOT_ENV_KEY = "IREE_CUDA_TOOLKIT_ROOT"
 
@@ -17,6 +17,7 @@ CUDA_TOOLKIT_ROOT_ENV_KEY = "IREE_CUDA_TOOLKIT_ROOT"
 # because CUDA toolkit detection differs depending on whether it is
 # stripped down or not).
 # TODO: Simplify this on the CMake/docker side and update here to match.
+# TODO(#15332): Dockerfiles no longer include these deps. Simplify.
 CUDA_DEPS_DIR_FOR_CI_ENV_KEY = "IREE_CUDA_DEPS_DIR"
 
 def cuda_auto_configure_impl(repository_ctx):
@@ -50,7 +51,7 @@ def cuda_auto_configure_impl(repository_ctx):
         Label("%s//:build_tools/third_party/cuda/BUILD.template" % iree_repo_alias),
         {
             "%ENABLED%": "True" if cuda_toolkit_root else "False",
-            "%LIBDEVICE_REL_PATH%": libdevice_rel_path,
+            "%LIBDEVICE_REL_PATH%": libdevice_rel_path if cuda_toolkit_root else "BUILD",
             "%IREE_REPO_ALIAS%": iree_repo_alias,
         },
     )
@@ -102,35 +103,15 @@ def configure_iree_submodule_deps(iree_repo_alias = "@", iree_path = "./"):
 
     maybe(
         native.new_local_repository,
-        name = "com_github_yaml_libyaml",
-        build_file = iree_repo_alias + "//:build_tools/third_party/libyaml/BUILD.overlay",
-        path = paths.join(iree_path, "third_party/libyaml"),
-    )
-
-    maybe(
-        native.new_local_repository,
         name = "vulkan_headers",
         build_file = iree_repo_alias + "//:build_tools/third_party/vulkan_headers/BUILD.overlay",
         path = paths.join(iree_path, "third_party/vulkan_headers"),
     )
 
     maybe(
-        native.new_local_repository,
-        name = "vulkan_memory_allocator",
-        build_file = iree_repo_alias + "//:build_tools/third_party/vulkan_memory_allocator/BUILD.overlay",
-        path = paths.join(iree_path, "third_party/vulkan_memory_allocator"),
-    )
-
-    maybe(
         native.local_repository,
-        name = "spirv_headers",
-        path = paths.join(iree_path, "third_party/spirv_headers"),
-    )
-
-    maybe(
-        native.local_repository,
-        name = "mlir-hlo",
-        path = paths.join(iree_path, "third_party/mlir-hlo"),
+        name = "stablehlo",
+        path = paths.join(iree_path, "third_party/stablehlo"),
     )
 
     maybe(
@@ -140,9 +121,8 @@ def configure_iree_submodule_deps(iree_repo_alias = "@", iree_path = "./"):
     )
 
     maybe(
-        native.new_local_repository,
+        native.local_repository,
         name = "cpuinfo",
-        build_file = iree_repo_alias + "//:build_tools/third_party/cpuinfo/BUILD.overlay",
         path = paths.join(iree_path, "third_party/cpuinfo"),
     )
 
@@ -151,13 +131,6 @@ def configure_iree_submodule_deps(iree_repo_alias = "@", iree_path = "./"):
         name = "spirv_cross",
         build_file = iree_repo_alias + "//:build_tools/third_party/spirv_cross/BUILD.overlay",
         path = paths.join(iree_path, "third_party/spirv_cross"),
-    )
-
-    maybe(
-        native.new_local_repository,
-        name = "torch-mlir-dialects",
-        build_file = iree_repo_alias + "//:build_tools/third_party/torch-mlir-dialects/BUILD.overlay",
-        path = paths.join(iree_path, "third_party/torch-mlir-dialects"),
     )
 
     maybe(
@@ -172,4 +145,18 @@ def configure_iree_submodule_deps(iree_repo_alias = "@", iree_path = "./"):
         name = "nccl",
         build_file = iree_repo_alias + "//:build_tools/third_party/nccl/BUILD.overlay",
         path = paths.join(iree_path, "third_party/nccl"),
+    )
+
+    maybe(
+        native.new_local_repository,
+        name = "hsa_runtime_headers",
+        build_file = iree_repo_alias + "//:build_tools/third_party/hsa-runtime-headers/BUILD.overlay",
+        path = paths.join(iree_path, "third_party/hsa-runtime-headers"),
+    )
+
+    maybe(
+        native.new_local_repository,
+        name = "webgpu_headers",
+        build_file = iree_repo_alias + "//:build_tools/third_party/webgpu-headers/BUILD.overlay",
+        path = paths.join(iree_path, "third_party/webgpu-headers"),
     )

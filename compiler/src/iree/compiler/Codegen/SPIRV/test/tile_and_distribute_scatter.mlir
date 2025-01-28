@@ -1,16 +1,14 @@
 // RUN: iree-opt --split-input-file --pass-pipeline='builtin.module(hal.executable(hal.executable.variant(builtin.module(func.func(iree-spirv-tile-and-distribute)))))' %s | FileCheck %s
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[1, 16], [1, 1]]>
-#translation = #iree_codegen.translation_info<SPIRVBaseDistribute>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#translation = #iree_codegen.translation_info<pipeline = SPIRVBaseDistribute>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable private @static_scatter_update_slice  {
-  hal.executable.variant @vulkan_spirv_fb, target = <"vulkan", "vulkan-spirv-fb"> {
+  hal.executable.variant @vulkan_spirv_fb target(<"vulkan-spirv", "vulkan-spirv-fb">) {
     hal.executable.export @static_scatter_update_slice layout(#pipeline_layout) attributes {
       translation_info = #translation,
       workgroup_size = [16 : index, 1 : index, 1 : index]
@@ -20,9 +18,9 @@ hal.executable private @static_scatter_update_slice  {
         %c40 = arith.constant 40 : index
         %c500 = arith.constant 500 : index
         %c0 = arith.constant 0 : index
-        %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : memref<40x500xi32>
-        %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : memref<40x1xi32>
-        %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : memref<100x500xi32>
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : memref<40x500xi32>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : memref<40x1xi32>
+        %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : memref<100x500xi32>
         %workgroup_id_x = hal.interface.workgroup.id[0] : index
         %workgroup_count_x = hal.interface.workgroup.count[0] : index
         %workgroup_id_y = hal.interface.workgroup.id[1] : index
@@ -50,9 +48,9 @@ hal.executable private @static_scatter_update_slice  {
 }
 
 // CHECK-LABEL: func.func @static_scatter_update_slice()
-//       CHECK: %[[ARG0:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer)
-//       CHECK: %[[ARG1:.+]] = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer)
-//       CHECK: %[[ARG2:.+]] = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer)
+//       CHECK: %[[ARG0:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(0)
+//       CHECK: %[[ARG1:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1)
+//       CHECK: %[[ARG2:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(2)
 //       CHECK: scf.for
 //       CHECK:   scf.for
 //       CHECK:     %[[WG_UPDATE:.+]] = memref.subview %[[ARG0]]
@@ -65,12 +63,9 @@ hal.executable private @static_scatter_update_slice  {
 //       CHECK:     scf.for %[[IV_Y:.+]] = %[[TID_Y]] to %{{.+}} step %[[DIM_Y]]
 //       CHECK:       scf.for %[[IV_X:.+]] = %[[TID_X]] to %{{.+}} step %[[DIM_X]]
 //       CHECK:         %[[T_UPDATE:.+]] = memref.subview %[[WG_UPDATE]][%[[IV_Y]], %[[IV_X]]] [1, 1] [1, 1]
-//       CHECK:         %[[T_UPDATE_CAST:.+]] = memref.cast %[[T_UPDATE]]
 //       CHECK:         %[[T_INDEX:.+]] = memref.subview %[[WG_INDEX]][%[[IV_Y]], 0] [1, 1] [1, 1]
-//       CHECK:         %[[T_INDEX_CAST:.+]] = memref.cast %[[T_INDEX]]
 //       CHECK:         %[[T_TARGET:.+]] = memref.subview %[[WG_TARGET]][0, %[[IV_X]]] [100, 1] [1, 1]
-//       CHECK:         %[[T_TARGET_CAST:.+]] = memref.cast %[[T_TARGET]]
 //       CHECK:         iree_linalg_ext.scatter
 //  CHECK-SAME:           unique_indices(true)
-//  CHECK-SAME:           ins(%[[T_UPDATE_CAST]], %[[T_INDEX_CAST]]
-//  CHECK-SAME:           outs(%[[T_TARGET_CAST]]
+//  CHECK-SAME:           ins(%[[T_UPDATE]], %[[T_INDEX]]
+//  CHECK-SAME:           outs(%[[T_TARGET]]

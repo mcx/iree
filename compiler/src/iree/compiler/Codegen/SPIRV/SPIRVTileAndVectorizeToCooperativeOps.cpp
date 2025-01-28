@@ -13,22 +13,19 @@
 
 #include <algorithm>
 
-#include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
-#include "iree-dialects/Dialect/LinalgExt/Transforms/Transforms.h"
-#include "iree/compiler/Codegen/Common/GPUPatterns.h"
-#include "iree/compiler/Codegen/Dialect/LoweringConfig.h"
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/Common/GPU/GPUPatterns.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.h"
 #include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
-#include "iree/compiler/Codegen/SPIRV/Utils.h"
+#include "iree/compiler/Codegen/SPIRV/Passes.h"
+#include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
 #include "mlir/Conversion/VectorToGPU/VectorToGPU.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -37,30 +34,69 @@
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
-#include "mlir/Interfaces/VectorInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-using mlir::iree_compiler::IREE::LinalgExt::LinalgVectorizationPattern;
-using mlir::iree_compiler::IREE::LinalgExt::TilingPatterns;
-using mlir::iree_compiler::IREE::LinalgExt::VectorizationPatterns;
-
 #define DEBUG_TYPE "iree-spirv-tile-and-vectorize-to-cooperative-ops"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_SPIRVTILETOCOOPERATIVEOPSPASS
+#define GEN_PASS_DEF_SPIRVVECTORIZETOCOOPERATIVEOPSPASS
+#include "iree/compiler/Codegen/SPIRV/Passes.h.inc"
+
 namespace {
 
+void debugPrint(Operation *op, const char *message) {
+  LLVM_DEBUG({
+    llvm::dbgs() << "//--- " << message << " ---//\n";
+    op->print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
+    llvm::dbgs() << "\n\n";
+  });
+}
+
 //===----------------------------------------------------------------------===//
-// Subgroup tiling patterns
+// Cooperative matrix shape utilities
 //===----------------------------------------------------------------------===//
 
 /// Gets the chosen hardware cooperative op size attached to the given `op`
 /// as CodeGen lowering configuration.
 static SmallVector<int64_t> getTargetCooperativeOpSize(linalg::LinalgOp op) {
-  return getTileSizes(op, 3);  // For native vector sizes
+  return getTileSizes(op, 3); // For native vector sizes
 }
+
+constexpr char coopMatTypeAttrName[] = "iree.spirv.coopmatrix.type";
+constexpr char coopMatShapeAttrName[] = "iree.spirv.coopmatrix.shape";
+
+/// Sets the chosen cooperative matrix type/shape for CodeGen onto the
+/// the given `funcOp`.
+void setSPIRVCooperativeMatrixInfo(mlir::FunctionOpInterface funcOp,
+                                   linalg::LinalgOp rootOp,
+                                   ArrayRef<int64_t> shape) {
+  Builder b(funcOp.getContext());
+  funcOp->setAttr(coopMatShapeAttrName, b.getDenseI64ArrayAttr(shape));
+  auto inputType = cast<ShapedType>(rootOp.getDpsInputs().front().getType());
+  auto outputType = cast<ShapedType>(rootOp.getDpsInits().front().getType());
+  auto elementTypes = b.getTypeArrayAttr(
+      {inputType.getElementType(), outputType.getElementType()});
+  funcOp->setAttr(coopMatTypeAttrName, elementTypes);
+}
+
+/// Returns the chosen cooperative matrix shape for CodeGen from the given
+/// `funcOp`. Returns an empty ArrayRef if cannot query.
+ArrayRef<int64_t>
+getSPIRVCooperativeMatrixShape(mlir::FunctionOpInterface funcOp) {
+  auto attr = funcOp->getAttrOfType<DenseI64ArrayAttr>(coopMatShapeAttrName);
+  if (!attr)
+    return {};
+  return attr.asArrayRef();
+}
+
+//===----------------------------------------------------------------------===//
+// Subgroup tiling patterns
+//===----------------------------------------------------------------------===//
 
 /// Deduces required subgroup counts along all workgroup tiled dimensions.
 ///
@@ -73,8 +109,10 @@ static SmallVector<int64_t> deduceSubgroupCounts(linalg::LinalgOp op) {
 
   SmallVector<int64_t> subgroupCounts;
   for (int i = 0, e = workgroupTileSizes.size(); i < e; ++i) {
-    if (subgroupTileSizes[i] == 0) continue;
-    if (linalg::isReductionIterator(op.getIteratorTypesArray()[i])) continue;
+    if (subgroupTileSizes[i] == 0)
+      continue;
+    if (linalg::isReductionIterator(op.getIteratorTypesArray()[i]))
+      continue;
     assert(workgroupTileSizes[i] % subgroupTileSizes[i] == 0);
     subgroupCounts.push_back(workgroupTileSizes[i] / subgroupTileSizes[i]);
   }
@@ -86,21 +124,22 @@ static SmallVector<int64_t> deduceSubgroupCounts(linalg::LinalgOp op) {
   return subgroupCounts;
 }
 
-/// Adds patterns to tile Linalg ops with workgroup markers to subgroups.
-static void populateTilingToSubgroupPatterns(
-    ArrayRef<int64_t> subgroupCounts, const unsigned subgroupSize,
-    ArrayRef<int64_t> subgroupTileSizes, RewritePatternSet &patterns) {
-  MLIRContext *context = patterns.getContext();
+/// Tiles Linalg ops with workgroup markers to subgroups.
+static LogicalResult tileToSubgroup(mlir::FunctionOpInterface funcOp,
+                                    ArrayRef<int64_t> subgroupCounts,
+                                    const unsigned subgroupSize,
+                                    ArrayRef<int64_t> subgroupTileSizes) {
+  MLIRContext *context = funcOp.getContext();
 
-  auto getSubgroupProcInfoFn = [subgroupCounts, subgroupSize](
-                                   OpBuilder &builder, Location loc,
-                                   ArrayRef<Range> parallelLoopRanges) {
-    auto counts = llvm::to_vector<3>(subgroupCounts);
-    // `getSubgroupIdsAndCounts` assumes we follow GPU (X, Y, Z) order.
-    std::reverse(counts.begin(), counts.end());
-    return getSubgroupIdsAndCounts(builder, loc, subgroupSize,
-                                   parallelLoopRanges.size(), counts);
-  };
+  auto getSubgroupProcInfoFn =
+      [subgroupCounts, subgroupSize](OpBuilder &builder, Location loc,
+                                     ArrayRef<Range> parallelLoopRanges) {
+        auto counts = llvm::to_vector<3>(subgroupCounts);
+        // `getSubgroupIdsAndCounts` assumes we follow GPU (X, Y, Z) order.
+        std::reverse(counts.begin(), counts.end());
+        return getSubgroupIdsAndCounts(builder, loc, subgroupSize,
+                                       parallelLoopRanges.size(), counts);
+      };
 
   linalg::LinalgLoopDistributionOptions distributionOptions;
   distributionOptions.procInfo = getSubgroupProcInfoFn;
@@ -112,54 +151,40 @@ static void populateTilingToSubgroupPatterns(
     // later to "tile" along reduction dimensions.
     tileSizes.resize(
         std::min(cast<linalg::LinalgOp>(op).getNumParallelLoops(), 3u));
-    return llvm::to_vector<4>(
-        llvm::map_range(tileSizes, [&](int64_t v) -> Value {
-          return builder.create<arith::ConstantIndexOp>(op->getLoc(), v);
-        }));
+    return llvm::map_to_vector(tileSizes, [&](int64_t v) -> Value {
+      return builder.create<arith::ConstantIndexOp>(op->getLoc(), v);
+    });
   };
   auto tilingOptions = linalg::LinalgTilingOptions()
                            .setLoopType(linalg::LinalgTilingLoopType::Loops)
                            .setTileSizeComputationFunction(setTileSizesFn)
                            .setDistributionOptions(distributionOptions);
 
-  IREE::LinalgExt::LinalgTransformationFilter filter(
+  LinalgTransformationFilter filter(
       {StringAttr::get(context, getWorkgroupKTiledMarker()),
        StringAttr::get(context, getWorkgroupMemoryMarker())},
       StringAttr::get(context, getVectorizeMarker()));
-  TilingPatterns<linalg::BatchMatmulOp, linalg::FillOp, linalg::MatmulOp,
-                 linalg::GenericOp>::insert(patterns, tilingOptions, filter);
+  return distributeLinalgOpsWithFilter(funcOp, tilingOptions, filter);
 }
 
 //===----------------------------------------------------------------------===//
 // Vectorization patterns
 //===----------------------------------------------------------------------===//
 
-/// Adds patterns to vectorize Linalg ops with vectorization markers.
-void populateVectorizationPatterns(MLIRContext *context,
-                                   RewritePatternSet &patterns) {
-  IREE::LinalgExt::LinalgTransformationFilter f(
-      StringAttr::get(context, getVectorizeMarker()));
-  IREE::LinalgExt::LinalgVectorizationOptions opts;
-  VectorizationPatterns<linalg::FillOp, linalg::GenericOp>::insert(patterns,
-                                                                   opts, f);
-  patterns.add<LinalgVectorizationPattern>(
-      context, opts, f.addOpFilter<linalg::ContractionOpInterface>());
-  vector::populateVectorTransferPermutationMapLoweringPatterns(patterns);
-  vector::populateVectorReductionToContractPatterns(patterns);
-}
-
 template <typename ExtOpTy>
-Optional<SmallVector<int64_t>> getExtOpVectorShape(
-    ExtOpTy op, ArrayRef<int64_t> nativeShape) {
+std::optional<SmallVector<int64_t>>
+getExtOpVectorShape(ExtOpTy op, ArrayRef<int64_t> nativeShape) {
   auto insert =
       op.getOperand().template getDefiningOp<vector::InsertStridedSliceOp>();
-  if (!insert) return std::nullopt;
+  if (!insert)
+    return std::nullopt;
 
   VectorType sliceType = insert.getSourceVectorType();
   for (Operation *users : op->getUsers()) {
     auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
-    if (!extract) return std::nullopt;
-    auto vecType = extract.getResult().getType().cast<VectorType>();
+    if (!extract)
+      return std::nullopt;
+    auto vecType = llvm::cast<VectorType>(extract.getResult().getType());
     if (!llvm::equal(sliceType.getShape(), vecType.getShape()))
       return std::nullopt;
   }
@@ -169,8 +194,8 @@ Optional<SmallVector<int64_t>> getExtOpVectorShape(
 
 /// Returns vector shape matching native cooperative op sizes for unrolling
 /// high-D vectors.
-Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
-    Operation *op, ArrayRef<int64_t> nativeShape) {
+std::optional<SmallVector<int64_t>>
+getCooperativeOpVectorShape(Operation *op, ArrayRef<int64_t> nativeShape) {
   // Unroll vector.contract ops according to native cooperative matrix size.
   if (auto contractOp = dyn_cast<vector::ContractionOp>(op)) {
     return llvm::to_vector(nativeShape);
@@ -178,8 +203,8 @@ Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
 
   // Unroll elementwise ops according to native cooperative matrix size.
   if (OpTrait::hasElementwiseMappableTraits(op) && op->getNumResults() == 1) {
-    if (auto vecType = op->getResultTypes()[0].dyn_cast<VectorType>())
-      return llvm::to_vector(nativeShape.drop_back());  // Drop K dim size
+    if (auto vecType = llvm::dyn_cast<VectorType>(op->getResultTypes()[0]))
+      return llvm::to_vector(nativeShape.drop_back()); // Drop K dim size
   }
 
   // Unrolling vector.contract generates vector.{insert|extract}_strided_slice
@@ -215,9 +240,11 @@ Optional<SmallVector<int64_t>> getCooperativeOpVectorShape(
     VectorType sliceType;
     for (Operation *users : sourceOp->getUsers()) {
       auto extract = dyn_cast<vector::ExtractStridedSliceOp>(users);
-      if (!extract) return std::nullopt;
-      auto vecType = extract.getResult().getType().cast<VectorType>();
-      if (sliceType && sliceType != vecType) return std::nullopt;
+      if (!extract)
+        return std::nullopt;
+      auto vecType = llvm::cast<VectorType>(extract.getResult().getType());
+      if (sliceType && sliceType != vecType)
+        return std::nullopt;
       sliceType = vecType;
     }
     return llvm::to_vector(sliceType.getShape());
@@ -253,7 +280,7 @@ void populateVectorUnrollPatterns(ArrayRef<int64_t> cooperativeOpSize,
 // or replace unrolling.
 class CombineContractTranspose final
     : public OpRewritePattern<vector::ContractionOp> {
- public:
+public:
   using OpRewritePattern<vector::ContractionOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(vector::ContractionOp op,
@@ -274,8 +301,7 @@ class CombineContractTranspose final
         newMaps.push_back(map);
         continue;
       }
-      SmallVector<int64_t, 3> perm;
-      tranposeOp.getTransp(perm);
+      ArrayRef<int64_t> perm = tranposeOp.getPermutation();
       SmallVector<AffineExpr> exprs(perm.size());
       for (auto [remapIdx, remap] : llvm::enumerate(perm)) {
         exprs[remap] = map.getResult(remapIdx);
@@ -285,7 +311,8 @@ class CombineContractTranspose final
       newSources.push_back(tranposeOp.getVector());
       foundTranspose = true;
     }
-    if (!foundTranspose) return failure();
+    if (!foundTranspose)
+      return failure();
 
     Value res = rewriter.create<vector::ContractionOp>(
         loc, newSources[0], newSources[1], newSources[2],
@@ -300,16 +327,17 @@ class CombineContractTranspose final
 //===----------------------------------------------------------------------===//
 
 class SPIRVTileToCooperativeOpsPass final
-    : public SPIRVTileToCooperativeOpsBase<SPIRVTileToCooperativeOpsPass> {
- public:
+    : public impl::SPIRVTileToCooperativeOpsPassBase<
+          SPIRVTileToCooperativeOpsPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<gpu::GPUDialect, linalg::LinalgDialect,
-                    vector::VectorDialect>();
+    registry.insert<gpu::GPUDialect, IREE::GPU::IREEGPUDialect,
+                    linalg::LinalgDialect, vector::VectorDialect>();
   }
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    func::FuncOp funcOp = getOperation();
+    auto funcOp = getOperation();
 
     // First we need to discover the CodeGen lowering configuration. It was
     // decided earlier and attached to a linalg op as an attribute.
@@ -327,48 +355,48 @@ class SPIRVTileToCooperativeOpsPass final
       return signalPassFailure();
     }
 
+    // Transfer the cooperative matrix shape to an attribute on the export op,
+    // given that after tiling and vectorization we won't have the root Linalg
+    // op anymore.
     SmallVector<int64_t> cooperativeOpSize = getTargetCooperativeOpSize(rootOp);
+    setSPIRVCooperativeMatrixInfo(funcOp, rootOp, cooperativeOpSize);
+
     SmallVector<int64_t> subgroupCounts = deduceSubgroupCounts(rootOp);
 
     // Then tile and distribute to subgroups.
 
     {
-      Optional<int> subgroupSize = getSPIRVSubgroupSize(funcOp);
+      std::optional<int> subgroupSize = getGPUSubgroupSize(funcOp);
       if (!subgroupSize) {
         funcOp.emitError("failed to query subgroup size");
         return signalPassFailure();
       }
-      RewritePatternSet subgroupTilingPatterns(context);
+
       SmallVector<int64_t> subgroupTileSizes = getTileSizes(rootOp, 1);
-      populateTilingToSubgroupPatterns(subgroupCounts, *subgroupSize,
-                                       subgroupTileSizes,
-                                       subgroupTilingPatterns);
-      if (failed(applyPatternsAndFoldGreedily(
-              funcOp, std::move(subgroupTilingPatterns)))) {
+      if (failed(tileToSubgroup(funcOp, subgroupCounts, *subgroupSize,
+                                subgroupTileSizes))) {
         return signalPassFailure();
       }
 
       RewritePatternSet canonicalizationPatterns =
           linalg::getLinalgTilingCanonicalizationPatterns(context);
-      populateFoldAffineMinInDistributedLoopsPatterns(canonicalizationPatterns);
-      if (failed(applyPatternsAndFoldGreedily(
-              funcOp, std::move(canonicalizationPatterns)))) {
+      SmallVector<int64_t> numWorkgroups = getStaticNumWorkgroups(funcOp);
+      populateFoldAffineMinInDistributedLoopsPatterns(canonicalizationPatterns,
+                                                      numWorkgroups);
+      if (failed(applyPatternsGreedily(funcOp,
+                                       std::move(canonicalizationPatterns)))) {
         return signalPassFailure();
       }
     }
 
-    LLVM_DEBUG({
-      llvm::dbgs() << "--- After tiling to subgroups ---\n";
-      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
+    debugPrint(funcOp, "after tiling to subgroups");
   }
 };
 
 class SPIRVVectorizeToCooperativeOpsPass final
-    : public SPIRVVectorizeToCooperativeOpsBase<
+    : public impl::SPIRVVectorizeToCooperativeOpsPassBase<
           SPIRVVectorizeToCooperativeOpsPass> {
- public:
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<gpu::GPUDialect, linalg::LinalgDialect,
                     vector::VectorDialect>();
@@ -376,110 +404,57 @@ class SPIRVVectorizeToCooperativeOpsPass final
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    func::FuncOp funcOp = getOperation();
+    auto funcOp = getOperation();
 
-    // First we need to discover the CodeGen lowering configuration. It was
-    // decided earlier and attached to a linalg op as an attribute.
-
-    linalg::LinalgOp rootOp;
-    funcOp.walk([&](linalg::LinalgOp linalgOp) {
-      if (isMatmulOrBatchMatmul(linalgOp) && getLoweringConfig(linalgOp)) {
-        rootOp = linalgOp;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (!rootOp) {
-      funcOp.emitError("expected lowering confg on a (batch) matmul op");
+    // First discover the chosen cooperative matrix shape. It was decided
+    // earlier and attached to the export op as an attribute.
+    ArrayRef<int64_t> cooperativeOpSize =
+        getSPIRVCooperativeMatrixShape(funcOp);
+    if (cooperativeOpSize.empty()) {
+      funcOp->emitError(
+          "expected attribute for chosen cooperative matrix shape");
       return signalPassFailure();
     }
 
-    SmallVector<int64_t> cooperativeOpSize = getTargetCooperativeOpSize(rootOp);
-    SmallVector<int64_t> subgroupCounts = deduceSubgroupCounts(rootOp);
-
-    // Now vectorize and unroll to native cooperative sizes.
+    // Now prepare and unroll to native cooperative sizes.
 
     {
-      RewritePatternSet vectorizationPatterns(context);
-      populateVectorizationPatterns(context, vectorizationPatterns);
-      if (failed(applyPatternsAndFoldGreedily(
-              funcOp, std::move(vectorizationPatterns)))) {
-        return signalPassFailure();
-      }
-
-      RewritePatternSet canonicalizationPatterns(context);
-      vector::ContractionOp::getCanonicalizationPatterns(
-          canonicalizationPatterns, context);
-      populateCombineVectorTransferReadBroadcastPatterns(
-          canonicalizationPatterns);
-      populatePrepareVectorToMMAPatterns(canonicalizationPatterns,
+      RewritePatternSet patterns(context);
+      vector::ContractionOp::getCanonicalizationPatterns(patterns, context);
+      populateCombineVectorTransferReadBroadcastPatterns(patterns);
+      populatePrepareVectorToMMAPatterns(patterns,
                                          /*useNvGPU=*/false);
-      if (failed(applyPatternsAndFoldGreedily(
-              funcOp, std::move(canonicalizationPatterns)))) {
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
         return signalPassFailure();
       }
     }
 
-    LLVM_DEBUG({
-      llvm::dbgs() << "--- After vectorization ---\n";
-      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
+    debugPrint(funcOp, "after preparing vector ops");
 
     {
-      RewritePatternSet vectorUnrollPatterns(context);
-      populateVectorUnrollPatterns(cooperativeOpSize, vectorUnrollPatterns);
-      if (failed(applyPatternsAndFoldGreedily(
-              funcOp, std::move(vectorUnrollPatterns)))) {
+      RewritePatternSet patterns(context);
+      populateVectorUnrollPatterns(cooperativeOpSize, patterns);
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
         return signalPassFailure();
       }
     }
 
-    LLVM_DEBUG({
-      llvm::dbgs() << "--- After unrolling vector ---\n";
-      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
-
-    // At the last perform various canonicalization and cleanups.
-
-    linalg::hoistRedundantVectorTransfers(funcOp);
-
-    LLVM_DEBUG({
-      llvm::dbgs() << "--- After hoisting vector transfers ---\n";
-      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
+    debugPrint(funcOp, "after unrolling vector ops");
 
     // When using cooperative matrix we don't want to lower the contract,
     // instead we want to merge contract and transpose so that they can be
     // converted to cooperative matrix matmul op.
-    RewritePatternSet combineTransposePatterns(context);
-    combineTransposePatterns.add<CombineContractTranspose>(context);
-    if (failed(applyPatternsAndFoldGreedily(
-            funcOp, std::move(combineTransposePatterns)))) {
-      return signalPassFailure();
+    {
+      RewritePatternSet patterns(context);
+      patterns.add<CombineContractTranspose>(context);
+      if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+        return signalPassFailure();
+      }
     }
 
-    LLVM_DEBUG({
-      llvm::dbgs() << "--- After handling transposes ---\n";
-      funcOp.print(llvm::dbgs(), OpPrintingFlags().useLocalScope());
-      llvm::dbgs() << "\n\n";
-    });
+    debugPrint(funcOp, "after combining transpose ops");
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createSPIRVTileToCooperativeOpsPass() {
-  return std::make_unique<SPIRVTileToCooperativeOpsPass>();
-}
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createSPIRVVectorizeToCooperativeOpsPass() {
-  return std::make_unique<SPIRVVectorizeToCooperativeOpsPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

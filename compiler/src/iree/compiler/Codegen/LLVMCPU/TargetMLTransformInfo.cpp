@@ -8,22 +8,19 @@
 
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 
-using namespace mlir;
-using namespace mlir::iree_compiler;
+namespace mlir::iree_compiler {
 
 namespace {
 
 struct RISCVTargetMLTransformInfo : TargetMLTransformInfo {
   RISCVTargetMLTransformInfo() {
-    defaultMaxUnrollFactor = 8;
+    defaultMaxReductionUnrollFactor = 8;
+    defaultMaxElementwiseUnrollFactor = 8;
     defaultMaxTransposeUnrollFactor = 1;
   }
 };
 
-}  // namespace
-
-namespace mlir {
-namespace iree_compiler {
+} // namespace
 
 const TargetMLTransformInfo TargetMLTransformInfo::getTargetMLTransformInfo(
     IREE::HAL::ExecutableTargetAttr targetAttr) {
@@ -34,5 +31,4 @@ const TargetMLTransformInfo TargetMLTransformInfo::getTargetMLTransformInfo(
   return TargetMLTransformInfo();
 };
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

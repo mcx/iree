@@ -14,8 +14,7 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Combines all pages of the FlatBuffer builder into a single contiguous byte
 // buffer and returns the result.
@@ -25,8 +24,8 @@ namespace iree_compiler {
 // builder is paged. If we end up with a custom attribute type for this that
 // does not support storage uniquing then we can directly allocate and copy
 // the pages into the buffer without the extra copy.
-static SmallVector<uint8_t, 32> cloneBufferIntoContiguousBytes(
-    FlatbufferBuilder &fbb) {
+static SmallVector<uint8_t, 32>
+cloneBufferIntoContiguousBytes(FlatbufferBuilder &fbb) {
   size_t packedSize = flatcc_builder_get_buffer_size(fbb);
   SmallVector<uint8_t, 32> packedData(packedSize);
   void *result =
@@ -40,8 +39,9 @@ FlatbufferBuilder::FlatbufferBuilder() { flatcc_builder_init(&builder); }
 
 FlatbufferBuilder::~FlatbufferBuilder() { flatcc_builder_clear(&builder); }
 
-flatbuffers_uint8_vec_ref_t FlatbufferBuilder::streamUint8Vec(
-    std::function<bool(raw_ostream &stream)> fn, size_t alignment) {
+flatbuffers_uint8_vec_ref_t
+FlatbufferBuilder::streamUint8Vec(std::function<bool(raw_ostream &stream)> fn,
+                                  size_t alignment) {
   flatcc_builder_start_vector(*this, 1, alignment, FLATBUFFERS_COUNT_MAX(1));
   raw_flatbuffer_uint8_vec_ostream stream(*this);
   if (!fn(stream)) {
@@ -123,5 +123,4 @@ LogicalResult FlatbufferBuilder::printJsonToStream(bool pretty,
   return success();
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

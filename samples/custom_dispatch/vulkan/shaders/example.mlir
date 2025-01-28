@@ -2,6 +2,7 @@
 // RUN:     --iree-hal-executable-object-search-path=$IREE_BINARY_DIR | \
 // RUN: iree-run-module \
 // RUN:     --device=vulkan \
+// RUN:     --module=- \
 // RUN:     --function=mixed_invocation \
 // RUN:     --input=8xf32=2 \
 // RUN:     --input=8xf32=4 | \
@@ -12,10 +13,14 @@
 // executable binaries produced and multiple variants with differing formats
 // and compilation options (architectures, etc) can be embedded for runtime
 // selection.
-#spirv_target = #hal.executable.target<"vulkan", "vulkan-spirv-fb", {
-  spirv.target_env = #spirv.target_env<
-    #spirv.vce<v1.3, [Shader, GroupNonUniform], [SPV_KHR_storage_buffer_storage_class, SPV_KHR_variable_pointers]>,
-    #spirv.resource_limits<max_compute_workgroup_size = [128, 128, 64], subgroup_size = 64>
+#spirv_target = #hal.executable.target<"vulkan-spirv", "vulkan-spirv-fb", {
+  iree.gpu.target = #iree_gpu.target<
+    arch = "", features = "spirv:v1.3,cap:Shader", wgp = <
+      compute = fp32|int32, storage = b32, subgroup = none,
+      dot = none, mma = [], subgroup_size_choices = [64, 64],
+      max_workgroup_sizes = [128, 128, 64], max_thread_count_per_workgroup = 128,
+      max_workgroup_memory_bytes = 16384,
+      max_workgroup_counts = [65535, 65535, 65535]>
   >
 }>
 
@@ -23,11 +28,9 @@
 // These can come from compiler flags and multiple targets can be supported
 // It's possible, for example, to support targeting multiple devices in the same
 // compiled binary.
-#vulkan_target = #hal.device.target<"vulkan", {
-  executable_targets = [#spirv_target],
-  // HACK: Vulkan target currently uses the legacy synchronous execution model.
-  legacy_sync
-}>
+#vulkan_target = #hal.device.target<"vulkan", [
+  #spirv_target
+]> : !hal.device
 
 module @example attributes {hal.device.targets = [#vulkan_target]} {
 
@@ -73,12 +76,10 @@ module @example attributes {hal.device.targets = [#vulkan_target]} {
     // The layout defines the required bindings and push constants and can be
     // thought of as the function signature.
     hal.executable.export public @main ordinal(0)
-        layout(#hal.pipeline.layout<push_constants = 1, sets = [
-          <0, bindings = [
-              <0, storage_buffer, ReadOnly>,
-              <1, storage_buffer, ReadOnly>,
-              <2, storage_buffer>
-          ]>
+        layout(#hal.pipeline.layout<constants = 1, bindings = [
+          #hal.pipeline.binding<storage_buffer, ReadOnly>,
+          #hal.pipeline.binding<storage_buffer, ReadOnly>,
+          #hal.pipeline.binding<storage_buffer>
         ]>) {
     ^bb0(%device: !hal.device, %workload: index):
       // This host function is used to compute the XYZ workgroup count
@@ -104,11 +105,9 @@ module @example attributes {hal.device.targets = [#vulkan_target]} {
   } {
     // Similar to the above but in-place by using a read/write binding.
     hal.executable.export public @main ordinal(0)
-        layout(#hal.pipeline.layout<push_constants = 1, sets = [
-          <0, bindings = [
-              <0, storage_buffer, ReadOnly>,
-              <1, storage_buffer>
-          ]>
+        layout(#hal.pipeline.layout<constants = 1, bindings = [
+          #hal.pipeline.binding<storage_buffer, ReadOnly>,
+          #hal.pipeline.binding<storage_buffer>
         ]>) {
     ^bb0(%device: !hal.device, %workload: index):
       %x = affine.apply affine_map<()[s0] -> (s0 ceildiv 64)>()[%workload]
@@ -137,29 +136,13 @@ module @example attributes {hal.device.targets = [#vulkan_target]} {
     %dim_i32 = arith.index_cast %dim : index to i32
 
     // Dispatch a basic `ret = lhs * rhs` shader.
-    %0 = flow.dispatch @simple_mul::@main[%dim](%dim_i32, %arg0, %arg1) {
-      // Bindings are automatically inferred when possible as part of the ABI
-      // but can be overridden if the user wants to use features such as sparse
-      // bindings or multiple descriptor sets. To do so the
-      // `hal.interface.bindings` attribute can be added to a dispatch op as
-      // follows mapping tensor operands/results to the pipeline layout
-      // sets/bindings:
-      hal.interface.bindings = [
-        #hal.interface.binding<0, 0>,
-        #hal.interface.binding<0, 1>,
-        #hal.interface.binding<0, 2>
-      ]
-    } : (i32, tensor<?xf32>{%dim}, tensor<?xf32>{%dim}) -> tensor<?xf32>{%dim}
+    %0 = flow.dispatch @simple_mul::@main[%dim](%dim_i32, %arg0, %arg1) : (i32, tensor<?xf32>{%dim}, tensor<?xf32>{%dim}) -> tensor<?xf32>{%dim}
 
     // Code gen some other ops - these will interleave with the hand-authored
     // ones but naturally won't be able to fuse with them.
     %1 = arith.addf %0, %arg1 : tensor<?xf32>
 
     // Dispatch an in-place `rhs *= lhs` shader.
-    //
-    // Note that we don't declare the hal.interface.bindings and let them be
-    // inferred - this only works when either specifying the variant that has
-    // a pipeline layout defined or all variants have the same pipeline layouts.
     %2 = flow.dispatch @simple_mul_inplace::@main[%dim](%dim_i32, %0, %1) : (i32, tensor<?xf32>{%dim}, tensor<?xf32>{%dim}) -> %1{%dim}
 
     // CHECK: 8xf32=96 96 96 96 96 96 96 96

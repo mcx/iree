@@ -9,7 +9,6 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXDialect.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXTypes.h"
-#include "iree/compiler/Dialect/VMVX/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/VMVX/Transforms/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -19,17 +18,19 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VMVX {
+namespace mlir::iree_compiler::IREE::VMVX {
+
+#define GEN_PASS_DEF_MATERIALIZECONSTANTSPASS
+#include "iree/compiler/Dialect/VMVX/Transforms/Passes.h.inc"
+
+namespace {
 
 static const char *kConstantBlockGlobalPrefix = "__constant_";
 static const char *kConstantBlockSetterName = "__set_constants";
 
-class MaterializeConstantsPass
-    : public MaterializeConstantsBase<MaterializeConstantsPass> {
- public:
+class MaterializeConstantsPass final
+    : public impl::MaterializeConstantsPassBase<MaterializeConstantsPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::Util::UtilDialect, IREE::HAL::HALDialect,
                     arith::ArithDialect, func::FuncDialect>();
@@ -51,7 +52,8 @@ class MaterializeConstantsPass
     });
 
     // No constants found; omit the constant block entirely.
-    if (allLoadOps.empty()) return;
+    if (allLoadOps.empty())
+      return;
 
     // Create global ops for each constant and replace the HAL ops so they load
     // from them. Each global will track what constant key it represents for
@@ -66,14 +68,14 @@ class MaterializeConstantsPass
     for (auto [keyAttr, loadOps] : allLoadOps) {
       auto globalLoc = FusedLoc::get(
           context,
-          llvm::to_vector<4>(llvm::map_range(
-              loadOps, [&](IREE::HAL::ExecutableConstantLoadOp loadOp) {
-                return loadOp.getLoc();
-              })));
+          llvm::map_to_vector(loadOps,
+                              [&](IREE::HAL::ExecutableConstantLoadOp loadOp) {
+                                return loadOp.getLoc();
+                              }));
       auto globalType = loadOps.front().getType();
-      auto globalName =
-          (kConstantBlockGlobalPrefix + keyAttr.cast<StringAttr>().getValue())
-              .str();
+      auto globalName = (kConstantBlockGlobalPrefix +
+                         llvm::cast<StringAttr>(keyAttr).getValue())
+                            .str();
 
       // Placeholder ordinal that'll be updated during linking.
       auto ordinalGlobalOp = moduleBuilder.create<IREE::Util::GlobalOp>(
@@ -90,9 +92,9 @@ class MaterializeConstantsPass
       valueGlobalOp.setPrivate();
       valueGlobalOps.push_back(valueGlobalOp);
       for (auto loadOp : loadOps) {
-        auto newOp = OpBuilder(loadOp).create<IREE::Util::GlobalLoadOp>(
-            loadOp.getLoc(), valueGlobalOp);
-        loadOp.replaceAllUsesWith(newOp.getResult());
+        OpBuilder builder(loadOp);
+        auto newOp = valueGlobalOp.createLoadOp(loadOp.getLoc(), builder);
+        loadOp.replaceAllUsesWith(newOp.getLoadedGlobalValue());
         loadOp.erase();
       }
     }
@@ -113,8 +115,9 @@ class MaterializeConstantsPass
         buffer.getLoc(), sizeof(uint32_t), 32);
     for (auto [ordinalGlobalOp, valueGlobalOp] :
          llvm::zip_equal(ordinalGlobalOps, valueGlobalOps)) {
-      Value loadedOrdinal = setterBuilder.create<IREE::Util::GlobalLoadOp>(
-          ordinalGlobalOp.getLoc(), ordinalGlobalOp);
+      Value loadedOrdinal =
+          ordinalGlobalOp.createLoadOp(ordinalGlobalOp.getLoc(), setterBuilder)
+              .getLoadedGlobalValue();
       Value bufferOffset = setterBuilder.create<arith::MulIOp>(
           loadedOrdinal.getLoc(), loadedOrdinal, elementSizeI32);
       Value loadedValue = setterBuilder.create<IREE::Util::BufferLoadOp>(
@@ -123,19 +126,11 @@ class MaterializeConstantsPass
                                                    setterBuilder.getIndexType(),
                                                    bufferOffset),
           elementSizeIndex);
-      setterBuilder.create<IREE::Util::GlobalStoreOp>(
-          valueGlobalOp.getLoc(), loadedValue, valueGlobalOp);
+      valueGlobalOp.createStoreOp(valueGlobalOp.getLoc(), loadedValue,
+                                  setterBuilder);
     }
     setterBuilder.create<func::ReturnOp>(setterOp.getLoc());
   }
 };
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createMaterializeConstantsPass() {
-  return std::make_unique<MaterializeConstantsPass>();
-}
-
-}  // namespace VMVX
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler::IREE::VMVX

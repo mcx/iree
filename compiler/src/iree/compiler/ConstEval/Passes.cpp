@@ -6,20 +6,16 @@
 
 #include "iree/compiler/ConstEval/Passes.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace ConstEval {
+namespace mlir::iree_compiler::ConstEval {
 
 namespace {
 #define GEN_PASS_REGISTRATION
-#include "iree/compiler/ConstEval/Passes.h.inc"  // IWYU pragma: export
-}  // namespace
+#include "iree/compiler/ConstEval/Passes.h.inc" // IWYU pragma: export
+} // namespace
 
 void registerConstEvalPasses() {
   // Generated.
   registerPasses();
 }
 
-}  // namespace ConstEval
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::ConstEval

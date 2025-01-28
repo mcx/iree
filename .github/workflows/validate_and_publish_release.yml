@@ -19,35 +19,60 @@ jobs:
   validate_packages:
     name: "Validate packages"
     # TODO(jennik): Look into testing windows and macos builds.
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Download packages
         id: download_packages
-        uses: dawidd6/action-download-artifact@b2abf1705491048a2d7074f7d90513044fd25d39 # v2
+        uses: dawidd6/action-download-artifact@80620a5d27ce0ae443b965134db88467fc607b43 # v7
         with:
           github_token: ${{secrets.WRITE_ACCESS_TOKEN}}
           workflow: build_package.yml
           run_id: ${{ github.event.inputs.build_run_id }}
       - name: Extract and display downloaded files
         run: |
-          tar -xf artifact/iree-dist-${{ github.event.inputs.package_version }}-linux-x86_64.tar.xz
+          tar -xf wheels-linux-x86_64-main-dist-linux/iree-dist-${{ github.event.inputs.package_version }}-linux-x86_64.tar.xz
           pwd
           ls -R
       - name: Set up python
         id: set_up_python
-        uses: actions/setup-python@75f3110429a8c05be0e1bf360334e4cced2b63fa # v2.3.3
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
-          python-version: "3.8"
+          python-version: "3.9"
       - name: Install python packages
         id: install_python_packages
         run: |
-          python -m pip install -f file://$PWD/artifact/ iree-compiler iree-runtime iree-tools-tflite iree-tools-tf iree-tools-xla
+          python -m pip install -f file://$PWD/wheels-linux-x86_64-py-compiler-pkg/ iree-base-compiler[onnx]
+          python -m pip install -f file://$PWD/wheels-linux-x86_64-py-runtime-pkg/ iree-base-runtime
+          python -m pip install -f file://$PWD/wheels-linux-x86_64-py-tf-compiler-tools-pkg/ iree-tools-tflite iree-tools-tf
+      - name: Validate IREE Compiler Package
+        id: validate_compiler_package
+        run: |
+          echo "Testing compiler package:"
+          python -m iree.compiler._package_test
+      - name: Validate IREE Runtime Package
+        id: validate_runtime_package
+        run: |
+          echo "Testing default runtime:"
+          python -m iree.runtime._package_test
+          echo "Testing tracy runtime:"
+          # GH runners don't expose the TSC but we want to make sure the basic packaging
+          # works, so override the check with TRACY_NO_INVARIANT_CHECK=1 (per instructions
+          # if this is left off).
+          TRACY_NO_INVARIANT_CHECK=1 IREE_PY_RUNTIME=tracy \
+            python -m iree.runtime._package_test
+      # Binaries from the tarball
+      - name: Run iree-benchmark-executable
+        id: run_iree_benchmark_executable
+        run: ./bin/iree-benchmark-executable --help
       - name: Run iree-benchmark-module
         id: run_iree_benchmark_module
         run: ./bin/iree-benchmark-module --help
-      - name: Run iree-benchmark-trace
-        id: run_iree_benchmark_trace
-        run: ./bin/iree-benchmark-trace --help
+      - name: Run iree-dump-module
+        id: run_iree_dump_module
+        run: ./bin/iree-dump-module --help
+      - name: Run iree-cpuinfo
+        id: run_iree_cpuinfo
+        run: ./bin/iree-cpuinfo
       - name: Run iree-flatcc-cli
         id: run_iree_flatcc_cli
         run: ./bin/iree-flatcc-cli --help
@@ -60,39 +85,65 @@ jobs:
       - name: Run iree-run-module
         id: run_iree_run_module
         run: ./bin/iree-run-module --help
-      - name: Run iree-run-trace
-        id: run_iree_run_trace
-        run: ./bin/iree-run-trace --help
       - name: Run iree-tblgen
         id: run_iree_tblgen
         run: ./bin/iree-tblgen --help
       - name: Run iree-compile
         id: run_iree-compile
         run: ./bin/iree-compile --help
+      # Console scripts from the wheels.
+      - name: Py iree-run-module
+        id: py_iree-run-module
+        run: iree-run-module --help
+      - name: Py iree-benchmark-executable
+        id: py_iree_benchmark_executable
+        run: iree-benchmark-executable --help
+      - name: Py iree-benchmark-module
+        id: py_iree_benchmark_module
+        run: iree-benchmark-module --help
+      - name: Py iree-dump-module
+        id: py_iree_dump_module
+        run: iree-dump-module --help
+      - name: Py iree-cpuinfo
+        id: py_iree_cpuinfo
+        run: iree-cpuinfo
 
   publish_release:
     name: "Publish release"
     needs: validate_packages
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Publish Release
         id: publish_release
-        uses: eregon/publish-release@d6aee8c288e653387d895ee64d559fc0dd63339d # v1.0.3
+        uses: eregon/publish-release@01df127f5e9a3c26935118e22e738d95b59d10ce # v1.0.6
         env:
           GITHUB_TOKEN: ${{ secrets.WRITE_ACCESS_TOKEN }}
         with:
           release_id: ${{ github.event.inputs.release_id }}
 
       - name: Checking out repository
-        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           token: ${{ secrets.WRITE_ACCESS_TOKEN }}
           # Get all history. Otherwise the latest-snapshot branch can't be
           # fast-forwarded.
           fetch-depth: 0
 
+      - name: Set up python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.9"
+
+      - name: Check for patch release
+        run: |
+          python -m pip install packaging
+          is_patch_release="$(python -c "from packaging.version import Version;print('true' if Version('${{ github.event.inputs.package_version }}').micro !=0 else 'false')")"
+          echo "is_patch_release=${is_patch_release}" >> $GITHUB_ENV
+
       - name: Updating latest-snapshot branch
-        uses: ad-m/github-push-action@40bf560936a8022e68a3c00e7d2abefaf01305a6 # v0.6.0
+        # Do not update the branch if the release is a patch release
+        if: ${{ env.is_patch_release == 'false'}}
+        uses: ad-m/github-push-action@d91a481090679876dfc4178fef17f286781251df # v0.8.0
         with:
           github_token: ${{ secrets.WRITE_ACCESS_TOKEN }}
           branch: latest-snapshot

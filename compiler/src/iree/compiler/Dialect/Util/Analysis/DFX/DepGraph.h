@@ -14,9 +14,7 @@
 #include "mlir/IR/AsmState.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace DFX {
+namespace mlir::iree_compiler::DFX {
 
 class AbstractElement;
 class Solver;
@@ -33,12 +31,12 @@ enum class Resolution {
 
 // The data structure for the nodes of a dependency graph
 class DepGraphNode {
- public:
+public:
   using DepTy = llvm::PointerIntPair<DepGraphNode *, 1>;
 
   virtual ~DepGraphNode() = default;
 
- protected:
+protected:
   // Set of dependency graph nodes which should be updated if this one
   // is updated. The bit encodes if it is optional.
   TinyPtrVector<DepTy> deps;
@@ -50,7 +48,7 @@ class DepGraphNode {
 
   operator AbstractElement *() { return cast<AbstractElement>(this); }
 
- public:
+public:
   using iterator = llvm::mapped_iterator<TinyPtrVector<DepTy>::iterator,
                                          decltype(&DepGetVal)>;
   using aaiterator = llvm::mapped_iterator<TinyPtrVector<DepTy>::iterator,
@@ -99,9 +97,7 @@ struct DepGraph {
   AsmState &asmState;
 };
 
-}  // namespace DFX
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::DFX
 
 namespace llvm {
 
@@ -141,6 +137,6 @@ struct GraphTraits<DFXDepGraph *> : public GraphTraits<DFXDepGraphNode *> {
   static nodes_iterator nodes_end(DFXDepGraph *graph) { return graph->end(); }
 };
 
-}  // end namespace llvm
+} // end namespace llvm
 
-#endif  // IREE_COMPILER_DIALECT_UTIL_ANALYSIS_DFX_DEPGRAPH_H_
+#endif // IREE_COMPILER_DIALECT_UTIL_ANALYSIS_DFX_DEPGRAPH_H_

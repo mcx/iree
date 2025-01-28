@@ -8,14 +8,10 @@
 
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Check {
+namespace mlir::iree_compiler::IREE::Check {
 
 namespace {
 template <typename SrcOp, typename DstOp>
@@ -24,11 +20,11 @@ struct ExpandAttributeToConst : public OpRewritePattern<SrcOp> {
   LogicalResult matchAndRewrite(SrcOp op,
                                 PatternRewriter &rewriter) const override {
     auto rhs = rewriter.create<arith::ConstantOp>(op.getLoc(), op.getValue());
-    rewriter.replaceOpWithNewOp<DstOp>(op, op.getLhs(), rhs);
+    rewriter.replaceOpWithNewOp<DstOp>(op, op.getDevice(), op.getLhs(), rhs);
     return success();
   }
 };
-}  // namespace
+} // namespace
 
 void ExpectEqConstOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                   MLIRContext *context) {
@@ -42,10 +38,7 @@ void ExpectAlmostEqConstOp::getCanonicalizationPatterns(
           context);
 }
 
-}  // namespace Check
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Check
 
 #define GET_OP_CLASSES
 #include "iree/compiler/Modules/Check/IR/CheckOps.cpp.inc"

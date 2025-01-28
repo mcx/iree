@@ -13,20 +13,49 @@
 #include "iree/compiler/Modules/HAL/Inline/IR/HALInlineDialect.h"
 #include "iree/compiler/Modules/HAL/Inline/IR/HALInlineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 namespace {
+
+struct ElementTypeOpConversion
+    : public OpConversionPattern<IREE::HAL::ElementTypeOp> {
+  using OpConversionPattern<IREE::HAL::ElementTypeOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(IREE::HAL::ElementTypeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto value =
+        IREE::HAL::ElementTypeOp::getTypeValue(op.getTypeAttr().getValue());
+    if (!value.has_value())
+      return rewriter.notifyMatchFailure(op.getLoc(),
+                                         "unsupported element type");
+    rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(op, value.value(), 32);
+    return success();
+  }
+};
+
+struct EncodingTypeOpConversion
+    : public OpConversionPattern<IREE::HAL::EncodingTypeOp> {
+  using OpConversionPattern<IREE::HAL::EncodingTypeOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(IREE::HAL::EncodingTypeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto value = IREE::HAL::EncodingTypeOp::getTypeValue(op.getEncodingAttr());
+    if (!value.has_value())
+      return rewriter.notifyMatchFailure(op.getLoc(),
+                                         "unsupported encoding type");
+    rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(op, value.value(), 32);
+    return success();
+  }
+};
 
 struct BufferSubspanOpPattern
     : public OpConversionPattern<IREE::HAL::BufferSubspanOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferSubspanOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferSubspanOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto bufferType = getTypeConverter()->convertType(op.getResult().getType());
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferSubspanOp>(
         op, bufferType, adaptor.getSourceBuffer(), adaptor.getSourceOffset(),
@@ -38,9 +67,9 @@ struct BufferSubspanOpPattern
 struct BufferLengthOpPattern
     : public OpConversionPattern<IREE::HAL::BufferLengthOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferLengthOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferLengthOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto sizeType = getTypeConverter()->convertType(op.getResult().getType());
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferLengthOp>(
         op, sizeType, adaptor.getBuffer());
@@ -51,9 +80,9 @@ struct BufferLengthOpPattern
 struct BufferLoadOpPattern
     : public OpConversionPattern<IREE::HAL::BufferLoadOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferLoadOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferLoadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Value storageBuffer =
         rewriter.createOrFold<IREE::HAL::Inline::BufferStorageOp>(
             op.getLoc(), adaptor.getSourceBuffer());
@@ -72,9 +101,9 @@ struct BufferLoadOpPattern
 struct BufferStoreOpPattern
     : public OpConversionPattern<IREE::HAL::BufferStoreOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferStoreOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferStoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Value storageBuffer =
         rewriter.createOrFold<IREE::HAL::Inline::BufferStorageOp>(
             op.getLoc(), adaptor.getTargetBuffer());
@@ -92,9 +121,9 @@ struct BufferStoreOpPattern
 struct BufferViewCreateOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewCreateOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewCreateOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewCreateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewCreateOp>(
         op, adaptor.getSourceBuffer(), adaptor.getSourceOffset(),
         adaptor.getSourceLength(), adaptor.getElementType(),
@@ -106,9 +135,9 @@ struct BufferViewCreateOpPattern
 struct BufferViewBufferOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewBufferOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewBufferOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewBufferOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewBufferOp>(
         op, rewriter.getType<IREE::HAL::BufferType>(), adaptor.getBufferView());
     return success();
@@ -118,9 +147,9 @@ struct BufferViewBufferOpPattern
 struct BufferViewAssertOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewAssertOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewAssertOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewAssertOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewAssertOp>(
         op, adaptor.getBufferView(), adaptor.getMessage(),
         adaptor.getElementType(), adaptor.getEncodingType(),
@@ -132,9 +161,9 @@ struct BufferViewAssertOpPattern
 struct BufferViewElementTypeOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewElementTypeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewElementTypeOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewElementTypeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewElementTypeOp>(
         op, op.getResult().getType(), adaptor.getBufferView());
     return success();
@@ -144,9 +173,9 @@ struct BufferViewElementTypeOpPattern
 struct BufferViewEncodingTypeOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewEncodingTypeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewEncodingTypeOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewEncodingTypeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewEncodingTypeOp>(
         op, op.getResult().getType(), adaptor.getBufferView());
     return success();
@@ -156,9 +185,9 @@ struct BufferViewEncodingTypeOpPattern
 struct BufferViewRankOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewRankOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewRankOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewRankOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewRankOp>(
         op, op.getResult().getType(), adaptor.getBufferView());
     return success();
@@ -168,9 +197,9 @@ struct BufferViewRankOpPattern
 struct BufferViewDimOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewDimOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewDimOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewDimOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewDimOp>(
         op, op.getResult().getType(), adaptor.getBufferView(),
         adaptor.getIndexAttr());
@@ -181,16 +210,16 @@ struct BufferViewDimOpPattern
 struct BufferViewTraceOpPattern
     : public OpConversionPattern<IREE::HAL::BufferViewTraceOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::BufferViewTraceOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::BufferViewTraceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::HAL::Inline::BufferViewTraceOp>(
         op, adaptor.getKeyAttr(), adaptor.getOperands());
     return success();
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateHALToHALInlinePatterns(MLIRContext *context,
                                     ConversionTarget &conversionTarget,
@@ -204,7 +233,7 @@ void populateHALToHALInlinePatterns(MLIRContext *context,
       [](OpBuilder &builder, IREE::Util::BufferType type, ValueRange inputs,
          Location loc) -> Value {
         assert(inputs.size() == 1);
-        if (inputs[0].getType().isa<IREE::HAL::BufferType>()) {
+        if (llvm::isa<IREE::HAL::BufferType>(inputs[0].getType())) {
           return builder.createOrFold<IREE::HAL::Inline::BufferStorageOp>(
               loc, inputs[0]);
         } else {
@@ -219,6 +248,9 @@ void populateHALToHALInlinePatterns(MLIRContext *context,
   patterns.insert<BufferLoadOpPattern>(typeConverter, context);
   patterns.insert<BufferStoreOpPattern>(typeConverter, context);
 
+  patterns.insert<ElementTypeOpConversion>(context);
+  patterns.insert<EncodingTypeOpConversion>(context);
+
   patterns.insert<BufferViewCreateOpPattern>(typeConverter, context);
   patterns.insert<BufferViewAssertOpPattern>(typeConverter, context);
   patterns.insert<BufferViewBufferOpPattern>(typeConverter, context);
@@ -229,5 +261,4 @@ void populateHALToHALInlinePatterns(MLIRContext *context,
   patterns.insert<BufferViewTraceOpPattern>(typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

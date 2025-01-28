@@ -21,16 +21,13 @@
 #include "mlir/Support/LLVM.h"
 
 // clang-format off: must be included after all LLVM/MLIR headers.
-#include "iree/compiler/Dialect/Flow/IR/FlowEnums.h.inc"  // IWYU pragma: export
+#include "iree/compiler/Dialect/Flow/IR/FlowEnums.h.inc" // IWYU pragma: export
 // clang-format on
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+namespace mlir::iree_compiler::IREE::Flow {
 
-#include "iree/compiler/Dialect/Flow/IR/FlowOpInterfaces.h.inc"  // IWYU pragma: export
-#include "iree/compiler/Dialect/Flow/IR/FlowTypeInterfaces.h.inc"  // IWYU pragma: export
+#include "iree/compiler/Dialect/Flow/IR/FlowOpInterfaces.h.inc" // IWYU pragma: export
+#include "iree/compiler/Dialect/Flow/IR/FlowTypeInterfaces.h.inc" // IWYU pragma: export
 
 //===----------------------------------------------------------------------===//
 // Object types
@@ -38,7 +35,7 @@ namespace Flow {
 
 namespace detail {
 struct DispatchTensorTypeStorage;
-}  // namespace detail
+} // namespace detail
 
 enum class TensorAccess : uint32_t {
   ReadOnly,
@@ -51,10 +48,12 @@ enum class TensorAccess : uint32_t {
 class DispatchTensorType
     : public Type::TypeBase<DispatchTensorType, Type,
                             detail::DispatchTensorTypeStorage> {
- public:
+public:
   using ImplType = detail::DispatchTensorTypeStorage;
 
   using Base::Base;
+
+  static constexpr StringLiteral name = "flow.dispatch_tensor";
 
   /// Get or create a new DispatchTensorType of the provided shape and
   /// element type. Assumes the arguments define a well-formed
@@ -131,7 +130,7 @@ class DispatchTensorType
     if (boundType.isIntOrIndexOrFloat()) {
       return RankedTensorType::get({}, boundType);
     }
-    return boundType.cast<RankedTensorType>();
+    return llvm::cast<RankedTensorType>(boundType);
   }
 };
 
@@ -161,18 +160,43 @@ struct DispatchTensorTypeStorage : public TypeStorage {
   Type boundType;
 };
 
-}  // namespace detail
+} // namespace detail
 
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Flow
 
 // clang-format off: must be included after all LLVM/MLIR headers.
 #define GET_ATTRDEF_CLASSES
-#include "iree/compiler/Dialect/Flow/IR/FlowAttrs.h.inc"  // IWYU pragma: keep
+#include "iree/compiler/Dialect/Flow/IR/FlowAttrs.h.inc" // IWYU pragma: keep
 #define GET_TYPEDEF_CLASSES
-#include "iree/compiler/Dialect/Flow/IR/FlowTypes.h.inc"  // IWYU pragma: keep
+#include "iree/compiler/Dialect/Flow/IR/FlowTypes.h.inc" // IWYU pragma: keep
 // clang-format on
 
-#endif  // IREE_COMPILER_DIALECT_FLOW_IR_FLOWTYPES_H_
+namespace mlir::iree_compiler::IREE::Flow {
+
+// Create an attribute corresponding to the underlying numeric element type.
+// If there no such correspondence a null attribute is returned.
+IREE::Flow::CollectiveElementTypeAttr
+getCollectiveElementTypeAttr(RankedTensorType type);
+
+// Convert the numeric type `type` to the corresponding enum value.
+// If there is not correspondence nullopt is returned.
+std::optional<IREE::Flow::CollectiveElementType>
+convertToFlowCollectiveElementType(Type type);
+
+//===----------------------------------------------------------------------===//
+// custom<ParameterReference>($scope, $key)
+//===----------------------------------------------------------------------===//
+
+ParseResult parseParameterReference(AsmParser &parser, StringAttr &scopeAttr,
+                                    StringAttr &keyAttr);
+void printParameterReference(AsmPrinter &p, StringAttr scopeAttr,
+                             StringAttr keyAttr);
+static inline void printParameterReference(AsmPrinter &p, Operation *op,
+                                           StringAttr scopeAttr,
+                                           StringAttr keyAttr) {
+  printParameterReference(p, scopeAttr, keyAttr);
+}
+
+} // namespace mlir::iree_compiler::IREE::Flow
+
+#endif // IREE_COMPILER_DIALECT_FLOW_IR_FLOWTYPES_H_

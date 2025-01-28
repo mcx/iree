@@ -10,7 +10,6 @@
 #include <stdint.h>
 
 #include "iree/base/api.h"
-#include "iree/base/target_platform.h"
 
 // This file contains the ELF data structures we use in our runtime linker and
 // the definitions to support them. The structure definitions are taken from
@@ -74,6 +73,12 @@ enum {
   IREE_ELF_ELFDATANONE = 0,  // Invalid data encoding
   IREE_ELF_ELFDATA2LSB = 1,  // Little-endian
   IREE_ELF_ELFDATA2MSB = 2,  // Big-endian
+};
+
+enum {
+  IREE_ELF_ELFOSABI_NONE = 0,          // No extensions or unspecified
+  IREE_ELF_ELFOSABI_LINUX = 3,         // Linux
+  IREE_ELF_ELFOSABI_STANDALONE = 255,  // Standalone
 };
 
 enum {
@@ -225,9 +230,9 @@ typedef struct {
   iree_elf64_word_t n_type;
 } iree_elf64_nhdr_t;
 
-#define IREE_ELF_ST_INFO(bind, type) (((bind) << 4) + ((type)&0xF))
+#define IREE_ELF_ST_INFO(bind, type) (((bind) << 4) + ((type) & 0xF))
 
-#define IREE_ELF_ST_TYPE(info) ((info)&0xF)
+#define IREE_ELF_ST_TYPE(info) ((info) & 0xF)
 enum {
   IREE_ELF_STT_NOTYPE = 0,
   IREE_ELF_STT_OBJECT = 1,
@@ -244,7 +249,7 @@ enum {
   IREE_ELF_STB_WEAK = 2,    // Weak symbol (somewhat like global).
 };
 
-#define IREE_ELF_ST_VISIBILITY(o) ((o)&0x3)
+#define IREE_ELF_ST_VISIBILITY(o) ((o) & 0x3)
 enum {
   IREE_ELF_STV_DEFAULT = 0,
   IREE_ELF_STV_INTERNAL = 1,
@@ -387,7 +392,7 @@ typedef iree_elf32_shdr_t iree_elf_shdr_t;
 typedef iree_elf32_nhdr_t iree_elf_nhdr_t;
 
 #define IREE_ELF_R_SYM(x) ((x) >> 8)
-#define IREE_ELF_R_TYPE(x) ((x)&0xFF)
+#define IREE_ELF_R_TYPE(x) ((x) & 0xFF)
 
 #elif defined(IREE_PTR_SIZE_64)
 
@@ -411,7 +416,7 @@ typedef iree_elf64_shdr_t iree_elf_shdr_t;
 typedef iree_elf64_nhdr_t iree_elf_nhdr_t;
 
 #define IREE_ELF_R_SYM(i) ((i) >> 32)
-#define IREE_ELF_R_TYPE(i) ((i)&0xFFFFFFFF)
+#define IREE_ELF_R_TYPE(i) ((i) & 0xFFFFFFFF)
 
 #else
 #error "unsupported ELF N size (only 32/64-bits are defined)"

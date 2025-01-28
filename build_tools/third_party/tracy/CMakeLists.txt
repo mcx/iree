@@ -19,9 +19,13 @@ find_package(Threads REQUIRED)
 message(STATUS "Checking for Tracy dependencies...")
 find_program(PKGCONFIG pkg-config)
 if(NOT PKGCONFIG)
-  message(STATUS "Could not find pkg-config (on Ubuntu/Debian, 'apt install pkg-config')")
+  message(STATUS "Could not find pkg-config to get dependencies; you need to specify them manually or use pkg-config")
+  message(STATUS "  Ubuntu/Debian: `apt install pkg-config`")
+  message(STATUS "  MacOS: `brew install pkg-config`")
 else()
   include(FindPkgConfig)
+
+  # Deps slightly differ by platform but some are common.
   pkg_check_modules(TRACY_DEPS
     tbb
     libzstd
@@ -29,31 +33,22 @@ else()
   pkg_check_modules(TRACY_CAPSTONE_DEPS
     capstone
   )
-  pkg_check_modules(TRACY_GTK_DEPS
-    freetype2
-    glfw3
-    gtk+-3.0
-    dbus-1
-  )
-endif()
 
+  if(NOT TRACY_DEPS_FOUND)
+    message(STATUS "Could not find Tracy dependencies (Tracy server will not be built).")
+    message(STATUS "To build Tracy, install packages libzstd, and tbb:")
+    message(STATUS "  Ubuntu/Debian: `apt install libcapstone-dev libtbb-dev libzstd-dev`")
+    message(STATUS "  MacOS: `brew install capstone tbb zstd`")
+    return()
+  endif()
 
-if(NOT TRACY_DEPS_FOUND)
-  message(STATUS "Could not find Tracy dependencies (Tracy server will not be built).")
-  message(STATUS "To build Tracy, install packages libzstd, and tbb (on Ubuntu/Debian, 'apt install libcapstone-dev libtbb-dev libzstd-dev')")
-  return()
-endif()
-
-if(NOT TRACY_CAPSTONE_DEPS_FOUND)
-  message(STATUS "Could not find capstone, a Tracy dependency (Tracy server will not be built).")
-  message(STATUS "To build Tracy, install capstone (on Ubuntu/Debian, 'apt install libcapstone-dev')")
-  return()
-endif()
-
-if(NOT TRACY_GTK_DEPS_FOUND)
-  message(STATUS
-    "Could not find deps required to build graphical programs: "
-    "Tracy graphical profiler will not be built (on Ubuntu/Debian, 'apt install libglfw3-dev libfreetype-dev libgtk-3-dev libdbus-1-dev')")
+  if(NOT TRACY_CAPSTONE_DEPS_FOUND)
+    message(STATUS "Could not find capstone, a Tracy dependency (Tracy server will not be built).")
+    message(STATUS "To build Tracy, install capstone or build from source:")
+    message(STATUS "  Ubuntu/Debian: `apt install libcapstone-dev`")
+    message(STATUS "  MacOS: `brew install capstone`")
+    return()
+  endif()
 endif()
 
 #-------------------------------------------------------------------------------
@@ -89,25 +84,6 @@ function(setup_cxx_options name)
     PRIVATE
       ${TRACY_DEPS_LIBRARY_DIRS}
       ${TRACY_CAPSTONE_DEPS_LIBRARY_DIRS}
-  )
-endfunction()
-
-function(setup_graphics_deps name)
-  target_compile_definitions(${name}
-  PRIVATE
-    DISPLAY_SERVER_X11
-  )
-  target_include_directories(${name}
-    PUBLIC
-      ${TRACY_GTK_DEPS_INCLUDE_DIRS}
-  )
-  target_link_libraries(${name}
-    PRIVATE
-      ${TRACY_GTK_DEPS_LIBRARIES}
-  )
-  target_link_directories(${name}
-    PRIVATE
-      ${TRACY_GTK_DEPS_LIBRARY_DIRS}
   )
 endfunction()
 
@@ -152,79 +128,3 @@ target_link_libraries(IREETracyCaptureServer
     IREETracyCommon
     IREETracyServer
 )
-
-#-------------------------------------------------------------------------------
-# CSV Export Tool
-#-------------------------------------------------------------------------------
-
-add_executable(IREETracyCSVExport
-  ${TRACY_SOURCE_DIR}/csvexport/src/csvexport.cpp
-)
-set_target_properties(IREETracyCSVExport
-  PROPERTIES
-    OUTPUT_NAME "iree-tracy-csvexport"
-)
-setup_cxx_options(IREETracyCSVExport)
-target_link_libraries(IREETracyCSVExport
-  PRIVATE
-    IREETracyCommon
-    IREETracyServer
-)
-
-#-------------------------------------------------------------------------------
-# Graphical frontends
-#-------------------------------------------------------------------------------
-
-if(TRACY_GTK_DEPS_FOUND)
-  #-----------------------------------------------------------------------------
-  # IMGUI library
-  #-----------------------------------------------------------------------------
-
-  file(GLOB IMGUI_SOURCES
-    ${TRACY_SOURCE_DIR}/imgui/*.cpp
-    ${TRACY_SOURCE_DIR}/profiler/src/imgui/*.cpp
-  )
-  add_library(IREETracyIMGUI
-    ${IMGUI_SOURCES}
-  )
-  setup_cxx_options(IREETracyIMGUI)
-
-  #-----------------------------------------------------------------------------
-  # NFD library
-  #-----------------------------------------------------------------------------
-
-  set(NFD_SOURCES
-    ${TRACY_SOURCE_DIR}/nfd/nfd_portal.cpp
-  )
-  add_library(IREETracyNFD
-    ${NFD_SOURCES}
-  )
-  setup_cxx_options(IREETracyNFD)
-  setup_graphics_deps(IREETracyNFD)
-
-  #-----------------------------------------------------------------------------
-  # Profiler
-  #-----------------------------------------------------------------------------
-
-  file(GLOB PROFILER_SRCS ${TRACY_SOURCE_DIR}/profiler/src/*.cpp)
-  # Remove the source files for Wayland backend; right now we just use GLFW.
-  list(REMOVE_ITEM PROFILER_SRCS
-       "${TRACY_SOURCE_DIR}/profiler/src/BackendWayland.cpp")
-  add_executable(IREETracyProfiler
-    ${PROFILER_SRCS}
-  )
-  set_target_properties(IREETracyProfiler
-    PROPERTIES
-      OUTPUT_NAME "iree-tracy-profiler"
-  )
-  setup_cxx_options(IREETracyProfiler)
-  setup_graphics_deps(IREETracyProfiler)
-  target_link_libraries(IREETracyProfiler
-    PRIVATE
-      IREETracyIMGUI
-      IREETracyCommon
-      IREETracyNFD
-      IREETracyServer
-      ${CMAKE_THREAD_LIBS_INIT}
-  )
-endif()

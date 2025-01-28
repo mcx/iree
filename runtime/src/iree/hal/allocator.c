@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#include "iree/base/tracing.h"
 #include "iree/hal/detail.h"
 #include "iree/hal/resource.h"
 
@@ -177,16 +176,15 @@ iree_hal_allocator_query_buffer_compatibility(
 IREE_API_EXPORT iree_status_t iree_hal_allocator_allocate_buffer(
     iree_hal_allocator_t* IREE_RESTRICT allocator,
     iree_hal_buffer_params_t params, iree_device_size_t allocation_size,
-    iree_const_byte_span_t initial_data,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   IREE_ASSERT_ARGUMENT(allocator);
   IREE_ASSERT_ARGUMENT(out_buffer);
   *out_buffer = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, (int64_t)allocation_size);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)allocation_size);
   iree_hal_buffer_params_canonicalize(&params);
   iree_status_t status = _VTABLE_DISPATCH(allocator, allocate_buffer)(
-      allocator, &params, allocation_size, initial_data, out_buffer);
+      allocator, &params, allocation_size, out_buffer);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -196,7 +194,7 @@ IREE_API_EXPORT void iree_hal_allocator_deallocate_buffer(
   IREE_ASSERT_ARGUMENT(allocator);
   IREE_ASSERT_ARGUMENT(buffer);
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(
       z0, (int64_t)iree_hal_buffer_allocation_size(buffer));
   _VTABLE_DISPATCH(allocator, deallocate_buffer)(allocator, buffer);
   IREE_TRACE_ZONE_END(z0);

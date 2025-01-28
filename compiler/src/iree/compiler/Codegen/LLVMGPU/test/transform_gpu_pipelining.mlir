@@ -1,5 +1,10 @@
 // RUN: iree-opt %s -iree-transform-dialect-interpreter -transform-dialect-drop-schedule | FileCheck %s
 
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
 hal.executable private @matmul_pipelining  {
 builtin.module {
 func.func @matmul_pipelining() {
@@ -14,11 +19,11 @@ func.func @matmul_pipelining() {
   %3 = gpu.thread_id  z
   %4 = memref.alloc() : memref<4x32x40xf16, 3>
   %5 = memref.alloc() : memref<4x32x40xf16, 3>
-  %6 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%c0) : memref<3456x2048xf16>
+  %6 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : memref<3456x2048xf16>
   memref.assume_alignment %6, 64 : memref<3456x2048xf16>
-  %7 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(64) offset(%c0) : memref<2048x1024xf16>
+  %7 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) : memref<2048x1024xf16>
   memref.assume_alignment %7, 64 : memref<2048x1024xf16>
-  %8 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) alignment(64) offset(%c0) : memref<3456x1024xf16>
+  %8 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : memref<3456x1024xf16>
   memref.assume_alignment %8, 64 : memref<3456x1024xf16>
   %workgroup_id_x = hal.interface.workgroup.id[0] : index
   %workgroup_id_y = hal.interface.workgroup.id[1] : index
@@ -52,13 +57,16 @@ func.func @matmul_pipelining() {
   return
 }
 }
-transform.sequence failures(propagate) {
-^bb1(%variant_op: !pdl.operation):
-  %for = transform.structured.match ops{["scf.for"]} in %variant_op : (!pdl.operation) -> !pdl.operation
-  %1 = transform.cast %for : !pdl.operation to !transform.op<"scf.for">
-  %2 = transform.iree.pipeline_shared_memory_copies %1 { depth = 4 } : (!transform.op<"scf.for">) -> !transform.op<"scf.for">
 }
-}
+
+module attributes { transform.with_named_sequence } {
+  transform.named_sequence @__transform_main(%root: !transform.any_op {transform.readonly}) {
+    %for = transform.structured.match ops{["scf.for"]} in %root : (!transform.any_op) -> !transform.any_op
+    %1 = transform.cast %for : !transform.any_op to !transform.op<"scf.for">
+    %2 = transform.iree.pipeline_shared_memory_copies %1 { depth = 4 } : (!transform.op<"scf.for">) -> !transform.op<"scf.for">
+    transform.yield
+  } // @__transform_main
+} // module
 
 // CHECK-LABEL: func.func @matmul_pipelining
 // CHECK: nvgpu.device_async_copy
@@ -75,4 +83,3 @@ transform.sequence failures(propagate) {
 // CHECK:   nvgpu.device_async_copy
 // CHECK:   nvgpu.device_async_copy
 // CHECK:   nvgpu.device_async_create_group
-

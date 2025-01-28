@@ -11,9 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "iree/base/tracing.h"
 #include "iree/hal/api.h"
-#include "iree/hal/local/executable_library.h"
 #include "iree/hal/local/local_executable.h"
 #include "iree/modules/vmvx/module.h"
 #include "iree/vm/bytecode/module.h"
@@ -77,7 +75,7 @@ static iree_status_t iree_hal_vmvx_executable_set_constants(
   uint8_t input_storage[64] = {0};
   iree_vm_list_t* inputs = NULL;
   iree_vm_type_def_t element_type =
-      iree_vm_type_def_make_ref_type(iree_vm_buffer_type_id());
+      iree_vm_make_ref_type_def(iree_vm_buffer_type());
   status = iree_vm_list_initialize(
       iree_make_byte_span(input_storage, sizeof(input_storage)), &element_type,
       1, &inputs);
@@ -223,8 +221,6 @@ static iree_status_t iree_hal_vmvx_executable_create(
   IREE_ASSERT_ARGUMENT(instance);
   IREE_ASSERT_ARGUMENT(bytecode_module);
   IREE_ASSERT_ARGUMENT(executable_params);
-  IREE_ASSERT_ARGUMENT(!executable_params->pipeline_layout_count ||
-                       executable_params->pipeline_layouts);
   IREE_ASSERT_ARGUMENT(out_executable);
   *out_executable = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
@@ -232,29 +228,17 @@ static iree_status_t iree_hal_vmvx_executable_create(
   // NOTE: pipeline layouts are optional but if provided must be consistent.
   iree_host_size_t entry_count =
       iree_vm_module_signature(bytecode_module).export_function_count;
-  if (executable_params->pipeline_layout_count > 0 &&
-      entry_count != executable_params->pipeline_layout_count) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "executable provides %zu entry points but caller "
-                            "provided %zu; must match",
-                            entry_count,
-                            executable_params->pipeline_layout_count);
-  }
 
   iree_hal_vmvx_executable_t* executable = NULL;
   const iree_host_size_t entry_fn_ordinals_size =
       iree_host_align(entry_count * sizeof(*executable->entry_fn_ordinals), 8);
   const iree_host_size_t dispatch_attrs_size = iree_host_align(
       entry_count * sizeof(*executable->base.dispatch_attrs), 8);
-  const iree_host_size_t pipeline_layouts_size =
-      iree_host_align(executable_params->pipeline_layout_count *
-                          sizeof(iree_hal_pipeline_layout_t*),
-                      8);
   const iree_host_size_t worker_states_size =
       iree_host_align(worker_capacity * sizeof(*executable->worker_states), 8);
-  const iree_host_size_t total_size =
-      sizeof(*executable) + entry_fn_ordinals_size + dispatch_attrs_size +
-      pipeline_layouts_size + worker_states_size;
+  const iree_host_size_t total_size = sizeof(*executable) +
+                                      entry_fn_ordinals_size +
+                                      dispatch_attrs_size + worker_states_size;
   iree_status_t status =
       iree_allocator_malloc(host_allocator, total_size, (void**)&executable);
   iree_hal_executable_dispatch_attrs_v0_t* dispatch_attrs = NULL;
@@ -263,14 +247,8 @@ static iree_status_t iree_hal_vmvx_executable_create(
         (uint8_t*)executable + sizeof(*executable) + entry_fn_ordinals_size;
     dispatch_attrs = (iree_hal_executable_dispatch_attrs_v0_t*)ptr;
     ptr += dispatch_attrs_size;
-    iree_hal_pipeline_layout_t** pipeline_layouts_ptr =
-        (iree_hal_pipeline_layout_t**)ptr;
-    ptr += pipeline_layouts_size;
-    iree_hal_local_executable_initialize(
-        &iree_hal_vmvx_executable_vtable,
-        executable_params->pipeline_layout_count,
-        executable_params->pipeline_layouts, pipeline_layouts_ptr,
-        host_allocator, &executable->base);
+    iree_hal_local_executable_initialize(&iree_hal_vmvx_executable_vtable,
+                                         host_allocator, &executable->base);
     executable->base.dispatch_attrs = dispatch_attrs;
 
     executable->worker_capacity = worker_capacity;
@@ -303,6 +281,7 @@ static iree_status_t iree_hal_vmvx_executable_create(
           .linkage = IREE_VM_FUNCTION_LINKAGE_EXPORT,
           .ordinal = executable->entry_fn_ordinals[i],
       };
+
       iree_string_view_t local_memory_str =
           iree_vm_function_lookup_attr_by_name(
               &entry_fn, iree_make_cstring_view("local_memory"));
@@ -310,8 +289,26 @@ static iree_status_t iree_hal_vmvx_executable_create(
       if (!iree_string_view_is_empty(local_memory_str)) {
         iree_string_view_atoi_uint32(local_memory_str, &local_memory_size);
       }
-      local_memory_size /= IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE;
+      local_memory_size /= IREE_HAL_EXECUTABLE_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE;
       dispatch_attrs[i].local_memory_pages = (uint16_t)local_memory_size;
+
+      iree_string_view_t constant_count_str =
+          iree_vm_function_lookup_attr_by_name(
+              &entry_fn, iree_make_cstring_view("constant_count"));
+      uint32_t constant_count = 0;
+      if (!iree_string_view_is_empty(constant_count_str)) {
+        iree_string_view_atoi_uint32(constant_count_str, &constant_count);
+      }
+      dispatch_attrs[i].constant_count = (uint8_t)constant_count;
+
+      iree_string_view_t binding_count_str =
+          iree_vm_function_lookup_attr_by_name(
+              &entry_fn, iree_make_cstring_view("binding_count"));
+      uint32_t binding_count = 0;
+      if (!iree_string_view_is_empty(binding_count_str)) {
+        iree_string_view_atoi_uint32(binding_count_str, &binding_count);
+      }
+      dispatch_attrs[i].binding_count = (uint8_t)binding_count;
     }
   }
 
@@ -388,7 +385,7 @@ static iree_status_t iree_hal_vmvx_executable_issue_call(
   // The list would only need to be constructed once and we could avoid the
   // extraneous retain/releases and mappings.
   iree_vm_type_def_t buffer_type =
-      iree_vm_type_def_make_ref_type(iree_vm_buffer_type_id());
+      iree_vm_make_ref_type_def(iree_vm_buffer_type());
   iree_host_size_t binding_list_size =
       iree_vm_list_storage_size(&buffer_type, dispatch_state->binding_count);
   void* binding_list_storage = iree_alloca(binding_list_size);
@@ -415,7 +412,7 @@ static iree_status_t iree_hal_vmvx_executable_issue_call(
         iree_allocator_null(), binding_buffer);
     iree_vm_ref_t ref = {0};
     status =
-        iree_vm_ref_wrap_assign(binding_buffer, iree_vm_buffer_type_id(), &ref);
+        iree_vm_ref_wrap_assign(binding_buffer, iree_vm_buffer_type(), &ref);
     if (!iree_status_is_ok(status)) break;
     status = iree_vm_list_push_ref_retain(binding_list, &ref);
     if (!iree_status_is_ok(status)) break;
@@ -437,9 +434,8 @@ static iree_status_t iree_hal_vmvx_executable_issue_call(
   iree_vm_buffer_t constants_buffer;
   iree_vm_buffer_initialize(
       IREE_VM_BUFFER_ACCESS_ORIGIN_HOST,
-      iree_make_byte_span(
-          (void*)dispatch_state->push_constants,
-          sizeof(uint32_t) * dispatch_state->push_constant_count),
+      iree_make_byte_span((void*)dispatch_state->constants,
+                          sizeof(uint32_t) * dispatch_state->constant_count),
       iree_allocator_null(), &constants_buffer);
 
   // Prepare call argument buffer. We've verified the signature on creation and
@@ -478,21 +474,18 @@ static iree_status_t iree_hal_vmvx_executable_issue_call(
   } call_args = {
       .local_memory =
           {
-              .type = iree_vm_buffer_type_id(),
+              .type = iree_vm_buffer_type(),
               .ptr = &local_memory_buffer,
-              .offsetof_counter = 0,
           },
       .constants =
           {
-              .type = iree_vm_buffer_type_id(),
+              .type = iree_vm_buffer_type(),
               .ptr = &constants_buffer,
-              .offsetof_counter = 0,
           },
       .bindings =
           {
-              .type = iree_vm_list_type_id(),
+              .type = iree_vm_list_type(),
               .ptr = binding_list,
-              .offsetof_counter = 0,
           },
       .workgroup_id_x = workgroup_state->workgroup_id_x,
       .workgroup_id_y = workgroup_state->workgroup_id_y,
@@ -504,11 +497,6 @@ static iree_status_t iree_hal_vmvx_executable_issue_call(
       .workgroup_count_y = dispatch_state->workgroup_count_y,
       .workgroup_count_z = dispatch_state->workgroup_count_z,
   };
-
-  // Call arguments are retained by the caller.
-  iree_vm_list_retain(binding_list);            // for call
-  iree_vm_buffer_retain(&local_memory_buffer);  // for call
-  iree_vm_buffer_retain(&constants_buffer);     // for call
 
   // VM stack stored on native stack. We really do abuse the stack too much
   // here but it's 8KB and that should be reasonable given that there isn't too
@@ -623,7 +611,8 @@ iree_status_t iree_hal_vmvx_module_loader_create_isolated(
 
   iree_vm_instance_t* instance = NULL;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_vm_instance_create(host_allocator, &instance));
+      z0, iree_vm_instance_create(IREE_VM_TYPE_CAPACITY_DEFAULT, host_allocator,
+                                  &instance));
 
   iree_status_t status = iree_hal_vmvx_module_loader_create(
       instance, user_module_count, user_modules, host_allocator,

@@ -10,13 +10,10 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
 
 class HALDialect : public Dialect {
- public:
+public:
   explicit HALDialect(MLIRContext *context);
   static StringRef getDialectNamespace() { return "hal"; }
 
@@ -29,14 +26,11 @@ class HALDialect : public Dialect {
   Operation *materializeConstant(OpBuilder &builder, Attribute value, Type type,
                                  Location loc) override;
 
- private:
+private:
   void registerAttributes();
   void registerTypes();
 };
 
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL
 
-#endif  // IREE_COMPILER_DIALECT_HAL_IR_HALDIALECT_H_
+#endif // IREE_COMPILER_DIALECT_HAL_IR_HALDIALECT_H_

@@ -7,41 +7,19 @@
 #ifndef STRUCTURED_TRANSFORM_OPS_EXT
 #define STRUCTURED_TRANSFORM_OPS_EXT
 
-include "mlir/Dialect/PDL/IR/PDLTypes.td"
 include "mlir/Dialect/Transform/IR/TransformAttrs.td"
 include "mlir/Dialect/Transform/IR/TransformDialect.td"
-include "mlir/Dialect/Transform/IR/TransformInterfaces.td"
+include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/OpBase.td"
 
-def LowerToLLVMOp : Op<Transform_Dialect, "lower_to_llvm",
-    [FunctionalStyleTransformOpTrait,
-     MemoryEffectsOpInterface,
-     DeclareOpInterfaceMethods<TransformOpInterface>]> {
-  let description = [{Indicates that the entire module should be converted
-  to the LLVM dialect. This is expected to be the last transformation in
-  a sequence.}];
-
-  let arguments =
-    (ins DefaultValuedAttr<BoolAttr, "false">:$reassociate_fp_reductions,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_index_optimizations,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_arm_neon,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_arm_sve,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_amx,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_x86vector,
-     DefaultValuedAttr<BoolAttr, "false">:$enable_async);
-
-  let assemblyFormat = "attr-dict";
-  let cppNamespace = "mlir::transform_ext";
-}
-
-
 def RegisterMatchCallbacksOp :
     Op<Transform_Dialect, "iree.register_match_callbacks",
       [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-       DeclareOpInterfaceMethods<TransformOpInterface>]> {
+       DeclareOpInterfaceMethods<TransformOpInterface>,
+       ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Registers named structured op matcher callbacks specific for IREE to use
     with `transform.iree.match_callback`. This should be called before first
@@ -74,7 +52,8 @@ def RegisterMatchCallbacksOp :
 def MatchCallbackOp :
     Op<Transform_Dialect, "iree.match_callback",
        [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+        DeclareOpInterfaceMethods<TransformOpInterface>,
+        ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Performs payload IR matching using a C++ callback registered beforehand.
     The callback is identified by name and is passed the current transform
@@ -101,7 +80,8 @@ def MatchCallbackOp :
 def TakeFirstOp :
     Op<Transform_Dialect, "iree.take_first",
        [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-        DeclareOpInterfaceMethods<TransformOpInterface>]> {
+        DeclareOpInterfaceMethods<TransformOpInterface>,
+        ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Given an arbitrary list of handles associated with potentially empty lists
     of payload operations, produces two new handles:
@@ -128,7 +108,8 @@ def TakeFirstOp :
 def EmitRemarkOp :
     Op<Transform_Dialect, "iree.emit_remark",
        [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-        TransformOpInterface, TransformEachOpTrait]> {
+        TransformOpInterface, TransformEachOpTrait,
+        ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Emits a diagnostic remark with the given message located at payload ops
     associated with the given handle. This can be used, e.g., for debugging.
@@ -141,6 +122,7 @@ def EmitRemarkOp :
 
   let extraClassDeclaration = [{
     ::mlir::DiagnosedSilenceableFailure applyToOne(
+      ::mlir::transform::TransformRewriter &rewriter,
       ::mlir::Operation *target,
       ::mlir::transform::ApplyToEachResultList &results,
       ::mlir::transform::TransformState &state);

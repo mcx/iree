@@ -15,21 +15,21 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
-namespace iree {
-namespace hal {
-namespace cts {
+namespace iree::hal::cts {
 
-class event_test : public CtsTestBase {};
+class EventTest : public CTSTestBase<> {};
 
-TEST_P(event_test, Create) {
+TEST_F(EventTest, Create) {
   iree_hal_event_t* event = NULL;
-  IREE_ASSERT_OK(iree_hal_event_create(device_, &event));
+  IREE_ASSERT_OK(iree_hal_event_create(device_, IREE_HAL_QUEUE_AFFINITY_ANY,
+                                       IREE_HAL_EVENT_FLAG_NONE, &event));
   iree_hal_event_release(event);
 }
 
-TEST_P(event_test, SignalAndReset) {
+TEST_F(EventTest, SignalAndReset) {
   iree_hal_event_t* event = NULL;
-  IREE_ASSERT_OK(iree_hal_event_create(device_, &event));
+  IREE_ASSERT_OK(iree_hal_event_create(device_, IREE_HAL_QUEUE_AFFINITY_ANY,
+                                       IREE_HAL_EVENT_FLAG_NONE, &event));
 
   iree_hal_command_buffer_t* command_buffer = NULL;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
@@ -50,9 +50,10 @@ TEST_P(event_test, SignalAndReset) {
   iree_hal_command_buffer_release(command_buffer);
 }
 
-TEST_P(event_test, SubmitWithChainedCommandBuffers) {
+TEST_F(EventTest, SubmitWithChainedCommandBuffers) {
   iree_hal_event_t* event = NULL;
-  IREE_ASSERT_OK(iree_hal_event_create(device_, &event));
+  IREE_ASSERT_OK(iree_hal_event_create(device_, IREE_HAL_QUEUE_AFFINITY_ANY,
+                                       IREE_HAL_EVENT_FLAG_NONE, &event));
 
   iree_hal_command_buffer_t* command_buffer_1 = NULL;
   iree_hal_command_buffer_t* command_buffer_2 = NULL;
@@ -84,20 +85,14 @@ TEST_P(event_test, SubmitWithChainedCommandBuffers) {
       /*buffer_barriers=*/NULL));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer_2));
 
-  iree_hal_command_buffer_t* command_buffer_ptrs[] = {
-      command_buffer_1,
-      command_buffer_2,
-  };
-  IREE_ASSERT_OK(SubmitCommandBuffersAndWait(
-      IREE_ARRAYSIZE(command_buffer_ptrs), command_buffer_ptrs));
+  IREE_ASSERT_OK(SubmitCommandBufferAndWait(command_buffer_1));
+  IREE_ASSERT_OK(SubmitCommandBufferAndWait(command_buffer_2));
 
   iree_hal_command_buffer_release(command_buffer_1);
   iree_hal_command_buffer_release(command_buffer_2);
   iree_hal_event_release(event);
 }
 
-}  // namespace cts
-}  // namespace hal
-}  // namespace iree
+}  // namespace iree::hal::cts
 
 #endif  // IREE_HAL_CTS_EVENT_TEST_H_

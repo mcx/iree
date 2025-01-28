@@ -4,12 +4,19 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-if(IREE_BYTECODE_MODULE_FORCE_LLVM_SYSTEM_LINKER)
-  set(EXECUTABLE_FORMAT_PREFIX "system")
-else()
-  set(EXECUTABLE_FORMAT_PREFIX "embedded")
-endif()
+set(EXECUTABLE_FORMAT_PREFIX "embedded")
+# set(EXECUTABLE_FORMAT_PREFIX "system")
 set(NATIVE_EXECUTABLE_FORMAT "\"${EXECUTABLE_FORMAT_PREFIX}-elf-\" IREE_ARCH")
+
+unset(FILTER_TESTS)
+string(APPEND FILTER_TESTS "SemaphoreTest.WaitThenFail:")
+string(APPEND FILTER_TESTS "SemaphoreTest.FailThenWait:")
+string(APPEND FILTER_TESTS "SemaphoreTest.MultiWaitThenFail:")
+string(APPEND FILTER_TESTS "SemaphoreTest.DeviceMultiWaitThenFail:")
+string(APPEND FILTER_TESTS "SemaphoreSubmissionTest.PropagateFailSignal:")
+set(FILTER_TESTS_ARGS
+  "--gtest_filter=-${FILTER_TESTS}"
+)
 
 if(IREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF)
   iree_hal_cts_test_suite(
@@ -25,10 +32,16 @@ if(IREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF)
       "llvm-cpu"
     EXECUTABLE_FORMAT
       "${NATIVE_EXECUTABLE_FORMAT}"
+    ARGS
+      ${FILTER_TESTS_ARGS}
     DEPS
       iree::hal::drivers::local_sync::registration
     EXCLUDED_TESTS
-      "semaphore_submission"  # SubmitWithWait hangs?
+      "semaphore_submission"  # SubmitWithWait hangs (requires async)
+    LABELS
+      driver=local-sync
+    COMPILER_FLAGS
+      "--iree-llvmcpu-target-cpu=generic"
     )
 endif()
 
@@ -46,9 +59,13 @@ if(IREE_HAL_EXECUTABLE_LOADER_VMVX_MODULE)
       "vmvx"
     EXECUTABLE_FORMAT
       "\"vmvx-bytecode-fb\""
+    ARGS
+      ${FILTER_TESTS_ARGS}
     DEPS
       iree::hal::drivers::local_sync::registration
     EXCLUDED_TESTS
-      "semaphore_submission"  # SubmitWithWait hangs?
+      "semaphore_submission"  # SubmitWithWait hangs (requires async)
+    LABELS
+      driver=local-sync
   )
 endif()

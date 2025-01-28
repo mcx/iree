@@ -17,12 +17,12 @@
 
 #include <array>
 
-#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
-#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// By default don't do any pipelining.
 constexpr unsigned defaultSimtSoftwarePipelineDepth = 1;
@@ -40,6 +40,16 @@ int64_t getTileBytes(int64_t mTileSize, int64_t nTileSize, int64_t kTileSize,
 int64_t getMultiBufferMemoryUsage(int64_t usedBytes, unsigned depth,
                                   unsigned storeStage);
 
+/// Returns true if the given generic op is an elementwise op that can be fused
+/// together with cooperative matrix in the same dispatch.
+bool isCooperativeMatrixFusable(linalg::GenericOp genericOp);
+
+/// Returns true if we need to promote C matrix to use cooperative matrix for
+/// the the give matmul.
+///
+/// This is conservative by default--all unsupported cases will return true.
+bool needToPrmoteCForCooperativeMatrix(linalg::LinalgOp matmulOp);
+
 namespace detail {
 
 const int bankConflictReductionPaddingBits = 128;
@@ -54,7 +64,7 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
 /// Sets CodeGen configurations via attributes to the given matmul `linalgOp`
 /// with the given best workgroup size and tile size hints.
 LogicalResult setMatmulOpConfig(
-    spirv::ResourceLimitsAttr limits, linalg::LinalgOp linalgOp,
+    IREE::GPU::TargetAttr target, linalg::LinalgOp linalgOp,
     std::array<int64_t, 2> bestWorkgroupSizeXY,
     std::array<int64_t, 3> bestThreadTileSizeMNK, bool enablePromotion = false,
     unsigned softwarePipelineDepth = defaultSimtSoftwarePipelineDepth,
@@ -65,7 +75,7 @@ LogicalResult setMatmulOpConfig(
 /// with tile sizes for cooperative matrix, if possible for the given matmul
 /// size.
 LogicalResult setCooperativeMatrixConfig(
-    const spirv::TargetEnv &targetEnv, linalg::LinalgOp op,
+    IREE::GPU::TargetAttr target, linalg::LinalgOp op,
     const unsigned numSubgroupsPerWorkgroup,
     const unsigned numMNTilesPerSubgroup,
     unsigned softwarePipelineDepth = defaultCoopMatrixSoftwarePipelineDepth,
@@ -81,18 +91,18 @@ LogicalResult setCooperativeMatrixConfig(
 /// Returns success when a configuration is successfullly attached as attribute.
 /// Returns failure otherwise.
 
-LogicalResult setAdrenoCodeGenConfig(const spirv::TargetEnv &targetEnv,
+LogicalResult setAdrenoCodeGenConfig(IREE::GPU::TargetAttr target,
                                      Operation *rootOp);
-LogicalResult setAppleCodeGenConfig(const spirv::TargetEnv &targetEnv,
+LogicalResult setAppleCodeGenConfig(IREE::GPU::TargetAttr target,
                                     Operation *rootOp);
-LogicalResult setAMDCodeGenConfig(const spirv::TargetEnv &targetEnv,
+LogicalResult setAMDCodeGenConfig(IREE::GPU::TargetAttr target,
                                   Operation *rootOp);
-LogicalResult setMaliCodeGenConfig(const spirv::TargetEnv &targetEnv,
+LogicalResult setMaliCodeGenConfig(IREE::GPU::TargetAttr target,
                                    Operation *rootOp);
-LogicalResult setNVIDIACodeGenConfig(const spirv::TargetEnv &targetEnv,
+LogicalResult setNVIDIACodeGenConfig(IREE::GPU::TargetAttr target,
                                      Operation *rootOp);
 
-}  // namespace detail
+} // namespace detail
 
 /// Returns true if the given `linalgOp` is a (batch) matmul op.
 bool isMatmulOrBatchMatmul(linalg::LinalgOp linalgOp);
@@ -100,15 +110,14 @@ bool isMatmulOrBatchMatmul(linalg::LinalgOp linalgOp);
 /// Given the linalg `op` with `lhsShape` and `rhsShape`, tries to treat as a
 /// (batch) matmul like op and deduce the index of the loop corresponding to
 /// B/M/N/K dimension respectively. Returns -1 as the index if unable to deduce.
-std::tuple<int, int, int, int> getMatmulBMNKIndex(
-    linalg::LinalgOp op, int *lastParallelDim = nullptr);
+std::tuple<int, int, int, int>
+getMatmulBMNKIndex(linalg::LinalgOp op, int *lastParallelDim = nullptr);
 
 /// Attaches the `translation_info` attribute to entry points in `moduleOp` and
 /// `lowering_config` attributes to all root ops in `moduleOp`'s region.
 /// These attributes are used to drive the CodeGen pipeline.
-LogicalResult initSPIRVLaunchConfig(ModuleOp moduleOp);
+LogicalResult initSPIRVLaunchConfig(FunctionOpInterface funcOp);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_CODEGEN_SPIRV_KERNELCONFIG_H_
+#endif // IREE_COMPILER_CODEGEN_SPIRV_KERNELCONFIG_H_

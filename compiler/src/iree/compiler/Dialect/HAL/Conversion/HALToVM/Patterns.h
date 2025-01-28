@@ -12,8 +12,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Populates conversion patterns from the HAL dialect to the VM dialect.
 void populateHALToVMPatterns(MLIRContext *context, SymbolTable &importSymbols,
@@ -24,11 +23,6 @@ void populateHALToVMPatterns(MLIRContext *context, SymbolTable &importSymbols,
 Value createPackedConstantBuffer(Location loc, ValueRange constantValues,
                                  OpBuilder &builder);
 
-// Creates a vm.rodata containing the contents of a hal.executable.binary.
-IREE::VM::RodataOp createExecutableBinaryRodata(
-    IREE::HAL::ExecutableBinaryOp binaryOp, OpBuilder &builder);
+} // namespace mlir::iree_compiler
 
-}  // namespace iree_compiler
-}  // namespace mlir
-
-#endif  // IREE_COMPILER_DIALECT_HAL_CONVERSION_HALTOVM_PATTERNS_H_
+#endif // IREE_COMPILER_DIALECT_HAL_CONVERSION_HALTOVM_PATTERNS_H_

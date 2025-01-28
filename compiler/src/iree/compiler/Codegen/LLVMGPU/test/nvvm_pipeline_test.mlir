@@ -1,17 +1,16 @@
-// RUN: iree-opt --split-input-file --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(iree-codegen-linalg-to-nvvm-pipeline)))" %s | FileCheck %s
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=sm_60 --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-codegen-llvmgpu-configuration-pipeline), iree-codegen-linalg-to-nvvm-pipeline)))" -iree-codegen-llvmgpu-use-wmma %s | FileCheck %s
+// RUN: iree-opt --split-input-file --iree-gpu-test-target=sm_80 --pass-pipeline="builtin.module(hal.executable(hal.executable.variant(builtin.module(iree-codegen-llvmgpu-configuration-pipeline), iree-codegen-linalg-to-nvvm-pipeline)))" -iree-codegen-llvmgpu-use-wmma %s | FileCheck %s --check-prefix=SM80
 
 // Verify that a simple element wise op gets lowered succefully all the way to
 // nvvm/llvm dialect.
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @simpleMath_ex_dispatch_0 {
-  hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+  hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @add_dispatch_0 layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1
@@ -20,9 +19,9 @@ hal.executable @simpleMath_ex_dispatch_0 {
   builtin.module {
     func.func @add_dispatch_0() {
       %c0 = arith.constant 0 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
-      %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<16xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<16xf32>>
       %3 = tensor.empty() : tensor<16xf32>
       %4 = flow.dispatch.tensor.load %0, offsets=[0], sizes=[16], strides=[1] : !flow.dispatch.tensor<readonly:tensor<16xf32>> -> tensor<16xf32>
       %5 = flow.dispatch.tensor.load %1, offsets=[0], sizes=[16], strides=[1] : !flow.dispatch.tensor<readonly:tensor<16xf32>> -> tensor<16xf32>
@@ -47,15 +46,13 @@ hal.executable @simpleMath_ex_dispatch_0 {
 #map0 = affine_map<()[s0, s1] -> (s0 * s1)>
 #map1 = affine_map<(d0)[s0] -> (s0, -d0 + 1024)>
 #map2 = affine_map<(d0)[s0] -> (-d0 + 1024, s0)>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @dot_dispatch_0 {
-  hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+  hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
     hal.executable.export @dot_dispatch_0 layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3
@@ -67,9 +64,9 @@ hal.executable @dot_dispatch_0 {
         %c0 = arith.constant 0 : index
         %c1024 = arith.constant 1024 : index
         %c1 = arith.constant 1 : index
-        %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
-        %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
-        %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<1024x1024xf32>>
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
+        %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<1024x1024xf32>>
         %8 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [1024, 1024], strides = [1, 1]
             : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>> -> tensor<1024x1024xf32>
         %10 = flow.dispatch.tensor.load %1, offsets = [0, 0], sizes = [1024, 1024], strides = [1, 1]
@@ -86,20 +83,14 @@ hal.executable @dot_dispatch_0 {
   }
 }
 
-//     CHECK-LABEL: hal.executable public @dot_dispatch_0
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-3:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>>
-//           CHECK:   llvm.br
-//   CHECK-COUNT-3:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//  CHECK-COUNT-32:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-// CHECK-COUNT-128:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//   CHECK-COUNT-3:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>>
-//           CHECK:   llvm.br
-//   CHECK-COUNT-3:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//  CHECK-COUNT-32:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-// CHECK-COUNT-128:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//   CHECK-COUNT-4:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
+//      CHECK-LABEL: hal.executable public @dot_dispatch_0
+//            CHECK:   hal.executable.variant public @cuda
+//        CHECK-NOT:   llvm.store
+//            CHECK:   llvm.br
+//            CHECK:    llvm.load {{.*}} : !llvm.ptr<1> -> vector<32xf32>
+//   CHECK-COUNT-32:    llvm.load {{.*}} : !llvm.ptr<1> -> vector<16xf32>
+//   CHECK-COUNT-32:    llvm.intr.fmuladd({{.*}}) : (vector<16xf32>, vector<16xf32>, vector<16xf32>) -> vector<16xf32>
+//            CHECK:    llvm.store {{.*}} : vector<16xf32>, !llvm.ptr<1>
 
 // -----
 
@@ -118,15 +109,13 @@ hal.executable @dot_dispatch_0 {
   ],
   iterator_types = ["parallel", "parallel", "reduction"]
 }
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @dot_dispatch_0 {
-  hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+  hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
     hal.executable.export @dot_dispatch_0 layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3
@@ -138,9 +127,9 @@ hal.executable @dot_dispatch_0 {
         %c0 = arith.constant 0 : index
         %c1024 = arith.constant 1024 : index
         %c1 = arith.constant 1 : index
-        %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
-        %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
-        %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<1024x1024xf32>>
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>>
+        %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<1024x1024xf32>>
         %8 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [1024, 1024], strides = [1, 1]
             : !flow.dispatch.tensor<readonly:tensor<1024x1024xf32>> -> tensor<1024x1024xf32>
         %10 = flow.dispatch.tensor.load %1, offsets = [0, 0], sizes = [1024, 1024], strides = [1, 1]
@@ -163,23 +152,20 @@ hal.executable @dot_dispatch_0 {
 }
 
 //   CHECK-LABEL: hal.executable public @dot_dispatch_0
-//         CHECK:   hal.executable.variant public @cuda
-//         CHECK:   llvm.br
-// CHECK-COUNT-8:   llvm.intr.fmuladd({{.*}}) : (vector<4xf32>, vector<4xf32>, vector<4xf32>) -> vector<4xf32>
-//         CHECK:   llvm.br
-// CHECK-COUNT-2:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
+//            CHECK:   hal.executable.variant public @cuda
+//            CHECK:  llvm.br
+//   CHECK-COUNT-32:    llvm.intr.fmuladd({{.*}}) : (vector<16xf32>, vector<16xf32>, vector<16xf32>) -> vector<16xf32>
+//            CHECK:    llvm.store {{.*}} : vector<16xf32>, !llvm.ptr<1>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @conv2d_dispatch_0 {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @conv2d_dispatch_0 layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index, %arg4 : index, %arg5 : index, %arg6 : index, %arg7 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3, %arg4, %arg5, %arg6, %arg7
@@ -192,9 +178,9 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
       %c2 = arith.constant 2 : index
       %c3 = arith.constant 3 : index
       %c1 = arith.constant 1 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1x4x4x2xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<3x2x2x1xf32>>
-      %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<1x2x3x1xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<1x4x4x2xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<3x2x2x1xf32>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<1x2x3x1xf32>>
       %11 = flow.dispatch.tensor.load %0, offsets = [0, 0 ,0, 0], sizes = [1, 4, 4, 2], strides = [1, 1, 1, 1]
           : !flow.dispatch.tensor<readonly:tensor<1x4x4x2xf32>> -> tensor<1x4x4x2xf32>
       %13 = flow.dispatch.tensor.load %1, offsets = [0, 0, 0, 0], sizes = [3, 2, 2, 1], strides = [1, 1, 1, 1]
@@ -213,21 +199,19 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 
 //   CHECK-LABEL: hal.executable public @conv2d_dispatch_0
 //         CHECK:   hal.executable.variant public @cuda
-// CHECK-COUNT-3:   llvm.load %{{.*}} : !llvm.ptr<f32>
+// CHECK-COUNT-3:   llvm.load %{{.*}} : !llvm.ptr<1> -> f32
 //         CHECK:   lvm.fmul %{{.*}}, %{{.*}}  : f32
 //         CHECK:   llvm.fadd %{{.*}}, %{{.*}}  : f32
-//         CHECK:   llvm.store {{.*}} : !llvm.ptr<f32>
+//         CHECK:   llvm.store {{.*}} : f32, !llvm.ptr<1>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @simpleMath_ex_dispatch_0 {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @add_dispatch_0 layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1
@@ -236,8 +220,8 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
   builtin.module {
     func.func @add_dispatch_0() {
       %c0 = arith.constant 0 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
-      %2 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<16xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<16xf32>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<writeonly:tensor<16xf32>>
       %3 = tensor.empty() : tensor<16xf32>
       %4 = flow.dispatch.tensor.load %0, offsets=[0], sizes=[16], strides=[1] : !flow.dispatch.tensor<readonly:tensor<16xf32>> -> tensor<16xf32>
       %5 = arith.constant dense<[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]> : tensor<16xf32>
@@ -260,14 +244,12 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @reduction_dispatch {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @reduction layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3
@@ -278,8 +260,8 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
       %c0 = arith.constant 0 : index
       %cst = arith.constant 0.000000e+00 : f32
       %c96 = arith.constant 96 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<14x14x96xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<96xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<14x14x96xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<writeonly:tensor<96xf32>>
       %5 = flow.dispatch.tensor.load %0, offsets = [0, 0, 0], sizes = [14, 14, 96], strides = [1, 1, 1]
           : !flow.dispatch.tensor<readonly:tensor<14x14x96xf32>> -> tensor<14x14x96xf32>
       %8 = tensor.empty() : tensor<96xf32>
@@ -306,15 +288,13 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @vector_add_dispatch {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @vector_add_dispatch layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1
@@ -324,9 +304,9 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
     func.func @vector_add_dispatch() {
       %c0 = arith.constant 0 : index
       %c16384 = arith.constant 16384 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<16384xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<16384xf32>>
-      %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<16384xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<16384xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<16384xf32>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<16384xf32>>
       %6 = flow.dispatch.tensor.load %0, offsets = [0], sizes = [16384], strides = [1]
           : !flow.dispatch.tensor<readonly:tensor<16384xf32>> -> tensor<16384xf32>
       %8 = flow.dispatch.tensor.load %1, offsets = [0], sizes = [16384], strides = [1]
@@ -351,7 +331,7 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //   CHECK-LABEL: hal.executable public @vector_add_dispatch
 //         CHECK:   hal.executable.variant public @cuda
 //         CHECK:   llvm.fadd %{{.*}}, %{{.*}}  : vector<4xf32
-//         CHECK:   llvm.store %{{.*}} : !llvm.ptr<vector<4xf32>>
+//         CHECK:   llvm.store %{{.*}} : vector<4xf32>, !llvm.ptr<1>
 
 // -----
 
@@ -360,14 +340,12 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 #map2 = affine_map<(d0)[s0] -> (-d0 + 16384, s0)>
 #map3 = affine_map<(d0, d1) -> (d1, d0)>
 #map4 = affine_map<(d0, d1) -> (d0)>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @vector_reduction_dispatch {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @vector_reduction_dispatch layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
@@ -378,8 +356,8 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
       %c0 = arith.constant 0 : index
       %c16384 = arith.constant 16384 : index
       %cst = arith.constant 1.000000e+00 : f32
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<512x16384xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<16384xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<512x16384xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<writeonly:tensor<16384xf32>>
       %5 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [512, 16384], strides = [1, 1]
           : !flow.dispatch.tensor<readonly:tensor<512x16384xf32>> -> tensor<512x16384xf32>
       %8 = tensor.empty() : tensor<16384xf32>
@@ -405,16 +383,18 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @mma_fused {
-  hal.executable.variant public @cuda_nvptx_fb, target = <"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}> {
-  hal.executable.export public @_large_aligned_dispatch_0 ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [#hal.descriptor_set.layout<0, bindings = [#hal.descriptor_set.binding<0, storage_buffer>, #hal.descriptor_set.binding<1, storage_buffer>, #hal.descriptor_set.binding<2, storage_buffer>]>]>) {
+  hal.executable.variant public @cuda_nvptx_fb target(<"cuda", "cuda-nvptx-fb">) {
+  hal.executable.export public @_large_aligned_dispatch_0 ordinal(0) layout(#hal.pipeline.layout<bindings = [
+    #hal.pipeline.binding<storage_buffer>,
+    #hal.pipeline.binding<storage_buffer>,
+    #hal.pipeline.binding<storage_buffer>
+  ]>) {
   ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
     %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
     hal.return %x, %y, %z : index, index, index
@@ -425,10 +405,10 @@ hal.executable @mma_fused {
       %cst = arith.constant 0.000000e+00 : f32
       %c2048 = arith.constant 2048 : index
       %c512 = arith.constant 512 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<2048x1024xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x512xf32>>
-      %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<2048x512xf32>>
-      %di = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<2048x512xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<2048x1024xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<1024x512xf32>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<2048x512xf32>>
+      %di = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<readonly:tensor<2048x512xf32>>
       %3 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2048, 1024], strides = [1, 1]
           : !flow.dispatch.tensor<readonly:tensor<2048x1024xf32>> -> tensor<2048x1024xf32>
       %4 = flow.dispatch.tensor.load %1, offsets = [0, 0], sizes = [1024, 512], strides = [1, 1]
@@ -456,48 +436,43 @@ hal.executable @mma_fused {
 }
 
 // case with larger pipeline depth
-//     CHECK-LABEL: hal.executable public @mma_fused
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//           CHECK:   nvvm.cp.async.wait.group 3
-//   CHECK-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<f32, 3>) -> !llvm.struct<(i32, i32, i32, i32)
-//   CHECK-COUNT-2:   nvvm.wmma.mma
-//   CHECK-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<i8, 3>, !llvm.ptr<i8, 1>, i32, i32) -> !llvm.void
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//       CHECK-NOT:   nvvm.wmma.mma
-//   CHECK-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<f32, 3>, f32, f32, f32, f32, f32, f32, f32, f32
-//           CHECK:   vvm.barrier0
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.fadd {{.*}} : vector<4xf32>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.fadd {{.*}} : vector<4xf32>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
+//     SM80-LABEL: hal.executable public @mma_fused
+//           SM80:   hal.executable.variant public @cuda
+//       SM80-NOT:   llvm.store
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//           SM80:   nvvm.cp.async.wait.group 3
+//   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
+//   SM80-COUNT-2:   nvvm.wmma.mma
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//       SM80-NOT:   nvvm.wmma.mma
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<1>, f32, f32, f32, f32, f32, f32, f32, f32
 
 
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @mma_fused_fp16 {
-  hal.executable.variant public @cuda_nvptx_fb, target = <"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}> {
-  hal.executable.export public @_large_aligned_dispatch_0 ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [#hal.descriptor_set.layout<0, bindings = [#hal.descriptor_set.binding<0, storage_buffer>, #hal.descriptor_set.binding<1, storage_buffer>, #hal.descriptor_set.binding<2, storage_buffer>]>]>) {
+  hal.executable.variant public @cuda_nvptx_fb target(<"cuda", "cuda-nvptx-fb">) {
+  hal.executable.export public @_large_aligned_dispatch_0 ordinal(0) layout(#hal.pipeline.layout<bindings = [
+    #hal.pipeline.binding<storage_buffer>,
+    #hal.pipeline.binding<storage_buffer>,
+    #hal.pipeline.binding<storage_buffer>
+  ]>) {
   ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
     %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
     hal.return %x, %y, %z : index, index, index
@@ -508,10 +483,10 @@ hal.executable @mma_fused_fp16 {
       %cst = arith.constant 0.000000e+00 : f16
       %c2048 = arith.constant 2048 : index
       %c512 = arith.constant 512 : index
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<2048x1024xf16>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<1024x512xf16>>
-      %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<2048x512xf16>>
-      %di = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<2048x512xf16>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<2048x1024xf16>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<1024x512xf16>>
+      %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<2048x512xf16>>
+      %di = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<readonly:tensor<2048x512xf16>>
       %3 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2048, 1024], strides = [1, 1]
           : !flow.dispatch.tensor<readonly:tensor<2048x1024xf16>> -> tensor<2048x1024xf16>
       %4 = flow.dispatch.tensor.load %1, offsets = [0, 0], sizes = [1024, 512], strides = [1, 1]
@@ -539,42 +514,35 @@ hal.executable @mma_fused_fp16 {
 }
 
 // case with larger pipeline depth
-//     CHECK-LABEL: hal.executable public @mma_fused_fp16
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//           CHECK:   nvvm.cp.async.wait.group 3
-//   CHECK-COUNT-2:   nvvm.wmma.load{{.*}} : (!llvm.ptr<f16, 3>) -> !llvm.struct<(vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>)
-//   CHECK-COUNT-1:   nvvm.wmma.mma
-//   CHECK-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<i8, 3>, !llvm.ptr<i8, 1>, i32, i32) -> !llvm.void
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//       CHECK-NOT:   nvvm.wmma.mma
-//   CHECK-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<f16, 3>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>
-//           CHECK:   vvm.barrier0
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<8xf16>, 3>
-//           CHECK:   llvm.fadd {{.*}} : vector<8xf16>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<8xf16>>
-//           CHECK:   vvm.barrier0
+//     SM80-LABEL: hal.executable public @mma_fused_fp16
+//           SM80:   hal.executable.variant public @cuda
+//       SM80-NOT:   llvm.store
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//           SM80:   nvvm.cp.async.wait.group 3
+//   SM80-COUNT-2:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>)
+//   SM80-COUNT-1:   nvvm.wmma.mma
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//       SM80-NOT:   nvvm.wmma.mma
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<1>, vector<2xf16>, vector<2xf16>, vector<2xf16>, vector<2xf16>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
-#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}>
+#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb">
 #map0 = affine_map<()[s0, s1] -> (s0 * s1)>
 #map1 = affine_map<(d0)[s0] -> (s0, -d0 + 4)>
 #map2 = affine_map<(d0)[s0] -> (s0, -d0 + 32)>
@@ -583,7 +551,7 @@ hal.executable @mma_fused_fp16 {
 #map5 = affine_map<(d0)[s0] -> (-d0 + 32, s0)>
 #map6 = affine_map<(d0)[s0] -> (-d0 + 64, s0)>
   hal.executable @large_dot_general_dispatch_0 {
-    hal.executable.variant public @cuda, target = #executable_target_cuda_nvptx_fb {
+    hal.executable.variant public @cuda target(#executable_target_cuda_nvptx_fb) {
       hal.executable.export @large_dot_general_dispatch_0 layout(#pipeline_layout) {
       ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index, %arg4 :index):
         %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3, %arg4
@@ -596,11 +564,11 @@ hal.executable @mma_fused_fp16 {
           %c4 = arith.constant 4 : index
           %cst = arith.constant 0.000000e+00 : f32
           %c0 = arith.constant 0 : index
-          %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(32) offset(%c0)
+          %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(32) offset(%c0)
               : !flow.dispatch.tensor<readonly:tensor<4x32x1024xf32>>
-          %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(32) offset(%c0)
+          %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(32) offset(%c0)
               : !flow.dispatch.tensor<readonly:tensor<4x1024x64xf32>>
-          %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) alignment(32) offset(%c0)
+          %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(32) offset(%c0)
               : !flow.dispatch.tensor<writeonly:tensor<4x32x64xf32>>
           %11 = flow.dispatch.tensor.load %0, offsets = [0, 0, 0], sizes = [4, 32, 1024], strides = [1, 1, 1]
               : !flow.dispatch.tensor<readonly:tensor<4x32x1024xf32>> -> tensor<4x32x1024xf32>
@@ -619,42 +587,40 @@ hal.executable @mma_fused_fp16 {
   }
 
 // case with larger pipeline depth
-//     CHECK-LABEL: hal.executable public @large_dot_general_dispatch_0
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//           CHECK:   nvvm.cp.async.wait.group 3
-//   CHECK-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<f32, 3>) -> !llvm.struct<(i32, i32, i32, i32)
-//   CHECK-COUNT-2:   nvvm.wmma.mma
-//   CHECK-COUNT-2:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<i8, 3>, !llvm.ptr<i8, 1>, i32, i32) -> !llvm.void
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//       CHECK-NOT:   nvvm.wmma.mma
-//   CHECK-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<f32, 3>, f32, f32, f32, f32, f32, f32, f32, f32
-//           CHECK:   vvm.barrier0
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
+//     SM80-LABEL: hal.executable public @large_dot_general_dispatch_0
+//           SM80:   hal.executable.variant public @cuda
+//       SM80-NOT:   llvm.store
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//           SM80:   nvvm.cp.async.wait.group 3
+//   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
+//   SM80-COUNT-2:   nvvm.wmma.mma
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//       SM80-NOT:   nvvm.wmma.mma
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<3>, f32, f32, f32, f32, f32, f32, f32, f32
+//           SM80:   vvm.barrier0
+//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
+//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
+//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
+//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
-#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}>
+#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb">
 #map0 = affine_map<(d0, d1, d2, d3) -> (d1, d0, d3)>
 #map1 = affine_map<(d0, d1, d2, d3) -> (d0, d3, d2)>
 #map2 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>
@@ -663,7 +629,7 @@ hal.executable @mma_fused_fp16 {
 #map5 = affine_map<(d0, d1, d2) -> (d0, d1)>
 #map6 = affine_map<(d0, d1, d2) -> (d2, d0, d1)>
   hal.executable public @split_k_gemm {
-    hal.executable.variant public @cuda_nvptx_fb, target = #executable_target_cuda_nvptx_fb {
+    hal.executable.variant public @cuda_nvptx_fb target(#executable_target_cuda_nvptx_fb) {
       hal.executable.export public @split_k_gemm ordinal(0) layout(#pipeline_layout) {
       ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 : index, %arg4 : index):
         %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3, %arg4
@@ -673,9 +639,9 @@ hal.executable @mma_fused_fp16 {
         func.func @split_k_gemm() {
           %cst = arith.constant 0.000000e+00 : f32
           %c0 = arith.constant 0 : index
-          %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<2048x4x256xf32>>
-          %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<4x256x512xf32>>
-          %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<4x2048x512xf32>>
+          %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<2048x4x256xf32>>
+          %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<4x256x512xf32>>
+          %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<4x2048x512xf32>>
           %3 = flow.dispatch.tensor.load %0, offsets = [0, 0, 0], sizes = [2048, 4, 256], strides = [1, 1, 1] : !flow.dispatch.tensor<readonly:tensor<2048x4x256xf32>> -> tensor<2048x4x256xf32>
           %4 = flow.dispatch.tensor.load %1, offsets = [0, 0, 0], sizes = [4, 256, 512], strides = [1, 1, 1] : !flow.dispatch.tensor<readonly:tensor<4x256x512xf32>> -> tensor<4x256x512xf32>
           %5 = tensor.empty() : tensor<4x2048x512xf32>
@@ -695,38 +661,36 @@ hal.executable @mma_fused_fp16 {
       }
     }
   }
-//     CHECK-LABEL: hal.executable public @split_k_gemm
-//           CHECK:   hal.executable.variant public @cuda
-//       CHECK-NOT:   llvm.store
-//   CHECK-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//           CHECK:   nvvm.cp.async.wait.group 3
-//   CHECK-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<f32, 3>) -> !llvm.struct<(i32, i32, i32, i32)
-//   CHECK-COUNT-2:   nvvm.wmma.mma
-//           CHECK:   llvm.inline_asm has_side_effects asm_dialect = att "cp.async.cg.shared.global [$0], [$1], $2, $3;\0A", "r,l,n,r" {{.*}}, {{.*}}, {{.*}}, {{.*}} : (!llvm.ptr<i8, 3>, !llvm.ptr<i8, 1>, i32, i32) -> !llvm.void
-//           CHECK:   nvvm.cp.async.commit.group
-//           CHECK:   llvm.br
-//       CHECK-NOT:   nvvm.wmma.mma
-//   CHECK-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<f32, 3>, f32, f32, f32, f32, f32, f32, f32, f32
-//           CHECK:   vvm.barrier0
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
-//           CHECK:   llvm.load {{.*}} : !llvm.ptr<vector<4xf32>, 3>
-//           CHECK:   llvm.store {{.*}} : !llvm.ptr<vector<4xf32>>
+//     SM80-LABEL: hal.executable public @split_k_gemm
+//           SM80:   hal.executable.variant public @cuda
+//       SM80-NOT:   llvm.store
+//   SM80-COUNT-2:   nvvm.cp.async.shared.global {{.*}}, {{.*}}, 16
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//           SM80:   nvvm.cp.async.wait.group 3
+//   SM80-COUNT-4:   nvvm.wmma.load{{.*}} : (!llvm.ptr<3>) -> !llvm.struct<(i32, i32, i32, i32)
+//   SM80-COUNT-2:   nvvm.wmma.mma
+//           SM80:   nvvm.cp.async.shared.global %{{.*}}, %{{.*}}, 16, cache = cg, %{{.*}} : !llvm.ptr<3>, !llvm.ptr<1>, i32
+//           SM80:   nvvm.cp.async.commit.group
+//           SM80:   llvm.br
+//       SM80-NOT:   nvvm.wmma.mma
+//   SM80-COUNT-1:   nvvm.wmma.store {{.*}} : !llvm.ptr<3>, f32, f32, f32, f32, f32, f32, f32, f32
+//           SM80:   vvm.barrier0
+//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
+//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
+//           SM80:   llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
+//           SM80:   llvm.store {{.*}} : vector<4xf32>, !llvm.ptr<1>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>,
-    #hal.descriptor_set.binding<2, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<constants = 1, bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
-#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}>
+#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb">
   hal.executable public @pooling_dynamic {
-    hal.executable.variant public @cuda_nvptx_fb, target = #executable_target_cuda_nvptx_fb {
+    hal.executable.variant public @cuda_nvptx_fb target(#executable_target_cuda_nvptx_fb) {
       hal.executable.export public @pooling_dynamic ordinal(0) layout(#pipeline_layout) {
       ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index, %arg3 :index, %arg4 : index, %arg5 : index, %arg6 : index):
         %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3, %arg4, %arg5, %arg6
@@ -737,10 +701,10 @@ hal.executable @mma_fused_fp16 {
           %c1_i64 = arith.constant 1 : i64
           %c2_i64 = arith.constant 2 : i64
           %cst = arith.constant 0.000000e+00 : f32
-          %0 = hal.interface.constant.load[0] : i32
+          %0 = hal.interface.constant.load layout(#pipeline_layout) ordinal(0) : i32
           %s = arith.index_cast %0 : i32 to index
-          %14 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%s) : !flow.dispatch.tensor<readonly:tensor<?x2048x?x?xf32>>{%s, %s, %s}
-          %15 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(64) offset(%s) : !flow.dispatch.tensor<writeonly:tensor<?x2048x1x1xf32>>{%s}
+          %14 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%s) : !flow.dispatch.tensor<readonly:tensor<?x2048x?x?xf32>>{%s, %s, %s}
+          %15 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%s) : !flow.dispatch.tensor<writeonly:tensor<?x2048x1x1xf32>>{%s}
           %16 = flow.dispatch.tensor.load %14, offsets = [0, 0, 0, 0], sizes = [%s, 2048, %s, %s], strides = [1, 1, 1, 1] : !flow.dispatch.tensor<readonly:tensor<?x2048x?x?xf32>>{%s, %s, %s} -> tensor<?x2048x?x?xf32>
           %19 = tensor.empty(%s) : tensor<?x2048x1x1xf32>
           %38 = tensor.empty(%s, %s) : tensor<?x?xf32>
@@ -754,8 +718,8 @@ hal.executable @mma_fused_fp16 {
   }
 
 // Just check that compilation succeed.
-//     CHECK-LABEL: hal.executable public @pooling_dynamic
-//           CHECK:   hal.executable.variant public @cuda
+//     SM80-LABEL: hal.executable public @pooling_dynamic
+//           SM80:   hal.executable.variant public @cuda
 
 // -----
 
@@ -764,14 +728,12 @@ hal.executable @mma_fused_fp16 {
 #map2 = affine_map<(d0)[s0] -> (-d0 + 16384, s0)>
 #map3 = affine_map<(d0, d1) -> (d0, d1)>
 #map4 = affine_map<(d0, d1) -> (d0)>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @warp_reduction_dispatch {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @warp_reduction_dispatch layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
@@ -782,8 +744,8 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
       %c0 = arith.constant 0 : index
       %c1024 = arith.constant 1024 : index
       %cst = arith.constant 1.000000e+00 : f32
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<512xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<writeonly:tensor<512xf32>>
       %5 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [512, 1024], strides = [1, 1]
           : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>> -> tensor<512x1024xf32>
       %8 = tensor.empty() : tensor<512xf32>
@@ -807,24 +769,22 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //   CHECK-LABEL: hal.executable public @warp_reduction_dispatch
 //         CHECK:   hal.executable.variant public @cuda
 // CHECK-COUNT-5:     nvvm.shfl.sync  bfly
-//         CHECK:     llvm.store %{{.*}}, %{{.*}} : !llvm.ptr<f32, 3>
+//         CHECK:     llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<3>
 //         CHECK:     nvvm.barrier0
-//         CHECK:     llvm.load {{.*}} : !llvm.ptr<f32, 3>
-// CHECK-COUNT-3:     nvvm.shfl.sync  bfly
+//         CHECK:     llvm.load {{.*}} : !llvm.ptr<3> -> f32
+// CHECK-COUNT-2:     nvvm.shfl.sync  bfly
 
 // -----
 
 #map0 = affine_map<()[s0, s1] -> (s0 * s1)>
 #map3 = affine_map<(d0, d1) -> (d0, d1)>
 #map4 = affine_map<(d0, d1) -> (d0)>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 hal.executable @warp_reduction_broadcast_dispatch {
-hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
+hal.executable.variant @cuda target(<"cuda", "cuda-nvptx-fb">) {
   hal.executable.export @warp_reduction_broadcast_dispatch layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2 : index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
@@ -836,8 +796,8 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
       %c1024 = arith.constant 1024 : index
       %cst_0 = arith.constant 3.840000e+02 : f32
       %cst = arith.constant 1.000000e+00 : f32
-      %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>>
-      %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<512x1024xf32>>
+      %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>>
+      %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<writeonly:tensor<512x1024xf32>>
       %5 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [512, 1024], strides = [1, 1]
           : !flow.dispatch.tensor<readonly:tensor<512x1024xf32>> -> tensor<512x1024xf32>
       %8 = tensor.empty() : tensor<512xf32>
@@ -869,39 +829,39 @@ hal.executable.variant @cuda, target = <"cuda", "cuda-nvptx-fb"> {
 //   CHECK-LABEL: hal.executable public @warp_reduction_broadcast_dispatch
 //         CHECK:   hal.executable.variant public @cuda
 // CHECK-COUNT-5:     nvvm.shfl.sync  bfly
-//         CHECK:     llvm.store %{{.*}}, %{{.*}} : !llvm.ptr<f32, 3>
+//         CHECK:     llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<3>
 //         CHECK:     nvvm.barrier0
-//         CHECK:     llvm.load {{.*}} : !llvm.ptr<f32, 3>
-// CHECK-COUNT-3:     nvvm.shfl.sync  bfly
-//         CHECK:     llvm.fdiv %{{.*}}, %{{.*}} 
-//         CHECK:     llvm.store %{{.*}}, %{{.*}} {alignment = 4 : i64} : !llvm.ptr<vector<4xf32>>
+//         CHECK:     llvm.load {{.*}} : !llvm.ptr<3> -> f32
+// CHECK-COUNT-2:     nvvm.shfl.sync  bfly
+//         CHECK:     llvm.fdiv %{{.*}}, %{{.*}}
+//         CHECK:     llvm.store %{{.*}}, %{{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<1>
 
 // -----
 
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
-hal.executable private @shared_mem_alloc {
-  hal.executable.variant public @cuda_nvptx_fb, target = <"cuda", "cuda-nvptx-fb", {target_arch = "sm_35"}> {
-    hal.executable.export public @shared_mem_alloc ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [<0, bindings = [<0, storage_buffer>, <1, storage_buffer>]>]>) {
+hal.executable private @generalized_pool {
+  hal.executable.variant public @cuda_nvptx_fb target(<"cuda", "cuda-nvptx-fb">) {
+    hal.executable.export public @generalized_pool ordinal(0) layout(#pipeline_layout) {
     ^bb0(%arg0: !hal.device, %arg1: index, %arg2: index, %arg3: index, %arg4: index, %arg5: index):
       %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3, %arg4, %arg5
       hal.return %x, %y, %z : index, index, index
     }
     builtin.module {
-      func.func @shared_mem_alloc() {
+      func.func @generalized_pool() {
         %c0 = arith.constant 0 : index
-        %cst = arith.constant dense<0xFF800000> : tensor<14x14x480xf32>
-        %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<29x29x480xf32>>
-        %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<14x14x480xf32>>
+        %cst = arith.constant 0xFF800000 : f32
+        %empty = tensor.empty() : tensor<14x14x480xf32>
+        %fill = linalg.fill ins(%cst : f32) outs(%empty : tensor<14x14x480xf32>) -> tensor<14x14x480xf32>
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<29x29x480xf32>>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<14x14x480xf32>>
         %2 = flow.dispatch.tensor.load %0, offsets = [0, 0, 0], sizes = [29, 29, 480], strides = [1, 1, 1] : !flow.dispatch.tensor<readonly:tensor<29x29x480xf32>> -> tensor<29x29x480xf32>
         %3 = tensor.empty() : tensor<3x3xf32>
-        %4 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0 * 2 + d3, d1 * 2 + d4, d2)>, affine_map<(d0, d1, d2, d3, d4) -> (d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel", "reduction", "reduction"]} ins(%2, %3 : tensor<29x29x480xf32>, tensor<3x3xf32>) outs(%cst : tensor<14x14x480xf32>) {
+        %4 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0 * 2 + d3, d1 * 2 + d4, d2)>, affine_map<(d0, d1, d2, d3, d4) -> (d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2)>], iterator_types = ["parallel", "parallel", "parallel", "reduction", "reduction"]} ins(%2, %3 : tensor<29x29x480xf32>, tensor<3x3xf32>) outs(%fill : tensor<14x14x480xf32>) {
         ^bb0(%arg0: f32, %arg1: f32, %arg2: f32):
-          %5 = arith.maxf %arg2, %arg0 : f32
+          %5 = arith.maximumf %arg2, %arg0 : f32
           linalg.yield %5 : f32
         } -> tensor<14x14x480xf32>
         flow.dispatch.tensor.store %4, %1, offsets = [0, 0, 0], sizes = [14, 14, 480], strides = [1, 1, 1] : tensor<14x14x480xf32> -> !flow.dispatch.tensor<writeonly:tensor<14x14x480xf32>>
@@ -911,32 +871,25 @@ hal.executable private @shared_mem_alloc {
   }
 }
 
-// Check that bufferization is emitting correct code for the temp shared
-// memory alloc.
-//   CHECK-LABEL: hal.executable private @shared_mem_alloc
+//   CHECK-LABEL: hal.executable private @generalized_pool
 //         CHECK:   hal.executable.variant public @cuda
-//         CHECK:     nvvm.barrier0
-//         CHECK:     llvm.store %{{.*}}, %{{.*}} : !llvm.ptr<f32, 3>
-//         CHECK:     nvvm.barrier0
-//         CHECK:     nvvm.barrier0
-//         CHECK:     llvm.load %{{.*}} : !llvm.ptr<f32, 3>
-//         CHECK:     nvvm.barrier0
+//         CHECK:     llvm.load %{{.*}} : !llvm.ptr<1> -> f32
+//         CHECK:     llvm.intr.maxnum
+//         CHECK:     llvm.store %{{.*}}, %{{.*}} : f32, !llvm.ptr<1>
 
 // -----
 
 
 #config = #iree_codegen.lowering_config<tile_sizes = [[32,32]]>
-#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb", {target_arch = "sm_80"}>
-#pipeline_layout = #hal.pipeline.layout<push_constants = 0, sets = [
-  #hal.descriptor_set.layout<0, bindings = [
-    #hal.descriptor_set.binding<0, storage_buffer>,
-    #hal.descriptor_set.binding<1, storage_buffer>
-  ]>
+#executable_target_cuda_nvptx_fb = #hal.executable.target<"cuda", "cuda-nvptx-fb">
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
 ]>
 #map0 = affine_map<(d0, d1) -> (d1, d0)>
 #map1 = affine_map<(d0, d1) -> (d0, d1)>
 hal.executable private @shared_mem_transpose  {
-  hal.executable.variant @cuda, target = #executable_target_cuda_nvptx_fb {
+  hal.executable.variant @cuda target(#executable_target_cuda_nvptx_fb) {
     hal.executable.export @shared_mem_transpose layout(#pipeline_layout) {
       ^bb0(%arg0: !hal.device, %arg1: index, %arg2: index):
         %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2
@@ -945,8 +898,8 @@ hal.executable private @shared_mem_transpose  {
     builtin.module {
         func.func @shared_mem_transpose() {
           %c0 = arith.constant 0 : index
-          %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<2048x768xf32>>
-          %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<768x2048xf32>>
+          %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) : !flow.dispatch.tensor<readonly:tensor<2048x768xf32>>
+          %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<768x2048xf32>>
           %2 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2048, 768], strides = [1, 1] : !flow.dispatch.tensor<readonly:tensor<2048x768xf32>> -> tensor<2048x768xf32>
           %3 = tensor.empty() : tensor<768x2048xf32>
           %4 = linalg.generic {indexing_maps = [#map0, #map1], iterator_types = ["parallel", "parallel"]} ins(%2 : tensor<2048x768xf32>) outs(%3 : tensor<768x2048xf32>) {
@@ -962,9 +915,9 @@ hal.executable private @shared_mem_transpose  {
 
 // Check that bufferization is emitting correct code for the temp shared
 // memory alloc.
-//   CHECK-LABEL: hal.executable private @shared_mem_transpose
-//         CHECK:   hal.executable.variant public @cuda
-//         CHECK:     nvvm.barrier0
-//         CHECK:     llvm.load %{{.*}} {alignment = 4 : i64} : !llvm.ptr<vector<4xf32>>
-//         CHECK:     llvm.store %{{.*}}, %{{.*}} {alignment = 4 : i64} : !llvm.ptr<vector<4xf32>, 3>
-//         CHECK:     nvvm.barrier0
+//   SM80-LABEL: hal.executable private @shared_mem_transpose
+//         SM80:   hal.executable.variant public @cuda
+//         SM80:     nvvm.barrier0
+//         SM80:     llvm.load %{{.*}} {alignment = 4 : i64} : !llvm.ptr<1> -> vector<4xf32>
+//         SM80:     llvm.store %{{.*}}, %{{.*}} {alignment = 4 : i64} : vector<4xf32>, !llvm.ptr<3>
+//         SM80:     nvvm.barrier0

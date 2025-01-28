@@ -7,12 +7,12 @@
 #ifndef IREE_COMPILER_CODEGEN_INTERFACES_UKERNEL_OP_INTERFACE_H_
 #define IREE_COMPILER_CODEGEN_INTERFACES_UKERNEL_OP_INTERFACE_H_
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
 // clang-format off
 #include "iree/compiler/Codegen/Interfaces/UKernelOpInterface.h.inc" // IWYU pragma: export
 // clang-format on
 
-#endif  // IREE_COMPILER_CODEGEN_INTERFACES_UKERNEL_OP_INTERFACE_H_
+#endif // IREE_COMPILER_CODEGEN_INTERFACES_UKERNEL_OP_INTERFACE_H_

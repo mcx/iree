@@ -7,9 +7,8 @@
 #ifndef IREE_COMPILER_DIALECT_FLOW_TRANSFORMEXTENSIONS_FLOWEXTENSIONS
 #define IREE_COMPILER_DIALECT_FLOW_TRANSFORMEXTENSIONS_FLOWEXTENSIONS
 
-include "mlir/Dialect/PDL/IR/PDLTypes.td"
 include "mlir/Dialect/Transform/IR/TransformDialect.td"
-include "mlir/Dialect/Transform/IR/TransformInterfaces.td"
+include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 
@@ -17,7 +16,8 @@ def ForeachThreadToFlowDispatchWorkgroupsOp : Op<Transform_Dialect, "iree.forall
     [FunctionalStyleTransformOpTrait,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
      TransformEachOpTrait,
-     TransformOpInterface]> {
+     TransformOpInterface,
+     ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Rewrite an scf.forall to Flow::DispatchWorkgroups.
 
@@ -28,7 +28,7 @@ def ForeachThreadToFlowDispatchWorkgroupsOp : Op<Transform_Dialect, "iree.forall
 
     If any rewrite fails, the transform definitely fails.
 
-    If all the operations referred to by the `target` PDLOperation generalize
+    If all the operations referred to by the `target` operand generalize
     properly, the transform succeeds. Otherwise the transform silently fails.
 
     The return handle points to only the subset of successfully produced
@@ -38,13 +38,14 @@ def ForeachThreadToFlowDispatchWorkgroupsOp : Op<Transform_Dialect, "iree.forall
     handle.
   }];
 
-  let arguments = (ins PDL_Operation:$target);
-  let results = (outs PDL_Operation:$transformed);
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$transformed);
 
-  let assemblyFormat = "$target attr-dict";
+  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
   let extraClassDeclaration = [{
     ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
         ::mlir::scf::ForallOp target,
         ::mlir::transform::ApplyToEachResultList &results,
         ::mlir::transform::TransformState &state);
@@ -55,7 +56,8 @@ def RegionToWorkgroupsOp : Op<Transform_Dialect, "iree.region_to_workgroups",
     [FunctionalStyleTransformOpTrait,
      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
      TransformOpInterface,
-     TransformEachOpTrait]> {
+     TransformEachOpTrait,
+     ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Convert a flow.dispatch.region op into a flow.dispatch.workgroups op.
 
@@ -69,179 +71,19 @@ def RegionToWorkgroupsOp : Op<Transform_Dialect, "iree.region_to_workgroups",
     handle.
   }];
 
-  let arguments = (ins PDL_Operation:$target);
-  let results = (outs PDL_Operation:$transformed);
+  let arguments = (ins TransformHandleTypeInterface:$target);
+  let results = (outs TransformHandleTypeInterface:$transformed);
 
-  let assemblyFormat = "$target attr-dict";
+  let assemblyFormat = "$target attr-dict `:` functional-type(operands, results)";
   let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
   let extraClassDeclaration = [{
     ::mlir::DiagnosedSilenceableFailure applyToOne(
+        ::mlir::transform::TransformRewriter &rewriter,
         ::mlir::iree_compiler::IREE::Flow::DispatchRegionOp target,
         ::mlir::transform::ApplyToEachResultList &results,
         ::mlir::transform::TransformState &state);
   }];
 }
 
-def WrapInDispatchRegionOp : Op<
-    Transform_Dialect, "iree.wrap_in_dispatch_region",
-    [FunctionalStyleTransformOpTrait,
-     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-     TransformOpInterface,
-     TransformEachOpTrait]> {
-  let description = [{
-    Wrap the `target` op in a new `dispatch.region` op. All uses of target op
-    are replaces with the results of the newly generated `dispach.region` op.
-
-    The argument `generateWorkload` can be set to generate workload information
-    from the given `target` op.
-
-    #### Return modes
-
-    This transform reads the `target` handle and produces the `transformed`
-    handle (i.e., the `dispatch.region` op).
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
-                       DefaultValuedAttr<BoolAttr, "true">:$generateWorkload);
-  let results = (outs PDL_Operation:$transformed);
-
-  let assemblyFormat = "$target attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure applyToOne(
-        ::mlir::Operation *target,
-        ::mlir::transform::ApplyToEachResultList &results,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def ClonePrecedingOpIntoDispatchRegionOp : Op<
-    Transform_Dialect, "iree.clone_preceding_op_into_dispatch_region", [
-      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-      TransformOpInterface]> {
-  let description = [{
-    Clone the `target` op into the given dispatch region op. The dispatch region
-    handle must be mapped to exactly one payload op.
-
-    All uses of the target inside of the dispatch region are replaced with the
-    results of the cloned op. Uses of the target outside of the dispatch region
-    remain unchanged.
-
-    #### Return modes
-
-    This transform reads the `target` handle and the `dispatch_region`
-    handle. It produces a new handle to the cloned ops.
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
-                       PDL_Operation:$dispatch_region);
-  let results = (outs PDL_Operation:$cloned);
-  let assemblyFormat = "$target `into` $dispatch_region attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformResults &transformResults,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def MovePrecedingOpIntoDispatchRegionOp : Op<
-    Transform_Dialect, "iree.move_preceding_op_into_dispatch_region", [
-      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-      TransformOpInterface]> {
-  let description = [{
-    Move the `target` op into the given dispatch region op. The dispatch region
-    handle must be mapped to exactly one payload op.
-
-    An extra result is added to the dispatch region for every result of the
-    target op. All uses of the target op are replaced with the newly added
-    results of the dispatch region.
-
-    Note: This transform generates invalid IR if there are uses of the target op
-    that appear before (i.e., dominate) the dispatch region.
-
-    #### Return modes
-
-    This transform reads the `target` handle and consumes the `dispatch_region`
-    handle. It produces a new handle to the extended dispatch region.
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
-                       PDL_Operation:$dispatch_region);
-  let results = (outs PDL_Operation:$transformed);
-  let assemblyFormat = "$target `into` $dispatch_region attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformResults &transformResults,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def CloneSucceedingOpIntoDispatchRegionOp : Op<
-    Transform_Dialect, "iree.clone_succeeding_op_into_dispatch_region", [
-      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-      TransformOpInterface]> {
-  let description = [{
-    Clone the `target` op into the given dispatch region op. The dispatch region
-    handle must be mapped to exactly one payload op.
-
-    All operands of the target are replaced with values that are defined inside
-    of the dispatch region when possible. No new results are added to the
-    dispatch region.
-
-    #### Return modes
-
-    `dispatch_region` must be mapped to exactly one op. `target` may be mapped
-    to multiple ops.
-
-    This transform reads both the `target` handle and the `dispatch_region`
-    handle. It produces a new handle to the cloned ops.
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
-                       PDL_Operation:$dispatch_region);
-  let results = (outs PDL_Operation:$cloned);
-  let assemblyFormat = "$target `into` $dispatch_region attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformResults &transformResults,
-        ::mlir::transform::TransformState &state);
-  }];
-}
-
-def MoveSucceedingOpIntoDispatchRegionOp : Op<
-    Transform_Dialect, "iree.move_succeeding_op_into_dispatch_region", [
-      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-      TransformOpInterface]> {
-  let description = [{
-    Move the `target` op into the given dispatch region op. The dispatch region
-    handle must be mapped to exactly one payload op.
-
-    All operands of the target are replaced with values that are defined inside
-    of the dispatch region when possible. All uses of the target op are
-    replaced with a newly ammended results of the dispatch region op.
-
-    #### Return modes
-
-    `dispatch_region` must be mapped to exactly one op. `target` may be mapped
-    to multiple ops.
-
-    This transform reads the `target` handle and consumes the `dispatch_region`
-    handle. It produces a new handle to the new dispatch region.
-  }];
-
-  let arguments = (ins PDL_Operation:$target,
-                       PDL_Operation:$dispatch_region);
-  let results = (outs PDL_Operation:$transformed);
-  let assemblyFormat = "$target `into` $dispatch_region attr-dict";
-  let cppNamespace = "mlir::iree_compiler::IREE::transform_dialect";
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformResults &transformResults,
-        ::mlir::transform::TransformState &state);
-  }];
-}
 
 #endif // IREE_COMPILER_DIALECT_FLOW_TRANSFORMEXTENSIONS_FLOWEXTENSIONS

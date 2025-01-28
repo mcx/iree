@@ -13,33 +13,38 @@ include "mlir/Pass/PassBase.td"
 // Optimization and cleanup
 //===----------------------------------------------------------------------===//
 
-def ApplyPatterns : Pass<"iree-util-apply-patterns", ""> {
+def ApplyPatternsPass : Pass<"iree-util-apply-patterns", ""> {
   let summary = "Applies some risky/IREE-specific canonicalization patterns.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createApplyPatternsPass()
-  }];
 }
 
-def CombineInitializers : Pass<"iree-util-combine-initializers", "mlir::ModuleOp"> {
+def CombineInitializersPass : Pass<"iree-util-combine-initializers", "mlir::ModuleOp"> {
   let summary = "Combines global initializers into one.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createCombineInitializersPass()
-  }];
 }
 
-def DropCompilerHints : Pass<"iree-util-drop-compiler-hints", ""> {
+def DropCompilerHintsPass : Pass<"iree-util-drop-compiler-hints", ""> {
   let summary = "Deletes operations that have no runtime equivalent.";
   let description = [{
     Deletes operations that have no runtime equivalent and are only
     used in the compiler. This should be performed after all other
     compiler passes.
   }];
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createDropCompilerHintsPass()
-  }];
 }
 
-def FixedPointIterator : Pass<"iree-util-fixed-point-iterator", ""> {
+def DumpModulePass : Pass<"iree-util-dump-module", "mlir::ModuleOp"> {
+  let summary = "Dumps the module IR to the given file path.";
+  let description = [{
+    Dumps the module IR to the given file path in either textual (.mlir) or
+    binary (.mlirbc) format. Source locations remain unchanged.
+  }];
+  let options = [
+    Option<"path", "path",
+      "std::string", /*default=*/"",
+      "File path to write the module text or binary into."
+    >
+  ];
+}
+
+def FixedPointIteratorPass : Pass<"iree-util-fixed-point-iterator", ""> {
   let summary = "Iterates a sub-pipeline to a fixed point.";
   let constructor = [{
     mlir::iree_compiler::IREE::Util::createFixedPointIteratorPass(
@@ -47,118 +52,145 @@ def FixedPointIterator : Pass<"iree-util-fixed-point-iterator", ""> {
   }];
 }
 
-def IPO : Pass<"iree-util-ipo", "mlir::ModuleOp"> {
+def IPOPass : Pass<"iree-util-ipo", "mlir::ModuleOp"> {
   let summary = "Performs basic inter-procedural optimization.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createIPOPass()
-  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
 }
 
-def PropagateSubranges : Pass<"iree-util-propagate-subranges", "mlir::ModuleOp"> {
+def OptimizeIntArithmeticPass : Pass<"iree-util-optimize-int-arithmetic", ""> {
+  let summary = "Optimizes integer arithmetic using a variety of dataflow analysis and patterns.";
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
+  let options = [
+    Option<"narrowToI32", "narrow-to-i32", "bool",
+      /*default=*/"false",
+      "Flag indicating if computations that can be performed with 32 bits should be."
+      " Mainly used for GPU code generation to not waste registers.">
+  ];
+}
+
+def PropagateSubrangesPass : Pass<"iree-util-propagate-subranges", "mlir::ModuleOp"> {
   let summary = "Propagates resource subranges across the program.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createPropagateSubrangesPass()
-  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
+
 }
 
-def StripDebugOps : Pass<"iree-util-strip-debug-ops", ""> {
+def StripAndSplatConstantsPass :
+    Pass<"iree-util-strip-and-splat-constants", "mlir::ModuleOp"> {
+  let summary = "Strips constant util.global ops and replaces them with splats.";
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
+}
+
+def StripDebugOpsPass : Pass<"iree-util-strip-debug-ops", ""> {
   let summary = "Strips debug ops, like assertions.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createStripDebugOpsPass()
-  }];
 }
 
 //===----------------------------------------------------------------------===//
 // Globals
 //===----------------------------------------------------------------------===//
 
-def FoldGlobals : Pass<"iree-util-fold-globals", "mlir::ModuleOp"> {
+def FoldGlobalsPass : Pass<"iree-util-fold-globals", "mlir::ModuleOp"> {
   let summary = "Folds duplicate globals and propagates constants.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createFoldGlobalsPass()
-  }];
+
+  let dependentDialects = [
+    "::mlir::func::FuncDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
+
+  let statistics = [
+    Statistic<"beforeFoldingGlobals", "global ops before folding",
+      "Number of util.global ops before folding">,
+    Statistic<"afterFoldingGlobals", "global ops after folding",
+      "Number of util.global ops after folding">
+  ];
 }
 
-def FuseGlobals : Pass<"iree-util-fuse-globals", "mlir::ModuleOp"> {
+def FuseGlobalsPass : Pass<"iree-util-fuse-globals", "mlir::ModuleOp"> {
   let summary = "Fuses correlated globals together.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createFuseGlobalsPass()
-  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::Util::UtilDialect"
+  ];
 }
 
-def HoistIntoGlobals : Pass<"iree-util-hoist-into-globals", "mlir::ModuleOp"> {
+def HoistIntoGlobalsPass : Pass<"iree-util-hoist-into-globals", "mlir::ModuleOp"> {
   let summary = "Greedily hoists eligible constant expressions into globals.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createHoistIntoGlobalsPass()
-  }];
+  // Note: has a custom options struct that lets you register dependent dialects
+  let options = [
+    Option<"maxSizeIncreaseThreshold", "max-size-increase-threshold", "int64_t",
+      /*default=*/"1048576",
+      "Maximum byte size increase allowed for constant expr hoisting policy to"
+      "allow hoisting. The threshold is 1MB by default.">
+  ];
 }
 
-def SimplifyGlobalAccesses :
+def SimplifyGlobalAccessesPass :
     InterfacePass<"iree-util-simplify-global-accesses", "mlir::CallableOpInterface"> {
   let summary = "Hoists loads and sinks stores to variables to decrease data dependency regions.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createSimplifyGlobalAccessesPass()
-  }];
 }
 
 //===----------------------------------------------------------------------===//
-// Type Conversion
+// Resource Management
 //===----------------------------------------------------------------------===//
 
-def DemoteI64ToI32 : Pass<"iree-util-demote-i64-to-i32", "mlir::ModuleOp"> {
-  let summary = "Demotes i64 types to i32 types.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createDemoteI64ToI32Pass()
-  }];
-}
+def ImportResourcesPass : Pass<"iree-util-import-resources", ""> {
+  let summary = "Imports IR with arbitrary large-data into resources that IREE can manage efficiently";
+  let description = [{
+    MLIR has many interesting ways to store large constants, most of which
+    derive from *ElementsAttr. Given the uniquing/inline behavior, this exacts
+    very large runtime and memory overhead costs.
 
-def DemoteF32ToF16 : Pass<"iree-util-demote-f32-to-f16", "mlir::ModuleOp"> {
-  let summary = "Demotes f32 types to f16 types.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createDemoteF32ToF16Pass()
+    This is a temporary pass to convert a majority of the legacy
+    DenseElementsAttr attributes to DenseResourceElementsAttr. Ideally this
+    is done at the source (frontend), but this pass is provided to aid
+    transition and testing by doing a manual conversion with iree-opt.
   }];
-}
 
-def DemoteF64ToF32 : Pass<"iree-util-demote-f64-to-f32", "mlir::ModuleOp"> {
-  let summary = "Demotes f64 types to f32 types.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createDemoteF64ToF32Pass()
-  }];
-}
-
-def PromoteF16ToF32 : Pass<"iree-util-promote-f16-to-f32", "mlir::ModuleOp"> {
-  let summary = "Promotes f16 types to f32 types.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createPromoteF16ToF32Pass()
-  }];
-}
-
-def PromoteBF16ToF32 : Pass<"iree-util-promote-bf16-to-f32", "mlir::ModuleOp"> {
-  let summary = "Promotes bf16 types to f32 types.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createPromoteBF16ToF32Pass()
-  }];
+  let dependentDialects = [
+    "::mlir::BuiltinDialect"
+  ];
 }
 
 //===----------------------------------------------------------------------===//
-// Test passes
+// Debug/test passes
 //===----------------------------------------------------------------------===//
 
-def TestConversion : Pass<"iree-util-test-conversion", "mlir::ModuleOp"> {
+def AnnotateOpOrdinalsPass : Pass<"iree-util-annotate-op-ordinals", "mlir::ModuleOp"> {
+  let summary = "Annotates ops with globally unique IDs for debugging.";
+}
+
+def TestConversionPass : Pass<"iree-util-test-conversion", "mlir::ModuleOp"> {
   let summary = "Tests util dialect conversion patterns.";
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createTestConversionPass()
-  }];
+  let dependentDialects = [
+    "::mlir::iree_compiler::IREE::Util::UtilDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::math::MathDialect",
+    "::mlir::affine::AffineDialect",
+    "::mlir::memref::MemRefDialect"
+  ];
+  let options = [
+    Option<"widenIntegers", "widen-integers",
+      "bool", /*default=*/"false",
+      "Tests type conversion by widening integers to i32">
+  ];
 }
 
-def TestFloatRangeAnalysis : Pass<"iree-util-test-float-range-analysis", ""> {
+def TestFloatRangeAnalysisPass : Pass<"iree-util-test-float-range-analysis", ""> {
   let summary = "Tests floating point range analysis.";
   let description = [{
     Tests floating point range analysis by evaluating any
     'iree_unregistered.test_fprange' op and setting the results on an attribute.
-  }];
-  let constructor = [{
-    mlir::iree_compiler::IREE::Util::createTestFloatRangeAnalysisPass()
   }];
 }
 

@@ -12,8 +12,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 static void emitLegalizationErrors(Location loc,
                                    const DenseSet<Operation *> &illegalOps) {
@@ -29,7 +28,7 @@ static void emitLegalizationErrors(Location loc,
   errorMessages.reserve(opNameCounts.size());
   for (const auto &opInfo : opNameCounts) {
     errorMessages.push_back(
-        llvm::formatv("\t{0} (count: {1})", opInfo.first, opInfo.second));
+        llvm::formatv("\t{} (count: {})", opInfo.first, opInfo.second));
   }
   emitError(loc) << "The following illegal operations still remain: \n"
                  << llvm::join(errorMessages, "\n") << "\n";
@@ -46,28 +45,31 @@ LogicalResult verifyAllOperationsAreLegal(Operation *op,
       illegalOps.insert(op);
     }
   });
-  if (illegalOps.empty()) return success();
+  if (illegalOps.empty())
+    return success();
   emitLegalizationErrors(op->getLoc(), illegalOps);
   return failure();
 }
 
 Attribute convertAttribute(Location loc, Attribute oldAttr,
-                           TypeConverter &typeConverter) {
+                           const TypeConverter &typeConverter) {
   // Type attributes get their nested type converted.
-  if (auto oldTypeAttr = oldAttr.dyn_cast<TypeAttr>()) {
+  if (auto oldTypeAttr = llvm::dyn_cast<TypeAttr>(oldAttr)) {
     return TypeAttr::get(typeConverter.convertType(oldTypeAttr.getValue()));
   }
 
   // Return the same attribute if it doesn't have a type.
-  auto typedOldAttr = oldAttr.dyn_cast<TypedAttr>();
-  if (!typedOldAttr) return oldAttr;
+  auto typedOldAttr = llvm::dyn_cast<TypedAttr>(oldAttr);
+  if (!typedOldAttr)
+    return oldAttr;
 
   // Convert the attribute type - if it's the same then it's already legal.
   auto oldType = typedOldAttr.getType();
   auto newType = typeConverter.convertType(oldType);
-  if (oldType == newType) return typedOldAttr;
+  if (oldType == newType)
+    return typedOldAttr;
 
-  if (auto intAttr = typedOldAttr.dyn_cast<IntegerAttr>()) {
+  if (auto intAttr = llvm::dyn_cast<IntegerAttr>(typedOldAttr)) {
     APInt value = intAttr.getValue();
     if (newType.isSignedInteger()) {
       value = value.truncSSat(newType.getIntOrFloatBitWidth());
@@ -77,22 +79,23 @@ Attribute convertAttribute(Location loc, Attribute oldAttr,
       value = value.trunc(newType.getIntOrFloatBitWidth());
     }
     return IntegerAttr::get(newType, value);
-  } else if (auto floatAttr = typedOldAttr.dyn_cast<FloatAttr>()) {
-    auto newFloatType = newType.cast<FloatType>();
+  } else if (auto floatAttr = llvm::dyn_cast<FloatAttr>(typedOldAttr)) {
+    auto newFloatType = llvm::cast<FloatType>(newType);
     APFloat value = floatAttr.getValue();
     bool losesInfo = false;
     value.convert(newFloatType.getFloatSemantics(), APFloat::rmTowardZero,
                   &losesInfo);
     return FloatAttr::get(newType, value);
-  } else if (auto splatAttr = typedOldAttr.dyn_cast<SplatElementsAttr>()) {
+  } else if (auto splatAttr = llvm::dyn_cast<SplatElementsAttr>(typedOldAttr)) {
     // NOTE: splats are also dense but this way we avoid needing to convert the
     // same splat value N times.
     return SplatElementsAttr::get(
-        newType.cast<ShapedType>(),
+        llvm::cast<ShapedType>(newType),
         convertAttribute(loc, splatAttr.getSplatValue<Attribute>(),
                          typeConverter));
-  } else if (auto denseAttr = typedOldAttr.dyn_cast<DenseIntElementsAttr>()) {
-    auto newElementType = newType.cast<ShapedType>().getElementType();
+  } else if (auto denseAttr =
+                 llvm::dyn_cast<DenseIntElementsAttr>(typedOldAttr)) {
+    auto newElementType = llvm::cast<ShapedType>(newType).getElementType();
     auto newElementBitWidth = newElementType.getIntOrFloatBitWidth();
     if (newElementType.isSignedInteger()) {
       return denseAttr.mapValues(newElementType, [&](APInt src) {
@@ -107,9 +110,10 @@ Attribute convertAttribute(Location loc, Attribute oldAttr,
         return src.trunc(newElementBitWidth);
       });
     }
-  } else if (auto denseAttr = typedOldAttr.dyn_cast<DenseFPElementsAttr>()) {
+  } else if (auto denseAttr =
+                 llvm::dyn_cast<DenseFPElementsAttr>(typedOldAttr)) {
     auto newElementType =
-        newType.cast<ShapedType>().getElementType().cast<FloatType>();
+        llvm::cast<FloatType>(cast<ShapedType>(newType).getElementType());
     const auto &newFloatSemantics = newElementType.getFloatSemantics();
     return denseAttr.mapValues(newElementType, [&](APFloat src) {
       bool losesInfo = false;
@@ -121,5 +125,4 @@ Attribute convertAttribute(Location loc, Attribute oldAttr,
   return oldAttr;
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

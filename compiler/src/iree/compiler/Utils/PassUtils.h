@@ -4,29 +4,28 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef IREE_COMPILER_UTILS_FUNCTIONUTILS_H_
-#define IREE_COMPILER_UTILS_FUNCTIONUTILS_H_
+#ifndef IREE_COMPILER_UTILS_PASSUTILS_H_
+#define IREE_COMPILER_UTILS_PASSUTILS_H_
 
 #include <array>
 
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// Constructs a pipeline of passes across multiple nested op types.
 ///
 /// Usage:
-///   using FunctionLikeNest = MultiOpNest<func::FuncOp,
-///                                        IREE::Util::InitializerOp>;
+///   using FunctionLikeNest = MultiOpNest<IREE::Util::InitializerOp,
+///                                        IREE::Util::FuncOp>;
 ///
 ///   FunctionLikeNest(passManager)
 ///     .addPass(createMyPass)
 ///     .addPredicatedPass(enable, createMyOtherPass);
 template <typename... OpTys>
 struct MultiOpNest {
- public:
+public:
   MultiOpNest(OpPassManager &parentPm) : parentPm(parentPm) {
     addNest<0, OpTys...>();
   }
@@ -52,7 +51,7 @@ struct MultiOpNest {
     return *this;
   }
 
- private:
+private:
   // Initialize a nest.
   template <int index, typename T, typename... Rest>
   void addNest() {
@@ -83,7 +82,6 @@ struct MultiOpNest {
 // has been made which requires another iteration. No-op otherwise.
 void signalFixedPointModified(Operation *rootOp);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_UTILS_FUNCTIONUTILS_H_
+#endif // IREE_COMPILER_UTILS_PASSUTILS_H_

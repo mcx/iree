@@ -12,8 +12,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 //===----------------------------------------------------------------------===//
 // Generic patterns that can either be greedy rewrite patterns or conversion
@@ -44,7 +43,7 @@ static void insertGreedyPattern(RewritePatternSet &patterns,
       // have a dependency on ArrayRef as it requires doing this copy. In
       // practice for this level of IR, this is sub-optimal but not the end
       // of the world.
-      SmallVector<Value, 4> operands;
+      SmallVector<Value> operands;
       for (unsigned i = 0, e = op.getOperation()->getNumOperands(); i < e;
            ++i) {
         operands.push_back(op.getOperation()->getOperand(i));
@@ -65,9 +64,9 @@ static void insertConversionPattern(RewritePatternSet &patterns,
     Pattern(MLIRContext *context, GenericOpRewritePattern<OpTy> f,
             PatternBenefit benefit)
         : OpConversionPattern<OpTy>(context, benefit), f(f) {}
-    LogicalResult matchAndRewrite(
-        OpTy op, typename OpTy::Adaptor adaptor,
-        ConversionPatternRewriter &rewriter) const override {
+    LogicalResult
+    matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                    ConversionPatternRewriter &rewriter) const override {
       return f(op, adaptor, rewriter);
     }
     GenericOpRewritePattern<OpTy> f;
@@ -75,7 +74,6 @@ static void insertConversionPattern(RewritePatternSet &patterns,
   patterns.insert<Pattern>(context, f, benefit);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_UTILS_PATTERNUTILS_H_
+#endif // IREE_COMPILER_UTILS_PATTERNUTILS_H_

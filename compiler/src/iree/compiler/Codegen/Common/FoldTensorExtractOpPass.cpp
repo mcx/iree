@@ -3,22 +3,24 @@
 // Licensed under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_FOLDTENSOREXTRACTOPPASS
+#include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
 #include "iree/compiler/Codegen/Common/FoldTensorExtractOp.cpp.inc"
-}  // namespace
+} // namespace
 
 namespace {
 /// Upstream canonicalization passes fold
@@ -49,22 +51,16 @@ namespace {
 /// In theory this could live upstream, but given that there is disagreement
 /// about the validity of `tensor_to_memref` usage/canonicalizations, keeping
 /// this pattern here.
-class FoldTensorExtractOpPass
-    : public FoldTensorExtractOpBase<FoldTensorExtractOpPass> {
+class FoldTensorExtractOpPass final
+    : public impl::FoldTensorExtractOpPassBase<FoldTensorExtractOpPass> {
   void runOnOperation() override;
 };
-}  // namespace
+} // namespace
 
 void FoldTensorExtractOpPass::runOnOperation() {
   RewritePatternSet patterns(&getContext());
   populateWithGenerated(patterns);
-  if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns))))
+  if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
     signalPassFailure();
 }
-
-std::unique_ptr<OperationPass<>> createFoldTensorExtractOpPass() {
-  return std::make_unique<FoldTensorExtractOpPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

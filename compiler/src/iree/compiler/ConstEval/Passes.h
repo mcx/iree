@@ -7,22 +7,17 @@
 #ifndef IREE_COMPILER_CONSTEVAL_PASSES_H_
 #define IREE_COMPILER_CONSTEVAL_PASSES_H_
 
+#include "iree/compiler/Dialect/HAL/Target/TargetRegistry.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace ConstEval {
+namespace mlir::iree_compiler::ConstEval {
 
-/// Creates a pass which uses the compiler and runtime to Jit global
-/// initializers eligible for optimization and uses the actual results to
-/// simplify the globals in the module.
-std::unique_ptr<OperationPass<ModuleOp>> createJitGlobalsPass();
+#define GEN_PASS_DECL
+#include "iree/compiler/ConstEval/Passes.h.inc"
 
 void registerConstEvalPasses();
 
-}  // namespace ConstEval
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::ConstEval
 
-#endif  // IREE_COMPILER_CONSTEVAL_PASSES_H_
+#endif // IREE_COMPILER_CONSTEVAL_PASSES_H_

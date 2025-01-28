@@ -16,19 +16,18 @@
 #   ./build_tools/python_deploy/build_linux_packages.sh
 #
 # Build specific Python versions and packages to custom directory:
-#   override_python_versions="cp38-cp38 cp39-cp39" \
-#   packages="iree-runtime iree-runtime-instrumented" \
+#   override_python_versions="cp39-cp39 cp310-cp310" \
+#   packages="iree-base-runtime" \
 #   output_dir="/tmp/wheelhouse" \
 #   ./build_tools/python_deploy/build_linux_packages.sh
 #
 # Valid Python versions match a subdirectory under /opt/python in the docker
 # image. Typically:
-#   cp37-cp37m cp38-cp38 cp39-cp39 cp310-cp310
+#   cp39-cp39 cp310-cp310
 #
 # Valid packages:
-#   iree-runtime
-#   iree-runtime-instrumented
-#   iree-compiler
+#   iree-base-runtime
+#   iree-base-compiler
 #
 # Note that this script is meant to be run on CI and it will pollute both the
 # output directory and in-tree build/ directories (under runtime/ and
@@ -39,14 +38,40 @@
 # to packaging to avoid stomping on development artifacts.
 set -xeu -o errtrace
 
+# Function to find the directory the ".git" directory is in.
+# We do this instead of using git directly because `git` may complain about
+# operating in a directory owned by another user.
+function find_git_dir_parent() {
+  curr_dir="${PWD}"
+
+  # Loop until we reach the root directory
+  while [ "${curr_dir}" != "/" ]; do
+    # Check if there is a ".git" directory in the current directory
+    if [ -d "${curr_dir}/.git" ]; then
+      # Return the path to the directory containing the ".git" directory
+      echo "${curr_dir}"
+      return
+    fi
+
+    # Move up one directory
+    curr_dir="$(dirname "${curr_dir}")"
+  done
+
+  # If we reach the root directory and there is no ".git" directory, return an empty string
+  echo ""
+}
+
 this_dir="$(cd $(dirname $0) && pwd)"
 script_name="$(basename $0)"
-repo_root="$(cd "${this_dir}" && git rev-parse --show-toplevel)"
-manylinux_docker_image="${manylinux_docker_image:-gcr.io/iree-oss/manylinux2014_x86_64-release@sha256:794513562cca263480c0c169c708eec9ff70abfe279d6dc44e115b04488b9ab5}"
-python_versions="${override_python_versions:-cp37-cp37m cp38-cp38 cp39-cp39 cp310-cp310 cp311-cp311}"
+repo_root=$(cd "${this_dir}" && find_git_dir_parent)
+manylinux_docker_image="${manylinux_docker_image:-$(uname -m | awk '{print ($1 == "aarch64") ? "quay.io/pypa/manylinux_2_28_aarch64" : "ghcr.io/iree-org/manylinux_x86_64@sha256:2e0246137819cf10ed84240a971f9dd75cc3eb62dc6907dfd2080ee966b3c9f4" }')}"
+python_versions="${override_python_versions:-cp39-cp39 cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp313-cp313t}"
 output_dir="${output_dir:-${this_dir}/wheelhouse}"
-packages="${packages:-iree-runtime iree-runtime-instrumented iree-compiler}"
+packages="${packages:-iree-base-runtime iree-base-compiler}"
 package_suffix="${package_suffix:-}"
+toolchain_suffix="${toolchain_suffix:-release}"
+# Return ON if we are on a supported platform for CUDA.
+enable_cuda="$(uname -m | awk '{print ($1 == "x86_64" || $1 == "aarch64") ? "ON" : "OFF"}')"
 
 function run_on_host() {
   echo "Running on host"
@@ -65,6 +90,7 @@ function run_on_host() {
     -e "packages=${packages}" \
     -e "package_suffix=${package_suffix}" \
     -e "output_dir=${output_dir}" \
+    -e "toolchain_suffix=${toolchain_suffix}" \
     "${manylinux_docker_image}" \
     -- ${this_dir}/${script_name}
 
@@ -75,9 +101,19 @@ function run_on_host() {
 
 function run_in_docker() {
   echo "Running in docker"
-  echo "Using python versions: ${python_versions}"
+  echo "Marking git safe.directory"
+  git config --global --add safe.directory '*'
 
+  echo "Using python versions: ${python_versions}"
   local orig_path="${PATH}"
+
+  # Configure toolchain.
+  export CMAKE_TOOLCHAIN_FILE="${repo_root}/build_tools/pkgci/linux_toolchain_${toolchain_suffix}.cmake"
+  echo "Using CMake toolchain ${CMAKE_TOOLCHAIN_FILE}"
+  if ! [ -f "$CMAKE_TOOLCHAIN_FILE" ]; then
+    echo "CMake toolchain not found (wrong toolchain_suffix?)"
+    exit 1
+  fi
 
   # Build phase.
   for package in ${packages}; do
@@ -90,23 +126,21 @@ function run_in_docker() {
       fi
       export PATH="${python_dir}/bin:${orig_path}"
       echo ":::: Python version $(python --version)"
+      prepare_python
       # replace dashes with underscores
       package_suffix="${package_suffix//-/_}"
       case "${package}" in
-        iree-runtime)
-          clean_wheels "iree_runtime${package_suffix}" "${python_version}"
+        iree-base-runtime)
+          clean_wheels "iree_base_runtime${package_suffix}" "${python_version}"
+          install_deps "iree_base_runtime${package_suffix}" "${python_version}"
           build_iree_runtime
-          run_audit_wheel "iree_runtime${package_suffix}" "${python_version}"
+          run_audit_wheel "iree_base_runtime${package_suffix}" "${python_version}"
           ;;
-        iree-runtime-instrumented)
-          clean_wheels "iree_runtime_instrumented${package_suffix}" "${python_version}"
-          build_iree_runtime_instrumented
-          run_audit_wheel "iree_runtime_instrumented${package_suffix}" "${python_version}"
-          ;;
-        iree-compiler)
-          clean_wheels "iree_compiler${package_suffix}" "${python_version}"
+        iree-base-compiler)
+          clean_wheels "iree_base_compiler${package_suffix}" "${python_version}"
+          install_deps "iree_base_compiler${package_suffix}" "${python_version}"
           build_iree_compiler
-          run_audit_wheel "iree_compiler${package_suffix}" "${python_version}"
+          run_audit_wheel "iree_base_compiler${package_suffix}" "${python_version}"
           ;;
         *)
           echo "Unrecognized package '${package}'"
@@ -122,18 +156,17 @@ function build_wheel() {
 }
 
 function build_iree_runtime() {
-  IREE_HAL_DRIVER_CUDA=ON \
-  build_wheel runtime/
-}
-
-function build_iree_runtime_instrumented() {
-  IREE_HAL_DRIVER_CUDA=ON IREE_BUILD_TRACY=ON IREE_ENABLE_RUNTIME_TRACING=ON \
-  IREE_RUNTIME_CUSTOM_PACKAGE_SUFFIX="-instrumented" \
+  export IREE_RUNTIME_BUILD_TRACY=ON
+  # We install the needed build deps below for the tools.
+  export IREE_RUNTIME_BUILD_TRACY_TOOLS=ON
+  export IREE_HAL_DRIVER_CUDA="${enable_cuda}"
+  export IREE_HAL_DRIVER_HIP=ON
   build_wheel runtime/
 }
 
 function build_iree_compiler() {
-  IREE_TARGET_BACKEND_CUDA=ON \
+  export IREE_TARGET_BACKEND_CUDA="${enable_cuda}"
+  export IREE_TARGET_BACKEND_ROCM=ON
   build_wheel compiler/
 }
 
@@ -141,7 +174,7 @@ function run_audit_wheel() {
   local wheel_basename="$1"
   local python_version="$2"
   # Force wildcard expansion here
-  generic_wheel="$(echo "${output_dir}/${wheel_basename}-"*"-${python_version}-linux_x86_64.whl")"
+  generic_wheel="$(echo "${output_dir}/${wheel_basename}-"*"-${python_version}-linux_$(uname -m).whl")"
   ls "${generic_wheel}"
   echo ":::: Auditwheel ${generic_wheel}"
   auditwheel repair -w "${output_dir}" "${generic_wheel}"
@@ -154,6 +187,42 @@ function clean_wheels() {
   echo ":::: Clean wheels ${wheel_basename} ${python_version}"
   rm -f -v "${output_dir}/${wheel_basename}-"*"-${python_version}-"*".whl"
 }
+
+function prepare_python() {
+  # The 0.17 series of patchelf can randomly corrupt executables. Fixes
+  # have landed but not yet been released. Consider removing this pin
+  # once 0.19 is released. We just override the system version with
+  # a pip side load.
+  pip install patchelf==0.16.1.0
+  hash -r
+  echo "patchelf version: $(patchelf --version) (0.17 is bad: https://github.com/NixOS/patchelf/issues/446)"
+}
+
+function install_deps() {
+  local wheel_basename="$1"
+  local python_version="$2"
+  echo ":::: Install Deps for ${wheel_basename} ${python_version}"
+
+  # Get the output of uname -m
+  uname_m=$(uname -m)
+
+  # Check if the output is aarch64
+  if [[ "$uname_m" == "aarch64" ]]; then
+    echo "The architecture is aarch64 and we use manylinux 2_28 so install deps"
+    yum install -y epel-release
+    yum update -y
+    # Required for Tracy
+    yum install -y capstone-devel tbb-devel libzstd-devel
+    yum install -y clang lld
+  elif [[ "$uname_m" == "x86_64" ]]; then
+    # Check if the output is x86_64
+    echo "The architecture is x86_64 so assume we are on a managed image with deps"
+  else
+    echo "The architecture is unknown. Exiting"
+    exit 1
+  fi
+}
+
 
 # Trampoline to the docker container if running on the host.
 if [ -z "${__MANYLINUX_BUILD_WHEELS_IN_DOCKER-}" ]; then

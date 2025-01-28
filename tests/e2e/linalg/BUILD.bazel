@@ -1,0 +1,152 @@
+# Copyright 2022 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# Tests of end-to-end IREE support for individual ops in the TOSA dialect.
+# Each test file should have a name matching the corresponding TOSA op and test only the
+# functionality of that op (though may make use of other ops where necessary). Tests should be
+# written using the IREE Check framework.
+# See https://iree.dev/developers/general/testing-guide/#iree-core-end-to-end-e2e-tests.
+
+load("//build_tools/bazel:enforce_glob.bzl", "enforce_glob")
+load("//build_tools/bazel:iree_check_test.bzl", "iree_check_single_backend_test_suite")
+
+package(
+    features = ["layering_check"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+LLVM_SRCS = enforce_glob(
+    # keep sorted
+    [
+        "conv2d.mlir",
+        "fp_to_subbyte.mlir",
+        "narrow_n_matmuls.mlir",
+        "subbyte_to_fp.mlir",
+    ],
+    include = ["*.mlir"],
+    exclude = [
+        "large_linalg_matmul.mlir",
+    ],
+)
+
+iree_check_single_backend_test_suite(
+    name = "check_llvm-cpu_local-task",
+    srcs = LLVM_SRCS,
+    compiler_flags = ["--iree-llvmcpu-target-cpu=generic"],
+    driver = "local-task",
+    tags = [
+        # subbyte support for wasm is not on priorities.
+        "nowasm",
+    ],
+    target_backend = "llvm-cpu",
+)
+
+VMVX_SRCS = enforce_glob(
+    [
+        "conv2d.mlir",
+        "narrow_n_matmuls.mlir",
+    ],
+    include = ["*.mlir"],
+    exclude = [
+        "fp_to_subbyte.mlir",
+        "large_linalg_matmul.mlir",
+        "subbyte_to_fp.mlir",
+    ],
+)
+
+iree_check_single_backend_test_suite(
+    name = "check_vmvx_local-task",
+    srcs = VMVX_SRCS,
+    driver = "local-task",
+    target_backend = "vmvx",
+)
+
+VULKAN_SRCS = enforce_glob(
+    [
+        "conv2d.mlir",
+        "subbyte_to_fp.mlir",
+        "narrow_n_matmuls.mlir",
+    ],
+    include = ["*.mlir"],
+    exclude = [
+        "large_linalg_matmul.mlir",
+        "fp_to_subbyte.mlir",
+    ],
+)
+
+iree_check_single_backend_test_suite(
+    name = "check_vulkan-spirv_vulkan",
+    srcs = VULKAN_SRCS,
+    driver = "vulkan",
+    target_backend = "vulkan-spirv",
+)
+
+WINOGRAD_CONV_SRCS = [
+    "conv2d.mlir",
+]
+
+iree_check_single_backend_test_suite(
+    name = "check_winograd_llvm-cpu_local-task",
+    srcs = WINOGRAD_CONV_SRCS,
+    compiler_flags = [
+        "--iree-preprocessing-pass-pipeline=builtin.module\\(func.func\\(iree-linalg-ext-convert-conv2d-to-winograd\\)\\)",
+        "--iree-llvmcpu-target-cpu=generic",
+    ],
+    driver = "local-task",
+    target_backend = "llvm-cpu",
+)
+
+iree_check_single_backend_test_suite(
+    name = "check_winograd_vulkan-spirv_vulkan",
+    srcs = WINOGRAD_CONV_SRCS,
+    compiler_flags = [
+        "--iree-preprocessing-pass-pipeline=builtin.module\\(func.func\\(iree-linalg-ext-convert-conv2d-to-winograd\\)\\)",
+    ],
+    driver = "vulkan",
+    target_backend = "vulkan-spirv",
+)
+
+CUDA_SRCS = enforce_glob(
+    # keep sorted
+    [
+        "conv2d.mlir",
+        "fp_to_subbyte.mlir",
+        "subbyte_to_fp.mlir",
+        # currently only enabled on cuda as it can be slow on other backends.
+        "large_linalg_matmul.mlir",
+        "narrow_n_matmuls.mlir",
+    ],
+    include = ["*.mlir"],
+    exclude = [
+    ],
+)
+
+iree_check_single_backend_test_suite(
+    name = "check_large_linalg_matmul_cuda",
+    srcs = CUDA_SRCS,
+    driver = "cuda",
+    tags = [
+        # CUDA cuInit fails with sanitizer on.
+        "noasan",
+        "nomsan",
+        "notsan",
+        "noubsan",
+        "requires-gpu-nvidia",
+    ],
+    target_backend = "cuda",
+)
+
+test_suite(
+    name = "check",
+    tests = [
+        ":check_large_linalg_matmul_cuda",
+        ":check_llvm-cpu_local-task",
+        ":check_vmvx_local-task",
+        ":check_vulkan-spirv_vulkan",
+        ":check_winograd_llvm-cpu_local-task",
+        ":check_winograd_vulkan-spirv_vulkan",
+    ],
+)

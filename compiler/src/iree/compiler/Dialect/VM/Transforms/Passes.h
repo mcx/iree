@@ -15,10 +15,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 //===----------------------------------------------------------------------===//
 // Helpers
@@ -44,12 +41,16 @@ void registerVMTransformPassPipeline();
 //===----------------------------------------------------------------------===//
 
 // Converts from various dialects (standard, HAL, etc) to the VM dialect.
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createConversionPass(
-    TargetOptions targetOptions);
+std::unique_ptr<OperationPass<mlir::ModuleOp>>
+createConversionPass(TargetOptions targetOptions);
 
 //===----------------------------------------------------------------------===//
 // Module layout
 //===----------------------------------------------------------------------===//
+
+// Reifies and pads vm.rodata.table.inline ops as two vm.rodata.inline ops.
+std::unique_ptr<OperationPass<IREE::VM::ModuleOp>>
+createReifyRodataTablesPass();
 
 // Hoists inline vm.rodata.inline values to module-level constant storage.
 std::unique_ptr<OperationPass<IREE::VM::ModuleOp>>
@@ -85,16 +86,12 @@ createOrdinalAllocationPass();
 std::unique_ptr<OperationPass<IREE::VM::ModuleOp>>
 createDropEmptyModuleInitializersPass();
 
+// Drops unused calls to functions marked as having no side effects.
+std::unique_ptr<OperationPass<IREE::VM::ModuleOp>> createDropUnusedCallsPass();
+
 // Sinks defining ops with few uses to their use-sites to reduce the total
 // number of live registers at the cost of additional storage requirements.
 std::unique_ptr<OperationPass<IREE::VM::ModuleOp>> createSinkDefiningOpsPass();
-
-//===----------------------------------------------------------------------===//
-// Test passes
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createConvertStandardToVMTestPass();
 
 //===----------------------------------------------------------------------===//
 // Register all Passes
@@ -107,20 +104,13 @@ inline void registerVMPasses() {
   createHoistInlinedRodataPass();
   createDeduplicateRodataPass();
   createDropEmptyModuleInitializersPass();
+  createDropUnusedCallsPass();
   createGlobalInitializationPass();
   createOrdinalAllocationPass();
   createResolveRodataLoadsPass();
   createSinkDefiningOpsPass();
 }
 
-inline void registerVMTestPasses() {
-  TargetOptions::FromFlags::get();
-  createConvertStandardToVMTestPass();
-}
+} // namespace mlir::iree_compiler::IREE::VM
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
-
-#endif  // IREE_COMPILER_DIALECT_VM_TRANSFORMS_PASSES_H_
+#endif // IREE_COMPILER_DIALECT_VM_TRANSFORMS_PASSES_H_

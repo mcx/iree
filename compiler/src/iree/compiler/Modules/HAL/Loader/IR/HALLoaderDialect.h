@@ -10,22 +10,14 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Loader {
+namespace mlir::iree_compiler::IREE::HAL::Loader {
 
 class HALLoaderDialect : public Dialect {
- public:
+public:
   explicit HALLoaderDialect(MLIRContext *context);
   static StringRef getDialectNamespace() { return "hal_loader"; }
 };
 
-}  // namespace Loader
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL::Loader
 
-#endif  // IREE_COMPILER_MODULES_HAL_LOADER_IR_HALLOADERDIALECT_H_
+#endif // IREE_COMPILER_MODULES_HAL_LOADER_IR_HALLOADERDIALECT_H_

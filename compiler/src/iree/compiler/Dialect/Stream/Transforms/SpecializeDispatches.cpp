@@ -8,12 +8,10 @@
 #include <utility>
 
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
-#include "iree/compiler/Utils/IndexSet.h"
+#include "iree/compiler/Utils/IntegerSet.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
@@ -21,14 +19,16 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 #define DEBUG_TYPE "iree-stream-specialize-dispatches"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_SPECIALIZEDISPATCHESPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
 namespace {
 
 //===----------------------------------------------------------------------===//
@@ -54,9 +54,9 @@ struct ConstantTable {
 // Builds a constant table composed of unique per-dispatch constant values.
 // Each dispatch gets a row in the table that can be selected based on the
 // dispatch ordinal.
-static ConstantTable buildConstantTable(
-    mlir::func::FuncOp funcOp,
-    SmallVector<IREE::Stream::CmdDispatchOp> &dispatchOps) {
+static ConstantTable
+buildConstantTable(mlir::FunctionOpInterface funcOp,
+                   SmallVector<IREE::Stream::CmdDispatchOp> &dispatchOps) {
   auto anyDispatchOp = dispatchOps.front();
   unsigned operandCount = anyDispatchOp.getUniformOperands().size();
 
@@ -64,7 +64,8 @@ static ConstantTable buildConstantTable(
   llvm::BitVector constantOperandMap(operandCount, /*t=*/true);
   for (auto dispatchOp : dispatchOps) {
     for (unsigned idx = 0; idx < operandCount; ++idx) {
-      if (!constantOperandMap.test(idx)) continue;
+      if (!constantOperandMap.test(idx))
+        continue;
       auto value = dispatchOp.getUniformOperands()[idx];
       Attribute constantValue;
       if (!matchPattern(value, m_Constant(&constantValue))) {
@@ -85,7 +86,8 @@ static ConstantTable buildConstantTable(
   DenseMap<Type, ConstantSet> typeSets;
   SmallVector<Type> typeOrder;
   for (unsigned idx = 0; idx < operandCount; ++idx) {
-    if (!constantOperandMap.test(idx)) continue;
+    if (!constantOperandMap.test(idx))
+      continue;
     auto operandType = anyDispatchOp.getUniformOperands()[idx].getType();
     auto &set = typeSets[operandType];
     if (!set.type) {
@@ -95,7 +97,7 @@ static ConstantTable buildConstantTable(
     SmallVector<TypedAttr> values;
     for (auto dispatchOp : dispatchOps) {
       auto operand = dispatchOp.getUniformOperands()[idx];
-      Attribute constantValue;
+      TypedAttr constantValue;
       matchPattern(operand, m_Constant(&constantValue));
       values.push_back(constantValue);
       set.locs.insert(operand.getLoc());
@@ -114,7 +116,7 @@ static ConstantTable buildConstantTable(
 // Builds a tensor<SITExOPERANDxTYPE> constant attribute.
 // This should probably be vector<> but that dialect has some issues with
 // expressing basic multi-dimension loads :/
-static Attribute buildConstantSetAttr(ConstantSet &set, OpBuilder &builder) {
+static TypedAttr buildConstantSetAttr(ConstantSet &set, OpBuilder &builder) {
   // TODO(benvanik): better definition of variable-width integers across HAL.
   // HACK: we can't handle index types in a few of the codegen backends (vulkan
   // at least); we convert index -> i32 here but we should probably have a
@@ -133,8 +135,8 @@ static Attribute buildConstantSetAttr(ConstantSet &set, OpBuilder &builder) {
     for (int64_t value = 0; value < valueCount; ++value) {
       auto valueAttr = set.values[value].second[site];
       if (storageType != valueAttr.getType()) {
-        valueAttr = IntegerAttr::get(storageType,
-                                     valueAttr.cast<IntegerAttr>().getInt());
+        valueAttr = IntegerAttr::get(
+            storageType, llvm::cast<IntegerAttr>(valueAttr).getInt());
       }
       flattenedAttrs.push_back(valueAttr);
     }
@@ -161,7 +163,7 @@ static Attribute buildConstantSetAttr(ConstantSet &set, OpBuilder &builder) {
 //
 // TODO(benvanik): maybe a dedicated lookup table op to make further combining
 // easier to do in a backend-generic way.
-static void insertConstantTableLookup(mlir::func::FuncOp funcOp,
+static void insertConstantTableLookup(mlir::FunctionOpInterface funcOp,
                                       ConstantTable &constantTable) {
   auto &entryBlock = funcOp.front();
   auto operandToArgMap =
@@ -280,18 +282,20 @@ static void insertDispatchSiteIdentifiers(
 // Since we've already deduplicated things we (in theory) don't have to worry
 // about introducing divergence. There's potential for later deduping to happen
 // while performing a second round of specialization per-backend.
-static void specializeDispatches(
-    IREE::Stream::ExecutableOp executableOp,
-    IREE::Stream::ExecutableExportOp exportOp,
-    SmallVector<IREE::Stream::CmdDispatchOp> &dispatchOps,
-    MemoizedCmdConstants &memoizedConstants) {
-  if (dispatchOps.empty()) return;  // no-op if no dispatches
+static void
+specializeDispatches(IREE::Stream::ExecutableOp executableOp,
+                     IREE::Stream::ExecutableExportOp exportOp,
+                     SmallVector<IREE::Stream::CmdDispatchOp> &dispatchOps,
+                     MemoizedCmdConstants &memoizedConstants) {
+  if (dispatchOps.empty())
+    return; // no-op if no dispatches
 
   auto funcOp = exportOp.lookupFunctionRef();
 
   // Build a constant table for unique per-dispatch constant values.
   auto constantTable = buildConstantTable(funcOp, dispatchOps);
-  if (constantTable.coveredOperands.none()) return;
+  if (constantTable.coveredOperands.none())
+    return;
 
   LLVM_DEBUG({
     AsmState asmState(executableOp->getParentOp());
@@ -322,20 +326,12 @@ static void specializeDispatches(
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-specialize-dispatches
+// --iree-stream-specialize-dispatches
 //===----------------------------------------------------------------------===//
 
-class SpecializeDispatchesPass
-    : public SpecializeDispatchesBase<SpecializeDispatchesPass> {
- public:
-  SpecializeDispatchesPass() = default;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::arith::ArithDialect>();
-    registry.insert<mlir::tensor::TensorDialect>();
-    registry.insert<IREE::Stream::StreamDialect>();
-  }
-
+struct SpecializeDispatchesPass
+    : public IREE::Stream::impl::SpecializeDispatchesPassBase<
+          SpecializeDispatchesPass> {
   void runOnOperation() override {
     SymbolTable symbolTable(getOperation());
 
@@ -363,14 +359,6 @@ class SpecializeDispatchesPass
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createSpecializeDispatchesPass() {
-  return std::make_unique<SpecializeDispatchesPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

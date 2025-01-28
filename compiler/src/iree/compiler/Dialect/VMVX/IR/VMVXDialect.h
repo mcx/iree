@@ -10,20 +10,14 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VMVX {
+namespace mlir::iree_compiler::IREE::VMVX {
 
 class VMVXDialect : public Dialect {
- public:
+public:
   explicit VMVXDialect(MLIRContext *context);
   static StringRef getDialectNamespace() { return "vmvx"; }
 };
 
-}  // namespace VMVX
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VMVX
 
-#endif  // IREE_COMPILER_DIALECT_VMVX_IR_VMVXDIALECT_H_
+#endif // IREE_COMPILER_DIALECT_VMVX_IR_VMVXDIALECT_H_

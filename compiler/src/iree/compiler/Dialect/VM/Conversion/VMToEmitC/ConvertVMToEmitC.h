@@ -12,22 +12,16 @@
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 void populateVMToEmitCPatterns(ConversionTarget &conversionTarget,
                                IREE::VM::EmitCTypeConverter &typeConverter,
                                RewritePatternSet &patterns);
 
-namespace IREE {
-namespace VM {
+} // namespace mlir::iree_compiler
 
+namespace mlir::iree_compiler::IREE::VM {
 std::unique_ptr<OperationPass<IREE::VM::ModuleOp>> createConvertVMToEmitCPass();
+} // namespace mlir::iree_compiler::IREE::VM
 
-}  // namespace VM
-}  // namespace IREE
-
-}  // namespace iree_compiler
-}  // namespace mlir
-
-#endif  // IREE_COMPILER_DIALECT_VM_CONVERSION_VMTOEMITC_CONVERTVMTOEMITC_H_
+#endif // IREE_COMPILER_DIALECT_VM_CONVERSION_VMTOEMITC_CONVERTVMTOEMITC_H_

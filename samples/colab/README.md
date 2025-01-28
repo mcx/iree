@@ -1,54 +1,27 @@
 # Google Colaboratory (Colab) Notebooks
 
+These [Colab](https://colab.google/) notebooks contain interactive sample
+applications using IREE's Python bindings and ML framework integrations.
+
 ## Notebooks
 
-### [edge_detection\.ipynb](edge_detection.ipynb)
-
-Constructs a TF module for performing image edge detection and runs it using
-IREE
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/edge_detection.ipynb)
-
-### [low_level_invoke_function\.ipynb](low_level_invoke_function.ipynb)
-
-Shows off some concepts of the low level IREE python bindings
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/low_level_invoke_function.ipynb)
-
-### [mnist_training\.ipynb](mnist_training.ipynb)
-
-Compile, train and execute a TensorFlow Keras neural network with IREE
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/mnist_training.ipynb)
-
-### [resnet\.ipynb](resnet.ipynb)
-
-Loads a pretrained
-[ResNet50](https://www.tensorflow.org/api_docs/python/tf/keras/applications/ResNet50)
-model and runs it using IREE
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/resnet.ipynb)
-
-### [tensorflow_hub_import\.ipynb](tensorflow_hub_import.ipynb)
-
-Downloads a pretrained
-[MobileNet V2](https://tfhub.dev/google/tf2-preview/mobilenet_v2/classification)
-model, pre-processes it for import, then compiles it using IREE
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/tensorflow_hub_import.ipynb)
-
-### [tflite_text_classification\.ipynb](tflite_text_classification.ipynb)
-
-Downloads a pretrained
-[TFLite text classification](https://www.tensorflow.org/lite/examples/text_classification/overview)
-model, and runs it using TFLite and IREE
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/openxla/iree/blob/main/samples/colab/tflite_text_classification.ipynb)
+Framework | Notebook file | Description | Link
+--------  | ------------- | ----------- | ----
+Generic | [low_level_invoke_function](low_level_invoke_function.ipynb) | Shows low level IREE python binding concepts | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/low_level_invoke_function.ipynb)
+PyTorch | [pytorch_aot_advanced](pytorch_aot_advanced.ipynb) | Uses [Turbine](https://github.com/iree-org/iree-turbine) to export a PyTorch program | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/pytorch_aot_advanced.ipynb)
+PyTorch | [pytorch_aot_simple](pytorch_aot_simple.ipynb) | Uses [Turbine](https://github.com/iree-org/iree-turbine) to export a simple PyTorch program | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/pytorch_aot_simple.ipynb)
+PyTorch | [pytorch_jit](pytorch_jit.ipynb) | Uses [Turbine](https://github.com/iree-org/iree-turbine) for eager execution in a PyTorch session | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/pytorch_jit.ipynb)
+PyTorch | [pytorch_huggingface_whisper](pytorch_huggingface_whisper.ipynb) | Imports the [Whisper](https://huggingface.co/openai/whisper-small) model from [Hugging Face](https://huggingface.co/) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/pytorch_huggingface_whisper.ipynb)
+TensorFlow | [tensorflow_edge_detection](tensorflow_edge_detection.ipynb) |Performs image edge detection | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/tensorflow_edge_detection.ipynb)
+TensorFlow | [tensorflow_hub_import](tensorflow_hub_import.ipynb) | Imports a [MobileNet V2](https://tfhub.dev/google/tf2-preview/mobilenet_v2/classification) model from [TensorFlow Hub](https://tfhub.dev/) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/tensorflow_hub_import.ipynb)
+TensorFlow | [tensorflow_mnist_training](tensorflow_mnist_training.ipynb) | Compiles, trains, and executes a neural network | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/tensorflow_mnist_training.ipynb)
+TensorFlow | [tensorflow_resnet](tensorflow_resnet.ipynb) | Runs a pretrained [ResNet50](https://www.tensorflow.org/api_docs/python/tf/keras/applications/ResNet50) model | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/tensorflow_resnet.ipynb)
+TFLite | [tflite_text_classification](tflite_text_classification.ipynb) | Runs a pretrained [text classification](https://www.tensorflow.org/lite/examples/text_classification/overview) model | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/iree-org/iree/blob/main/samples/colab/tflite_text_classification.ipynb)
 
 ## Working with GitHub
 
 Refer to
-[Colab's GitHub demo](https://colab.research.google.com/github/googlecolab/colabtools/blob/master/notebooks/colab-github-demo.ipynb)
+[Colab's GitHub demo](https://colab.research.google.com/github/googlecolab/colabtools/blob/main/notebooks/colab-github-demo.ipynb)
 for general information about using Colab with GitHub.
 
 To make changes to a notebook in this repository, one possible workflow is:
@@ -59,3 +32,7 @@ To make changes to a notebook in this repository, one possible workflow is:
 *   Download the modified notebook using `File > Download .ipynb`
 *   Move the downloaded notebook file into a clone of this repository and submit
     a pull request
+
+## Testing
+
+This notebooks are tested continuously by the samples.yml CI job.

@@ -11,10 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "iree/base/alignment.h"
 #include "iree/base/api.h"
 #include "iree/base/internal/atomics.h"
-#include "iree/base/string_builder.h"
 #include "iree/vm/ref.h"
 
 #ifdef __cplusplus
@@ -38,7 +36,11 @@ typedef enum iree_vm_function_linkage_e {
   // Function is an export from the module.
   IREE_VM_FUNCTION_LINKAGE_EXPORT = 2,
   // Function is an import from another module that may be unavailable.
+  // This is a hint that failures should be lightweight/not reported.
   IREE_VM_FUNCTION_LINKAGE_IMPORT_OPTIONAL = 3,
+  // Function is an export from the module that may be unavailable.
+  // This is a hint that failures should be lightweight/not reported.
+  IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL = 4,
 } iree_vm_function_linkage_t;
 
 // A function reference that can be used with the iree_vm_function_* methods.
@@ -339,6 +341,12 @@ typedef enum iree_vm_signal_e {
   //
   // Modules are walked in reverse registration order (C->B->A).
   IREE_VM_SIGNAL_LOW_MEMORY = 2,
+
+  // Program has been forked from a parent context and can re-run any
+  // initialization required or clear any state that should not be inherited.
+  //
+  // Modules are walked in registration order (A->B->C).
+  IREE_VM_SIGNAL_FORK = 3,
 } iree_vm_signal_t;
 
 // Defines an interface that can be used to reflect and execute functions on a
@@ -377,8 +385,12 @@ typedef struct iree_vm_module_t {
 
   // Looks up a function with the given name and linkage in the module.
   // This may perform a linear scan and results should be cached.
+  // An optional |expected_signature| can be specified in cases where the
+  // module may be able to provide additional validation or versioning based on
+  // it. Implementations should not assume all lookups will include a signature.
   iree_status_t(IREE_API_PTR* lookup_function)(
       void* self, iree_vm_function_linkage_t linkage, iree_string_view_t name,
+      const iree_vm_function_signature_t* expected_signature,
       iree_vm_function_t* out_function);
 
   // Gets one or more pieces of function information:
@@ -400,10 +412,10 @@ typedef struct iree_vm_module_t {
       void* self, iree_vm_function_linkage_t linkage, iree_host_size_t ordinal,
       iree_host_size_t index, iree_string_pair_t* out_attr);
 
-  // Resolves a stack |frame| from the module to a |out_source_location|, if
-  // debug information is available.
+  // Resolves a |function| at |pc| from the module to a |out_source_location|,
+  // if debug information is available.
   iree_status_t(IREE_API_PTR* resolve_source_location)(
-      void* self, iree_vm_stack_frame_t* frame,
+      void* self, iree_vm_function_t function, iree_vm_source_offset_t pc,
       iree_vm_source_location_t* out_source_location);
 
   // Allocates module state data.
@@ -414,6 +426,15 @@ typedef struct iree_vm_module_t {
   // Frees module state data.
   void(IREE_API_PTR* free_state)(void* self,
                                  iree_vm_module_state_t* module_state);
+
+  // Forks the module state into a new state. All global resources should be
+  // retained by-reference. After all module state is cloned the fork signal
+  // will be sent to all modules that have been forked. The provided |allocator|
+  // must be used for the new child state though any referenced resources may
+  // still use the original allocator used during alloc_state.
+  iree_status_t(IREE_API_PTR* fork_state)(
+      void* self, iree_vm_module_state_t* parent_state,
+      iree_allocator_t allocator, iree_vm_module_state_t** out_child_state);
 
   // Resolves the import with the given ordinal to |function|.
   // The function is guaranteed to remain valid for the lifetime of the module
@@ -508,11 +529,11 @@ IREE_API_EXPORT iree_status_t iree_vm_module_lookup_function_by_ordinal(
     const iree_vm_module_t* module, iree_vm_function_linkage_t linkage,
     iree_host_size_t ordinal, iree_vm_function_t* out_function);
 
-// Resolves a stack |frame| from the module to a |out_source_location|, if
+// Resolves a |function| at |pc| from the module to a |out_source_location|, if
 // debug information is available.
 IREE_API_EXPORT iree_status_t iree_vm_module_resolve_source_location(
-    const iree_vm_module_t* module, iree_vm_stack_frame_t* frame,
-    iree_vm_source_location_t* out_source_location);
+    const iree_vm_module_t* module, iree_vm_function_t function,
+    iree_vm_source_offset_t pc, iree_vm_source_location_t* out_source_location);
 
 //===----------------------------------------------------------------------===//
 // iree_vm_function_t
@@ -537,7 +558,7 @@ IREE_API_EXPORT iree_string_view_t iree_vm_function_lookup_attr_by_name(
 // of the module. Note that not all functions have reflection attributes.
 //
 // For more information on the function ABI and its reflection metadata see:
-// docs/developers/design_docs/function_abi.md
+// https://iree.dev/developers/design-docs/function-abi/.
 //
 // Returns IREE_STATUS_OUT_OF_RANGE if index >= the number of attributes for
 // the function.

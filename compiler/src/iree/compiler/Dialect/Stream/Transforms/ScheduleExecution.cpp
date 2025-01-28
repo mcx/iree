@@ -8,14 +8,14 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -27,14 +27,14 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/TopologicalSortUtils.h"
 
 #define DEBUG_TYPE "iree-stream-schedule-execution"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_SCHEDULEEXECUTIONPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
 namespace {
 
 // Incremental builder for a partitioned region of executable work.
@@ -56,11 +56,12 @@ struct ExecutePartitionBuilder {
     // This is at the last op in the partition.
     Operation *insertionPt = nullptr;
     for (auto *op : partition->ops) {
-      if (op->getBlock() != parentBlock) continue;
+      if (op->getBlock() != parentBlock)
+        continue;
       if (!insertionPt) {
-        insertionPt = op;  // first defining op
+        insertionPt = op; // first defining op
       } else if (insertionPt->isBeforeInBlock(op)) {
-        insertionPt = op;  // moving insertion point down
+        insertionPt = op; // moving insertion point down
       }
     }
     OpBuilder parentBuilder(context);
@@ -82,7 +83,8 @@ struct ExecutePartitionBuilder {
       resultTypes.push_back(out.getType());
       auto resultSize = IREE::Util::SizeAwareTypeInterface::queryValueSize(
           fusedLoc, out, parentBuilder);
-      if (resultSize) resultSizes.push_back(resultSize);
+      if (resultSize)
+        resultSizes.push_back(resultSize);
     }
     SmallVector<Value> operands;
     SmallVector<Type> operandTypes;
@@ -91,12 +93,14 @@ struct ExecutePartitionBuilder {
     operandTypes.reserve(partition->ins.size());
     operandSizes.reserve(partition->ins.size());
     for (auto in : partition->ins) {
-      if (!in.getType().isa<IREE::Stream::ResourceType>()) continue;
+      if (!llvm::isa<IREE::Stream::ResourceType>(in.getType()))
+        continue;
       operands.push_back(in);
       operandTypes.push_back(in.getType());
       auto operandSize = IREE::Util::SizeAwareTypeInterface::queryValueSize(
           fusedLoc, in, parentBuilder);
-      if (operandSize) operandSizes.push_back(operandSize);
+      if (operandSize)
+        operandSizes.push_back(operandSize);
     }
 
     // TODO(benvanik): tie operands, or leave to canonicalization.
@@ -132,7 +136,8 @@ struct ExecutePartitionBuilder {
   //
   // Returns true if the operation was cloned into the partition.
   bool visit(Operation *op) {
-    if (!partition->ops.contains(op)) return false;
+    if (!partition->ops.contains(op))
+      return false;
 
     // Clone the op into the partition and remap it.
     auto *clonedOp = builder.clone(*op, mapping);
@@ -147,8 +152,8 @@ struct ExecutePartitionBuilder {
     // want to preserve those as long as possible.
     if (auto affinityOp =
             dyn_cast<IREE::Stream::AffinityOpInterface>(clonedOp)) {
-      if (affinityOp.getAffinity() == partition->affinity) {
-        affinityOp.setAffinity(nullptr);
+      if (affinityOp.getAffinityAttr() == partition->affinity) {
+        affinityOp.setAffinityAttr(nullptr);
       }
     }
 
@@ -166,7 +171,8 @@ struct ExecutePartitionBuilder {
       results.push_back(newResult);
       auto resultSize = IREE::Util::SizeAwareTypeInterface::queryValueSize(
           executeOp.getLoc(), newResult, builder);
-      if (resultSize) resultSizes.push_back(resultSize);
+      if (resultSize)
+        resultSizes.push_back(resultSize);
     }
     builder.create<IREE::Stream::YieldOp>(executeOp.getLoc(), results,
                                           resultSizes);
@@ -196,7 +202,8 @@ static SmallVector<Block *, 8> sortBlocksInDominanceOrder(Region &region) {
   }
   llvm::SmallSetVector<Block *, 8> markedBlocks;
   std::function<void(Block *)> visit = [&](Block *block) {
-    if (markedBlocks.count(block) > 0) return;
+    if (markedBlocks.count(block) > 0)
+      return;
     for (auto *childBlock : dominanceInfo.getNode(block)->children()) {
       visit(childBlock->getBlock());
     }
@@ -210,14 +217,107 @@ static SmallVector<Block *, 8> sortBlocksInDominanceOrder(Region &region) {
   return orderedBlocks;
 }
 
-class ScheduleExecutionPass
-    : public ScheduleExecutionBase<ScheduleExecutionPass> {
- public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
+LogicalResult processRegion(Location loc, MLIRContext *context, Region &region,
+                            const PartitioningConfigAttr &configAttr) {
+  for (auto *block : sortBlocksInDominanceOrder(region)) {
+    // Compute a set of partitions covering all of the streamable ops in the
+    // block.
+    auto partitionSet = partitionStreamableOps(configAttr, block);
+    if (partitionSet.empty())
+      continue;
+    if (failed(partitionSet.verify(loc))) {
+      return failure();
+    }
+
+    // Create partition builders for each partition.
+    // We'll clone ops into each and insert them into the block at the
+    // appropriate position (first use... probably).
+    IRMapping mapping;
+    SmallVector<ExecutePartitionBuilder> partitionBuilders;
+    partitionBuilders.reserve(partitionSet.size());
+    for (auto partition : llvm::enumerate(partitionSet.partitions)) {
+      partitionBuilders.push_back(ExecutePartitionBuilder(
+          block, partition.index(), &partition.value(), mapping, context));
+    }
+
+    // Walk over each op in the original block and find those that need to be
+    // partitioned. Each partition builder may clone the op into itself. The
+    // op will always be left in the original block and we'll rely on DCE to
+    // remove the ones no longer required. This is not a good approach as it
+    // creates a lot of new IR (up to O(op*partitions)).
+    SetVector<Operation *> deadOps;
+    for (auto &op : *block) {
+      if (op.hasTrait<OpTrait::IsTerminator>())
+        continue;
+      for (auto &partitionBuilder : partitionBuilders) {
+        partitionBuilder.visit(&op);
+      }
+      if (isa<IREE::Stream::StreamableOpInterface>(op)) {
+        deadOps.insert(&op);
+      }
+    }
+
+    // Apply remapping for values captured/escaping partitions.
+    // We must do this per block as we'll be updating dominated block values.
+    for (auto &partitionBuilder : partitionBuilders) {
+      // Finish construction and insert the yield.
+      auto executeOp = partitionBuilder.finish();
+
+      OpBuilder builder(executeOp);
+      builder.setInsertionPointAfter(executeOp);
+      for (auto [oldResult, newResult, newResultSize] : llvm::zip_equal(
+               partitionBuilder.partition->outs, executeOp.getResults(),
+               executeOp.getResultSizes())) {
+        // Insert one await per result. We could batch them all but that would
+        // prematurely tie their lifetimes together. By having unique awaits
+        // we allow propagation to move the waits further to where the values
+        // are used (including right into other execution regions).
+        auto awaitOp = builder.create<IREE::Stream::TimepointAwaitOp>(
+            executeOp.getLoc(), newResult, newResultSize,
+            executeOp.getResultTimepoint());
+
+        // Explicitly copy the Value since it is marked as const.
+        Value toBeDeleted = oldResult;
+
+        toBeDeleted.replaceAllUsesWith(awaitOp.getResults().front());
+        deadOps.insert(oldResult.getDefiningOp());
+      }
+    }
+    for (auto *deadOp : llvm::reverse(deadOps)) {
+      deadOp->erase();
+    }
+
+    // Sort the ops in the execution region. This is safe because we are
+    // still unaliased and SSA values imply ordering.
+    mlir::sortTopologically(block);
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "\nPartitions constructed:\n";
+      block->dump();
+    });
   }
 
+  for (auto *block : sortBlocksInDominanceOrder(region)) {
+    for (auto &op : *block) {
+      if (isa<scf::SCFDialect>(op.getDialect())) {
+        for (auto &subregion : op.getRegions()) {
+          if (failed(processRegion(loc, context, subregion, configAttr)))
+            return failure();
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// --iree-stream-schedule-execution
+//===----------------------------------------------------------------------===//
+
+struct ScheduleExecutionPass
+    : public IREE::Stream::impl::ScheduleExecutionPassBase<
+          ScheduleExecutionPass> {
   void runOnOperation() override {
     auto *context = &getContext();
     auto parentOp = getOperation();
@@ -235,81 +335,8 @@ class ScheduleExecutionPass
     // order so that we are sure if we replace values that dominate other blocks
     // they see the correct values.
     auto &region = *parentOp.getCallableRegion();
-    for (auto *block : sortBlocksInDominanceOrder(region)) {
-      // Compute a set of partitions covering all of the streamable ops in the
-      // block.
-      auto partitionSet = partitionStreamableOps(configAttr, block);
-      if (partitionSet.empty()) continue;
-      if (failed(partitionSet.verify(parentOp.getLoc()))) {
-        return signalPassFailure();
-      }
-
-      // Create partition builders for each partition.
-      // We'll clone ops into each and insert them into the block at the
-      // appropriate position (first use... probably).
-      IRMapping mapping;
-      SmallVector<ExecutePartitionBuilder> partitionBuilders;
-      partitionBuilders.reserve(partitionSet.size());
-      for (auto partition : llvm::enumerate(partitionSet.partitions)) {
-        partitionBuilders.push_back(ExecutePartitionBuilder(
-            block, partition.index(), &partition.value(), mapping, context));
-      }
-
-      // Walk over each op in the original block and find those that need to be
-      // partitioned. Each partition builder may clone the op into itself. The
-      // op will always be left in the original block and we'll rely on DCE to
-      // remove the ones no longer required. This is not a good approach as it
-      // creates a lot of new IR (up to O(op*partitions)).
-      SetVector<Operation *> deadOps;
-      for (auto &op : *block) {
-        if (op.hasTrait<OpTrait::IsTerminator>()) continue;
-        for (auto &partitionBuilder : partitionBuilders) {
-          partitionBuilder.visit(&op);
-        }
-        if (isa<IREE::Stream::StreamableOpInterface>(op)) {
-          deadOps.insert(&op);
-        }
-      }
-
-      // Apply remapping for values captured/escaping partitions.
-      // We must do this per block as we'll be updating dominated block values.
-      for (auto &partitionBuilder : partitionBuilders) {
-        // Finish construction and insert the yield.
-        auto executeOp = partitionBuilder.finish();
-
-        OpBuilder builder(executeOp);
-        builder.setInsertionPointAfter(executeOp);
-        for (auto [oldResult, newResult, newResultSize] : llvm::zip_equal(
-                 partitionBuilder.partition->outs, executeOp.getResults(),
-                 executeOp.getResultSizes())) {
-          // Insert one await per result. We could batch them all but that would
-          // prematurely tie their lifetimes together. By having unique awaits
-          // we allow propagation to move the waits further to where the values
-          // are used (including right into other execution regions).
-          auto awaitOp = builder.create<IREE::Stream::TimepointAwaitOp>(
-              executeOp.getLoc(), newResult, newResultSize,
-              executeOp.getResultTimepoint());
-          if (executeOp.getAffinity().has_value()) {
-            awaitOp.setAffinityAttr(executeOp.getAffinityAttr());
-          }
-
-          oldResult.replaceAllUsesWith(awaitOp.getResults().front());
-          deadOps.insert(oldResult.getDefiningOp());
-        }
-
-        // Sort the ops in the execution region. This is safe because we are
-        // still unaliased and SSA values imply ordering.
-        mlir::sortTopologically(block);
-      }
-      for (auto *deadOp : llvm::reverse(deadOps)) {
-        deadOp->erase();
-      }
-
-      LLVM_DEBUG({
-        llvm::dbgs() << "\nPartitions constructed:\n";
-        block->dump();
-      });
-    }
+    if (failed(processRegion(parentOp.getLoc(), context, region, configAttr)))
+      return signalPassFailure();
 
     // Cleanup the dead ops.
     // TODO(benvanik): less work here - maybe no patterns to just force folding?
@@ -321,20 +348,12 @@ class ScheduleExecutionPass
       op.getCanonicalizationPatterns(patterns, context);
     }
     FrozenRewritePatternSet frozenPatterns(std::move(patterns));
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
+    if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
       return signalPassFailure();
     }
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<InterfacePass<CallableOpInterface>>
-createScheduleExecutionPass() {
-  return std::make_unique<ScheduleExecutionPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

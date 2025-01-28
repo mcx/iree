@@ -4,10 +4,11 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Common/PassUtils.h"
+#include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/LLVMCPU/DispatchABI.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
@@ -21,15 +22,16 @@
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ArmNeon2dToIntr/ArmNeon2dToIntr.h"
+#include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
 #include "mlir/Conversion/ComplexToLLVM/ComplexToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/LoweringOptions.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Conversion/LinalgToLLVM/LinalgToLLVM.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
@@ -38,26 +40,35 @@
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ArmNeon/ArmNeonDialect.h"
+#include "mlir/Dialect/ArmSVE/IR/ArmSVEDialect.h"
+#include "mlir/Dialect/ArmSVE/Transforms/Transforms.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
-#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
+#include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_CONVERTTOLLVMPASS
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h.inc"
 
 namespace {
 
@@ -101,10 +112,11 @@ struct ConvertHALEntryPointFuncOp
                              LLVMTypeConverter &typeConverter)
       : ConvertOpToLLVMWithABIPattern(abi, typeConverter,
                                       /*benefit=*/100) {}
-  LogicalResult matchAndRewrite(
-      func::FuncOp stdFuncOp, func::FuncOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
-    if (!stdFuncOp.isPublic()) return failure();
+  LogicalResult
+  matchAndRewrite(func::FuncOp stdFuncOp, func::FuncOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!stdFuncOp.isPublic())
+      return failure();
     FunctionType fnType = stdFuncOp.getFunctionType();
     if (fnType.getNumInputs() != 0 || fnType.getNumResults() != 0) {
       stdFuncOp->emitWarning()
@@ -121,7 +133,7 @@ struct ConvertHALEntryPointFuncOp
 
     // Copy all attributes onto the LLVM function except the ones handled by
     // MLIR implicitly.
-    SmallVector<NamedAttribute, 4> funcAttrs;
+    SmallVector<NamedAttribute> funcAttrs;
     for (auto attr : stdFuncOp->getAttrs()) {
       if (attr.getName() == SymbolTable::getSymbolAttrName() ||
           attr.getName() == stdFuncOp.getFunctionTypeAttrName()) {
@@ -135,8 +147,8 @@ struct ConvertHALEntryPointFuncOp
     auto llvmFuncType = LLVM::LLVMFunctionType::get(int32Type, abiInputTypes);
     auto llvmFuncOp = rewriter.create<LLVM::LLVMFuncOp>(
         stdFuncOp.getLoc(), stdFuncOp.getName(), llvmFuncType,
-        LLVM::Linkage::External, /*dso_local=*/false, /*cconv*/ LLVM::CConv::C,
-        funcAttrs);
+        LLVM::Linkage::External, /*dsoLocal=*/false, /*cconv=*/LLVM::CConv::C,
+        /*comdat=*/nullptr, funcAttrs);
     rewriter.inlineRegionBefore(stdFuncOp.getFunctionBody(),
                                 llvmFuncOp.getFunctionBody(), llvmFuncOp.end());
     if (failed(rewriter.convertRegionTypes(&llvmFuncOp.getFunctionBody(),
@@ -150,8 +162,10 @@ struct ConvertHALEntryPointFuncOp
     // can use the attributes.
     // (%arg0: environment, %arg1: dispatch_state, %arg2: workgroup_state)
     for (unsigned i = 0; i <= 2; ++i) {
-      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoAliasAttrName(),
-                            rewriter.getUnitAttr());
+      Attribute unit = rewriter.getUnitAttr();
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoAliasAttrName(), unit);
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNonNullAttrName(), unit);
+      llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getNoUndefAttrName(), unit);
       llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getAlignAttrName(),
                             rewriter.getI64IntegerAttr(16));
     }
@@ -171,7 +185,7 @@ struct ConvertHALEntryPointFuncOp
     // order to get any debug information (including just line tables) from MLIR
     // into LLVM IR.
     auto scopeAttr = HALDispatchABI::buildScopeAttr(
-        llvmFuncOp->getParentOfType<mlir::ModuleOp>(), llvmFuncOp.getName(),
+        llvmFuncOp->getParentOfType<mlir::ModuleOp>(), llvmFuncOp,
         getTypeConverter());
     llvmFuncOp->setLoc(FusedLoc::get(llvmFuncOp.getContext(),
                                      {llvmFuncOp->getLoc()}, scopeAttr));
@@ -190,15 +204,15 @@ struct ConvertHALExecutableConstantLoadOp
     : public ConvertOpToLLVMWithABIPattern<
           IREE::HAL::ExecutableConstantLoadOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::ExecutableConstantLoadOp loadOp,
-      IREE::HAL::ExecutableConstantLoadOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::ExecutableConstantLoadOp loadOp,
+                  IREE::HAL::ExecutableConstantLoadOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     auto resultType =
         typeConverter->convertType(loadOp->getResult(0).getType());
-    rewriter.replaceOp(
-        loadOp, abi.loadExecutableConstant(loadOp, loadOp.getKey(), resultType,
-                                           rewriter));
+    rewriter.replaceOp(loadOp,
+                       abi.loadExecutableConstant(loadOp, loadOp.getKey(),
+                                                  resultType, rewriter));
     return success();
   }
 };
@@ -209,10 +223,10 @@ struct ConvertHALExecutableConstantLoadOp
 struct ConvertHALInterfaceWorkgroupIDOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InterfaceWorkgroupIDOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupIDOp idOp,
-      IREE::HAL::InterfaceWorkgroupIDOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupIDOp idOp,
+                  IREE::HAL::InterfaceWorkgroupIDOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     int32_t dim = (int32_t)idOp.getDimension().getZExtValue();
     auto resultType = typeConverter->convertType(idOp->getResult(0).getType());
     rewriter.replaceOp(idOp,
@@ -228,10 +242,10 @@ struct ConvertHALInterfaceWorkgroupSizeOp
     : public ConvertOpToLLVMWithABIPattern<
           IREE::HAL::InterfaceWorkgroupSizeOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupSizeOp sizeOp,
-      IREE::HAL::InterfaceWorkgroupSizeOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupSizeOp sizeOp,
+                  IREE::HAL::InterfaceWorkgroupSizeOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     int32_t dim = (int32_t)sizeOp.getDimension().getZExtValue();
     auto resultType =
         typeConverter->convertType(sizeOp->getResult(0).getType());
@@ -248,10 +262,10 @@ struct ConvertHALInterfaceWorkgroupCountOp
     : public ConvertOpToLLVMWithABIPattern<
           IREE::HAL::InterfaceWorkgroupCountOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupCountOp countOp,
-      IREE::HAL::InterfaceWorkgroupCountOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupCountOp countOp,
+                  IREE::HAL::InterfaceWorkgroupCountOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     int32_t dim = (int32_t)countOp.getDimension().getZExtValue();
     auto resultType =
         typeConverter->convertType(countOp->getResult(0).getType());
@@ -267,11 +281,11 @@ struct ConvertHALInterfaceWorkgroupCountOp
 struct ConvertHALInterfaceConstantLoadOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InterfaceConstantLoadOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceConstantLoadOp loadOp,
-      IREE::HAL::InterfaceConstantLoadOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
-    int64_t index = loadOp.getIndex().getZExtValue();
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceConstantLoadOp loadOp,
+                  IREE::HAL::InterfaceConstantLoadOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    int64_t index = loadOp.getOrdinal().getZExtValue();
     auto resultType =
         typeConverter->convertType(loadOp->getResult(0).getType());
     rewriter.replaceOp(
@@ -287,20 +301,21 @@ struct ConvertHALInterfaceBindingSubspanOp
     : public ConvertOpToLLVMWithABIPattern<
           IREE::HAL::InterfaceBindingSubspanOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceBindingSubspanOp subspanOp,
-      IREE::HAL::InterfaceBindingSubspanOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp subspanOp,
+                  IREE::HAL::InterfaceBindingSubspanOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     MemRefType memRefType =
-        subspanOp->getResult(0).getType().dyn_cast<MemRefType>();
+        llvm::dyn_cast<MemRefType>(subspanOp->getResult(0).getType());
     if (!memRefType) {
       return rewriter.notifyMatchFailure(
           subspanOp,
           "failed to convert interface.binding.subspan result to memref type");
     }
-    auto memRefDesc = abi.loadBinding(
-        subspanOp, operands.getBindingAttr().getInt(), operands.getByteOffset(),
-        memRefType, operands.getDynamicDims(), rewriter);
+    auto memRefDesc =
+        abi.loadBinding(subspanOp, subspanOp.getBinding().getSExtValue(),
+                        operands.getByteOffset(), memRefType,
+                        operands.getDynamicDims(), rewriter);
     rewriter.replaceOp(subspanOp, {memRefDesc});
     return success();
   }
@@ -316,13 +331,11 @@ struct InstrumentationEntry {
 };
 
 // entrySize must be 16-byte aligned
-static InstrumentationEntry acquireInstrumentationEntry(Location loc,
-                                                        Value buffer,
-                                                        Value bufferPtr,
-                                                        Value entrySize,
-                                                        OpBuilder &builder) {
+static InstrumentationEntry
+acquireInstrumentationEntry(Location loc, Value buffer, Value bufferPtr,
+                            Value entrySize, OpBuilder &builder) {
   auto i64Type = builder.getI64Type();
-  auto bufferType = buffer.getType().cast<MemRefType>();
+  auto bufferType = llvm::cast<MemRefType>(buffer.getType());
   int64_t totalBufferSize =
       (bufferType.getNumElements() * bufferType.getElementTypeBitWidth()) / 8;
   int64_t headOffset = totalBufferSize - 8;
@@ -334,20 +347,19 @@ static InstrumentationEntry acquireInstrumentationEntry(Location loc,
 
   Value offsetIndex =
       builder.create<LLVM::ConstantOp>(loc, i64Type, headOffset);
-  Value offsetPtr =
-      builder.create<LLVM::GEPOp>(loc, basePtr.getType(), basePtr, offsetIndex,
-                                  /*inbounds=*/true);
-  Value offsetPtrI64 = builder.create<LLVM::BitcastOp>(
-      loc, LLVM::LLVMPointerType::get(i64Type), offsetPtr);
+  auto i8Type = builder.getI8Type();
+  Value offsetPtr = builder.create<LLVM::GEPOp>(loc, basePtr.getType(), i8Type,
+                                                basePtr, offsetIndex,
+                                                /*inbounds=*/true);
   Value rawOffset = builder.create<LLVM::AtomicRMWOp>(
-      loc, LLVM::AtomicBinOp::add, offsetPtrI64, entrySize,
+      loc, LLVM::AtomicBinOp::add, offsetPtr, entrySize,
       LLVM::AtomicOrdering::monotonic);
   Value offsetMask =
       builder.create<LLVM::ConstantOp>(loc, i64Type, ringSize - 1);
   Value wrappedOffset = builder.create<LLVM::AndOp>(loc, rawOffset, offsetMask);
 
-  Value entryPtr = builder.create<LLVM::GEPOp>(loc, basePtr.getType(), basePtr,
-                                               wrappedOffset);
+  Value entryPtr = builder.create<LLVM::GEPOp>(loc, basePtr.getType(), i8Type,
+                                               basePtr, wrappedOffset);
 
   return {basePtr, entryPtr, wrappedOffset};
 }
@@ -371,14 +383,15 @@ static InstrumentationEntry appendInstrumentationEntry(
   builder.create<LLVM::StoreOp>(
       loc, entryStruct,
       builder.create<LLVM::BitcastOp>(
-          loc, LLVM::LLVMPointerType::get(entryType), entry.entryPtr),
+          loc, LLVM::LLVMPointerType::get(builder.getContext()),
+          entry.entryPtr),
       /*alignment=*/16);
 
   return entry;
 }
 
 static int64_t getMemoryAccessByteSize(Type type) {
-  if (auto vectorType = type.dyn_cast<VectorType>()) {
+  if (auto vectorType = llvm::dyn_cast<VectorType>(type)) {
     return (vectorType.getNumElements() * vectorType.getElementTypeBitWidth()) /
            8;
   } else {
@@ -389,10 +402,10 @@ static int64_t getMemoryAccessByteSize(Type type) {
 struct ConvertHALInstrumentWorkgroupOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InstrumentWorkgroupOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InstrumentWorkgroupOp instrumentOp,
-      IREE::HAL::InstrumentWorkgroupOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InstrumentWorkgroupOp instrumentOp,
+                  IREE::HAL::InstrumentWorkgroupOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     auto loc = instrumentOp.getLoc();
     auto dataLayout =
         getTypeConverter()->getDataLayoutAnalysis()->getAbove(instrumentOp);
@@ -401,14 +414,14 @@ struct ConvertHALInstrumentWorkgroupOp
 
     auto entryType = LLVM::LLVMStructType::getLiteral(
         getContext(), {
-                          i32Type,  // header
-                          i32Type,  // workgroup_id_x
-                          i32Type,  // workgroup_id_y
-                          i32Type,  // workgroup_id_z
-                          i32Type,  // workgroup_count_x
-                          i32Type,  // workgroup_count_y
-                          i32Type,  // workgroup_count_z
-                          i32Type,  // processor_id
+                          i32Type, // header
+                          i32Type, // workgroup_id_x
+                          i32Type, // workgroup_id_y
+                          i32Type, // workgroup_id_z
+                          i32Type, // workgroup_count_x
+                          i32Type, // workgroup_count_y
+                          i32Type, // workgroup_count_z
+                          i32Type, // processor_id
                       });
 
     // 8 bit tag = 00 | 24 bit dispatch id
@@ -417,7 +430,7 @@ struct ConvertHALInstrumentWorkgroupOp
     Value rawDispatchId = instrumentOp.getDispatchId();
     Value header = rewriter.create<LLVM::ShlOp>(
         loc, i32Type, rawDispatchId,
-        rewriter.create<LLVM::ConstantOp>(loc, i32Type, 8));  // | 8bit tag
+        rewriter.create<LLVM::ConstantOp>(loc, i32Type, 8)); // | 8bit tag
 
     auto entry = appendInstrumentationEntry(
         loc, instrumentOp.getBuffer(), operands.getBuffer(), entryType,
@@ -448,69 +461,69 @@ struct ConvertHALInstrumentWorkgroupOp
   }
 };
 
-static Optional<uint64_t> mapValueType(Type type) {
-  return TypeSwitch<Type, Optional<uint64_t>>(type)
-      .Case<IntegerType>([&](Type type) -> Optional<uint64_t> {
+static std::optional<uint64_t> mapValueType(Type type) {
+  return TypeSwitch<Type, std::optional<uint64_t>>(type)
+      .Case<IntegerType>([&](Type type) -> std::optional<uint64_t> {
         if (type.isUnsignedInteger()) {
           switch (type.getIntOrFloatBitWidth()) {
-            case 8:
-              return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_8;
-            case 16:
-              return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_16;
-            case 32:
-              return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_32;
-            case 64:
-              return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_64;
-            default:
-              return std::nullopt;
+          case 8:
+            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_8;
+          case 16:
+            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_16;
+          case 32:
+            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_32;
+          case 64:
+            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_UINT_64;
+          default:
+            return std::nullopt;
           }
         }
         switch (type.getIntOrFloatBitWidth()) {
-          case 8:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_8;
-          case 16:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_16;
-          case 32:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_32;
-          case 64:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_64;
-          default:
-            return std::nullopt;
+        case 8:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_8;
+        case 16:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_16;
+        case 32:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_32;
+        case 64:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_64;
+        default:
+          return std::nullopt;
         }
       })
-      .Case<FloatType>([&](Type type) -> Optional<uint64_t> {
+      .Case<FloatType>([&](Type type) -> std::optional<uint64_t> {
         if (type.isBF16()) {
           return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_BFLOAT_16;
         }
         switch (type.getIntOrFloatBitWidth()) {
-          case 16:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_16;
-          case 32:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_32;
-          case 64:
-            return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_64;
-          default:
-            return std::nullopt;
+        case 16:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_16;
+        case 32:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_32;
+        case 64:
+          return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_FLOAT_64;
+        default:
+          return std::nullopt;
         }
       })
-      .Case<IndexType>([&](Type type) -> Optional<uint64_t> {
+      .Case<IndexType>([&](Type type) -> std::optional<uint64_t> {
         return IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_SINT_64;
       })
-      .Default([&](Type) -> Optional<uint64_t> { return std::nullopt; });
+      .Default([&](Type) -> std::optional<uint64_t> { return std::nullopt; });
 }
 
 struct ConvertHALInstrumentValueOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InstrumentValueOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InstrumentValueOp instrumentOp,
-      IREE::HAL::InstrumentValueOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InstrumentValueOp instrumentOp,
+                  IREE::HAL::InstrumentValueOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     auto loc = instrumentOp.getLoc();
 
     // Only convert ops we can handle, otherwise warn and discard.
-    Optional<uint64_t> valueType;
-    if (operands.getOperand().getType().isa<LLVM::LLVMPointerType>()) {
+    std::optional<uint64_t> valueType;
+    if (llvm::isa<LLVM::LLVMPointerType>(operands.getOperand().getType())) {
       valueType = IREE_INSTRUMENT_DISPATCH_VALUE_TYPE_POINTER;
     } else {
       valueType = mapValueType(instrumentOp.getType());
@@ -529,8 +542,8 @@ struct ConvertHALInstrumentValueOp
 
     auto entryType =
         LLVM::LLVMStructType::getLiteral(getContext(), {
-                                                           i64Type,  // header
-                                                           i64Type,  // value
+                                                           i64Type, // header
+                                                           i64Type, // value
                                                        });
 
     // 8 bit tag
@@ -570,10 +583,10 @@ struct ConvertHALInstrumentValueOp
 struct ConvertHALInstrumentMemoryLoadOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InstrumentMemoryLoadOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InstrumentMemoryLoadOp instrumentOp,
-      IREE::HAL::InstrumentMemoryLoadOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InstrumentMemoryLoadOp instrumentOp,
+                  IREE::HAL::InstrumentMemoryLoadOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     auto loc = instrumentOp.getLoc();
     auto dataLayout =
         getTypeConverter()->getDataLayoutAnalysis()->getAbove(instrumentOp);
@@ -581,8 +594,8 @@ struct ConvertHALInstrumentMemoryLoadOp
 
     auto entryType =
         LLVM::LLVMStructType::getLiteral(getContext(), {
-                                                           i64Type,  // header
-                                                           i64Type,  // address
+                                                           i64Type, // header
+                                                           i64Type, // address
                                                        });
 
     // 8 bit tag = 100 (read), 101 (write)
@@ -597,7 +610,7 @@ struct ConvertHALInstrumentMemoryLoadOp
             (loadSize << 8) | IREE_INSTRUMENT_DISPATCH_TYPE_MEMORY_LOAD));
 
     Value loadPtr = getStridedElementPtr(
-        loc, instrumentOp.getBase().getType().cast<MemRefType>(),
+        loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
         operands.getBase(), operands.getIndices(), rewriter);
     Value addressI64 = rewriter.create<LLVM::PtrToIntOp>(loc, i64Type, loadPtr);
 
@@ -617,10 +630,10 @@ struct ConvertHALInstrumentMemoryLoadOp
 struct ConvertHALInstrumentMemoryStoreOp
     : public ConvertOpToLLVMWithABIPattern<IREE::HAL::InstrumentMemoryStoreOp> {
   using ConvertOpToLLVMWithABIPattern::ConvertOpToLLVMWithABIPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InstrumentMemoryStoreOp instrumentOp,
-      IREE::HAL::InstrumentMemoryStoreOpAdaptor operands,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InstrumentMemoryStoreOp instrumentOp,
+                  IREE::HAL::InstrumentMemoryStoreOpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
     auto loc = instrumentOp.getLoc();
     auto dataLayout =
         getTypeConverter()->getDataLayoutAnalysis()->getAbove(instrumentOp);
@@ -628,8 +641,8 @@ struct ConvertHALInstrumentMemoryStoreOp
 
     auto entryType =
         LLVM::LLVMStructType::getLiteral(getContext(), {
-                                                           i64Type,  // header
-                                                           i64Type,  // address
+                                                           i64Type, // header
+                                                           i64Type, // address
                                                        });
 
     // 8 bit tag = 10 (read), 11 (write)
@@ -644,7 +657,7 @@ struct ConvertHALInstrumentMemoryStoreOp
             (storeSize << 8) | IREE_INSTRUMENT_DISPATCH_TYPE_MEMORY_STORE));
 
     Value storePtr = getStridedElementPtr(
-        loc, instrumentOp.getBase().getType().cast<MemRefType>(),
+        loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
         operands.getBase(), operands.getIndices(), rewriter);
     Value addressI64 =
         rewriter.create<LLVM::PtrToIntOp>(loc, i64Type, storePtr);
@@ -662,6 +675,132 @@ struct ConvertHALInstrumentMemoryStoreOp
   }
 };
 
+/// Helper method to get information about extra operands that need to be
+/// appended to a function defn/call operation.
+static SmallVector<StringRef> getExtraFields(Operation *forOp) {
+  SmallVector<StringRef> extraFields;
+  if (auto extraFieldsAttr =
+          forOp->getAttrOfType<ArrayAttr>("hal.import.fields")) {
+    extraFields =
+        llvm::map_to_vector(extraFieldsAttr.getValue(), [](Attribute attr) {
+          return llvm::cast<StringAttr>(attr).getValue();
+        });
+  }
+  return extraFields;
+}
+
+/// Return calling convention to use for the operation.
+static IREE::HAL::CallingConvention getCallingConvention(Operation *forOp) {
+  auto cConv = IREE::HAL::CallingConvention::Default;
+  if (auto cConvAttr = forOp->getAttrOfType<IREE::HAL::CallingConventionAttr>(
+          "hal.import.cconv")) {
+    cConv = cConvAttr.getValue();
+  }
+  return cConv;
+}
+
+/// Lower func ops with specified ABI. Currently this pattern is triggered
+/// only for operations with the `hal.import.bitcode` attribute set.
+///
+/// Note: this is an LLVM::CallOp -> LLVM::CallOp rewrite that is introduced
+/// after all conversions are done. Importantly, this is not a conversion
+/// pattern.
+struct RewriteFuncOpABI : public OpRewritePattern<LLVM::LLVMFuncOp> {
+  RewriteFuncOpABI(HALDispatchABI &abi, LLVMTypeConverter &typeConverter)
+      : OpRewritePattern(&typeConverter.getContext()), abi(abi) {}
+
+  LogicalResult matchAndRewrite(LLVM::LLVMFuncOp funcOp,
+                                PatternRewriter &rewriter) const override {
+    if (!funcOp.isExternal()) {
+      return rewriter.notifyMatchFailure(funcOp, "skipping non-external calls");
+    }
+    if (!funcOp->hasAttr("hal.import.bitcode")) {
+      return rewriter.notifyMatchFailure(
+          funcOp, "callee is not imported using bitcode linkage; skipping");
+    }
+    IREE::HAL::CallingConvention cConv = getCallingConvention(funcOp);
+
+    SmallVector<StringRef> extraFields = getExtraFields(funcOp);
+    auto funcType = funcOp.getFunctionType();
+    FailureOr<LLVM::LLVMFunctionType> expectedType =
+        abi.getABIFunctionType(funcOp, cConv, funcType.getReturnTypes(),
+                               funcType.getParams(), extraFields);
+    if (failed(expectedType)) {
+      return rewriter.notifyMatchFailure(
+          funcOp,
+          "unable to get function type to match the calling convention");
+    }
+    if (abi.hasCompatibleFunctionSignature(
+            rewriter.getContext(), expectedType.value(),
+            funcType.getReturnTypes(), funcType.getParams())) {
+      return failure();
+    }
+    auto attrs = getPrunedAttributeList(
+        funcOp, llvm::to_vector(LLVM::LLVMFuncOp::getAttributeNames()));
+    SmallVector<DictionaryAttr> argAttrs;
+    if (auto currArgAttrs = funcOp.getArgAttrsAttr()) {
+      argAttrs = llvm::map_to_vector(currArgAttrs, [](Attribute attr) {
+        return llvm::cast<DictionaryAttr>(attr);
+      });
+    }
+    rewriter.create<LLVM::LLVMFuncOp>(
+        funcOp.getLoc(), funcOp.getName(), expectedType.value(),
+        funcOp.getLinkage(), funcOp.getDsoLocal(), funcOp.getCConv(),
+        /*comdat=*/nullptr, attrs, argAttrs, funcOp.getFunctionEntryCount());
+    rewriter.eraseOp(funcOp);
+    return success();
+  }
+
+private:
+  HALDispatchABI &abi;
+};
+
+/// Lower call ops with specified ABI. The ABI to use is looked up from the
+/// callee. Currently this pattern is triggered only for operations where the
+/// callee has the `hal.import.bitcode` attribute set.
+///
+/// Note: this is an LLVM::CallOp -> LLVM::CallOp rewrite that is introduced
+/// after all conversions are done. Importantly, this is not a conversion
+/// pattern.
+struct RewriteCallOpABI : public OpRewritePattern<LLVM::CallOp> {
+  RewriteCallOpABI(HALDispatchABI &abi, LLVMTypeConverter &typeConverter)
+      : OpRewritePattern(&typeConverter.getContext()), abi(abi) {}
+
+  LogicalResult matchAndRewrite(LLVM::CallOp callOp,
+                                PatternRewriter &rewriter) const override {
+    auto symbol = dyn_cast<SymbolRefAttr>(callOp.getCallableForCallee());
+    auto flatSymbol = llvm::dyn_cast_if_present<FlatSymbolRefAttr>(symbol);
+    if (!flatSymbol)
+      return failure();
+
+    // Ensure the target function is extern.
+    // To support conversion inserting calls in local patterns that can't add
+    // global function symbols we assume any missing callee is extern.
+    auto calleeOp =
+        SymbolTable::lookupNearestSymbolFrom<LLVM::LLVMFuncOp>(callOp, symbol);
+    if (!calleeOp || !calleeOp->hasAttr("hal.import.bitcode") ||
+        !calleeOp.isExternal()) {
+      return rewriter.notifyMatchFailure(
+          callOp, "callee is not imported using bitcode linakge; skipping");
+    }
+
+    IREE::HAL::CallingConvention cConv = getCallingConvention(calleeOp);
+    SmallVector<StringRef> extraFields = getExtraFields(calleeOp);
+
+    FailureOr<SmallVector<Value>> results = abi.materializeABI(
+        callOp, calleeOp.getSymName(), cConv, callOp->getResultTypes(),
+        callOp->getOperands(), extraFields, rewriter);
+    if (failed(results)) {
+      return failure();
+    }
+    rewriter.replaceOp(callOp, *results);
+    return success();
+  }
+
+private:
+  HALDispatchABI &abi;
+};
+
 /// Rewrites calls to extern functions to dynamic library import calls.
 /// The parent LLVMFuncOp must be compatible with HALDispatchABI.
 ///
@@ -672,15 +811,15 @@ struct RewriteExternCallOpToDynamicImportCallOp
     : public OpRewritePattern<LLVM::CallOp> {
   RewriteExternCallOpToDynamicImportCallOp(HALDispatchABI &abi,
                                            LLVMTypeConverter &typeConverter)
-      : OpRewritePattern(&typeConverter.getContext()),
-        abi(abi),
+      : OpRewritePattern(&typeConverter.getContext()), abi(abi),
         typeConverter(typeConverter) {}
   LogicalResult matchAndRewrite(LLVM::CallOp callOp,
                                 PatternRewriter &rewriter) const override {
     // Ignore indirect calls (they're probably already converted imports).
-    auto symbol = callOp.getCallableForCallee().dyn_cast<SymbolRefAttr>();
-    auto flatSymbol = symbol.dyn_cast_or_null<FlatSymbolRefAttr>();
-    if (!flatSymbol) return failure();
+    auto symbol = dyn_cast<SymbolRefAttr>(callOp.getCallableForCallee());
+    auto flatSymbol = llvm::dyn_cast_if_present<FlatSymbolRefAttr>(symbol);
+    if (!flatSymbol)
+      return failure();
 
     // Ensure the target function is extern.
     // To support conversion inserting calls in local patterns that can't add
@@ -698,10 +837,29 @@ struct RewriteExternCallOpToDynamicImportCallOp
     // let it fall through to the linker stage where it can be picked up either
     // from the runtime build (in the case of us producing static libraries) or
     // the user-specified object files (when producing dynamic libraries).
-    if (calleeOp->hasAttr("hal.import.static")) {
+    if (calleeOp->hasAttr("hal.import.static") ||
+        calleeOp->hasAttr("hal.import.bitcode")) {
       return rewriter.notifyMatchFailure(callOp,
                                          "external function is marked static "
                                          "and does not need an import wrapper");
+    }
+
+    // The call may need some additional internal fields appended.
+    SmallVector<StringRef> extraFields;
+    if (auto extraFieldsAttr =
+            calleeOp->getAttrOfType<ArrayAttr>("hal.import.fields")) {
+      for (auto extraFieldAttr : extraFieldsAttr) {
+        extraFields.push_back(
+            llvm::cast<StringAttr>(extraFieldAttr).getValue());
+      }
+    }
+
+    // Allow multiple imports to alias by having their name explicitly
+    // specified.
+    StringRef importName = flatSymbol.getValue();
+    if (auto importNameAttr =
+            calleeOp->getAttrOfType<StringAttr>("hal.import.name")) {
+      importName = importNameAttr.getValue();
     }
 
     // TODO(benvanik): way to determine if weak (maybe via linkage?).
@@ -709,8 +867,8 @@ struct RewriteExternCallOpToDynamicImportCallOp
 
     // Rewrite the call to a dynamic import call.
     SmallVector<Value> results = abi.wrapAndCallImport(
-        callOp, flatSymbol.getValue(), weak, callOp->getResultTypes(),
-        callOp->getOperands(), rewriter);
+        callOp, importName, weak, callOp->getResultTypes(),
+        callOp->getOperands(), extraFields, rewriter);
 
     rewriter.replaceOp(callOp, results);
     return success();
@@ -725,7 +883,7 @@ struct RewriteExternCallOpToDynamicImportCallOp
 /// any 64-bit constants that would otherwise prevent the code from being
 /// vectorized.
 class ExpandMulSIExtended : public OpRewritePattern<arith::MulSIExtendedOp> {
- public:
+public:
   using OpRewritePattern<arith::MulSIExtendedOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(arith::MulSIExtendedOp op,
@@ -739,10 +897,11 @@ class ExpandMulSIExtended : public OpRewritePattern<arith::MulSIExtendedOp> {
 
     Type wideType = rewriter.getIntegerType(64);
     // Shift amount necessary to extract the high bits from widened result.
-    Attribute shiftValAttr = rewriter.getI64IntegerAttr(32);
-    if (auto vecTy = resultType.dyn_cast<VectorType>()) {
+    TypedAttr shiftValAttr = rewriter.getI64IntegerAttr(32);
+    if (auto vecTy = llvm::dyn_cast<VectorType>(resultType)) {
       wideType = VectorType::get(vecTy.getShape(), wideType);
-      shiftValAttr = SplatElementsAttr::get(wideType, shiftValAttr);
+      shiftValAttr =
+          SplatElementsAttr::get(cast<ShapedType>(wideType), shiftValAttr);
     }
     Value shiftVal = rewriter.create<arith::ConstantOp>(loc, shiftValAttr);
 
@@ -762,33 +921,24 @@ class ExpandMulSIExtended : public OpRewritePattern<arith::MulSIExtendedOp> {
   }
 };
 
-class ConvertToLLVMPass : public ConvertToLLVMBase<ConvertToLLVMPass> {
- public:
-  ConvertToLLVMPass(bool reassociateFpReductions) {
-    targetReassociateFpReductions.setValue(reassociateFpReductions);
+class ConvertToLLVMPass
+    : public impl::ConvertToLLVMPassBase<ConvertToLLVMPass> {
+public:
+  using impl::ConvertToLLVMPassBase<ConvertToLLVMPass>::ConvertToLLVMPassBase;
+  explicit ConvertToLLVMPass(bool reassociateFpReductions) {
+    this->reassociateFpReductions = reassociateFpReductions;
   }
-  ConvertToLLVMPass(const ConvertToLLVMPass &pass) {}
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<LLVM::LLVMDialect, arm_neon::ArmNeonDialect>();
+    registry.insert<arith::ArithDialect, math::MathDialect, func::FuncDialect,
+                    memref::MemRefDialect, linalg::LinalgDialect,
+                    tosa::TosaDialect, scf::SCFDialect, vector::VectorDialect,
+                    arm_neon::ArmNeonDialect, arm_sve::ArmSVEDialect,
+                    LLVM::LLVMDialect>();
   }
-
   void runOnOperation() override;
-
- private:
-  Option<std::string> targetTriple{
-      *this, "target-triple", llvm::cl::desc("Code generation target triple."),
-      llvm::cl::init("")};
-  Option<std::string> targetDataLayout{
-      *this, "target-data-layout",
-      llvm::cl::desc("Code generation target data layout."),
-      llvm::cl::init("")};
-  Option<bool> targetReassociateFpReductions{
-      *this, "target-reassociate-fp-reductions",
-      llvm::cl::desc("Code generation target reassociate FP reductions."),
-      llvm::cl::init("false")};
 };
 
-}  // namespace
+} // namespace
 
 static std::string getStringAttrFromTargetAttr(ModuleOp module,
                                                StringRef attrName) {
@@ -799,15 +949,14 @@ static std::string getStringAttrFromTargetAttr(ModuleOp module,
 
 void ConvertToLLVMPass::runOnOperation() {
   auto module = getOperation();
-  std::string dataLayoutStr = targetDataLayout.getValue();
+  std::string dataLayoutStr = targetDataLayout;
   if (targetDataLayout.empty()) {
     dataLayoutStr = getStringAttrFromTargetAttr(module, "data_layout");
   }
-  std::string targetTripleStr = targetTriple.getValue();
+  std::string targetTripleStr = targetTriple;
   if (targetTripleStr.empty()) {
     targetTripleStr = getStringAttrFromTargetAttr(module, "target_triple");
   }
-
   // Add required attributes to the module so that the lowering knows how to
   // handle structs and data layouts.
   module->setAttr(LLVM::LLVMDialect::getTargetTripleAttrName(),
@@ -819,16 +968,23 @@ void ConvertToLLVMPass::runOnOperation() {
   {
     RewritePatternSet patterns(&getContext());
     vector::populateVectorToVectorCanonicalizationPatterns(patterns);
+    vector::populateBubbleVectorBitCastOpPatterns(patterns);
     vector::populateVectorBroadcastLoweringPatterns(patterns);
-    vector::populateVectorContractLoweringPatterns(patterns);
+    vector::populateVectorInterleaveLoweringPatterns(patterns);
+    // TODO: doubtful that the "default" does what one want here, it is likely
+    // better to use outerproduct.
+    vector::populateVectorContractLoweringPatterns(
+        patterns, vector::VectorTransformsOptions());
     vector::populateVectorMaskMaterializationPatterns(
         patterns, /*force32BitVectorIndices=*/false);
     vector::populateVectorMaskOpLoweringPatterns(patterns);
     vector::populateVectorShapeCastLoweringPatterns(patterns);
-    vector::populateVectorTransposeLoweringPatterns(patterns);
+    // TODO: doubtful that the "default" does what one want here, it is likely
+    // better to use shuffle.
+    vector::populateVectorTransposeLoweringPatterns(
+        patterns, vector::VectorTransformsOptions());
     populateConvertArmNeon2dToIntrPatterns(patterns);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }
@@ -836,8 +992,8 @@ void ConvertToLLVMPass::runOnOperation() {
     RewritePatternSet vectorToLoopsPatterns(&getContext());
     populateVectorToSCFConversionPatterns(
         vectorToLoopsPatterns, VectorTransferToSCFOptions().enableFullUnroll());
-    if (failed(applyPatternsAndFoldGreedily(
-            getOperation(), std::move(vectorToLoopsPatterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(vectorToLoopsPatterns)))) {
       return signalPassFailure();
     }
   }
@@ -876,6 +1032,7 @@ void ConvertToLLVMPass::runOnOperation() {
     patterns.add<ExpandMulSIExtended>(patterns.getContext(), /*benefit=*/1024);
   }
 
+  LLVMConversionTarget target(getContext());
   populateAffineToStdConversionPatterns(patterns);
   populateSCFToControlFlowConversionPatterns(patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
@@ -883,16 +1040,32 @@ void ConvertToLLVMPass::runOnOperation() {
 
   populateComplexToLLVMConversionPatterns(typeConverter, patterns);
   populateMathToLLVMConversionPatterns(typeConverter, patterns);
+  // Note: workaround needed due to `memref.subview` returnd from an `if`.
   memref::populateExpandStridedMetadataPatterns(patterns);
+  iree_compiler::populateIREEResolveExtractStridedMetadataPatterns(patterns);
   populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
   populateFuncToLLVMConversionPatterns(typeConverter, patterns);
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+  arith::populateExpandBFloat16Patterns(patterns);
+  index::populateIndexToLLVMConversionPatterns(typeConverter, patterns);
   populateVectorToSCFConversionPatterns(patterns);
+  // Some n-D vectors are generated by EmulateNarrowType pass, so we need to
+  // unroll them to 1-D before converting to the LLVM dialect.
+  vector::populateVectorBitCastLoweringPatterns(patterns);
   populateVectorToLLVMMatrixConversionPatterns(typeConverter, patterns);
-  populateVectorToLLVMConversionPatterns(
-      typeConverter, patterns, targetReassociateFpReductions.getValue());
-  populateLinalgToLLVMConversionPatterns(typeConverter, patterns);
-  populateReconcileUnrealizedCastsPatterns(patterns);
+  vector::populateVectorRankReducingFMAPattern(patterns);
+  vector::populateVectorInsertExtractStridedSliceTransforms(patterns);
+  vector::populateVectorStepLoweringPatterns(patterns);
+  populateVectorToLLVMConversionPatterns(typeConverter, patterns,
+                                         reassociateFpReductions);
+  vector::populateVectorTransferLoweringPatterns(patterns,
+                                                 /*maxTransferRank=*/1);
+
+  if (isAArch64(targetAttr) &&
+      (hasAnySVEFeature(targetAttr) || hasSMEFeature(targetAttr))) {
+    populateArmSVELegalizeForLLVMExportPatterns(typeConverter, patterns);
+    configureArmSVELegalizeForExportTarget(target);
+  }
 
   HALDispatchABI abi(&typeConverter);
   // clang-format off
@@ -911,24 +1084,28 @@ void ConvertToLLVMPass::runOnOperation() {
   >(abi, typeConverter);
   // clang-format on
 
-  LLVMConversionTarget target(getContext());
   target.addLegalOp<ModuleOp>();
   target.addIllegalDialect<func::FuncDialect, mlir::arith::ArithDialect,
                            IREE::Util::UtilDialect, IREE::HAL::HALDialect,
                            math::MathDialect, tosa::TosaDialect>();
-  target.addIllegalOp<UnrealizedConversionCastOp>();
 
   if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     signalPassFailure();
     return;
   }
 
+  OpPassManager passManager(module.getOperationName());
+  FunctionLikeNest(passManager).addPass(createReconcileUnrealizedCastsPass);
+  if (failed(runPipeline(passManager, module))) {
+    return signalPassFailure();
+  }
+
   // Rewrite any extern calls emitted to dynamic library imports.
   {
     RewritePatternSet patterns(&getContext());
-    patterns.insert<RewriteExternCallOpToDynamicImportCallOp>(abi,
-                                                              typeConverter);
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns))))
+    patterns.insert<RewriteExternCallOpToDynamicImportCallOp, RewriteCallOpABI,
+                    RewriteFuncOpABI>(abi, typeConverter);
+    if (failed(applyPatternsGreedily(module, std::move(patterns))))
       return signalPassFailure();
   }
 
@@ -939,18 +1116,16 @@ void ConvertToLLVMPass::runOnOperation() {
     llvm::Triple triple(targetTripleStr);
     if (triple.isWasm()) {
       populateUnfusedFMAOpsPassPatterns(&getContext(), postPatterns);
-      if (failed(
-              applyPatternsAndFoldGreedily(module, std::move(postPatterns)))) {
-        return signalPassFailure();
-      }
+    }
+    if (failed(applyPatternsGreedily(module, std::move(postPatterns)))) {
+      return signalPassFailure();
     }
   }
 }
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertToLLVMPass(
-    bool reassociateFpReductions) {
+std::unique_ptr<OperationPass<ModuleOp>>
+createConvertToLLVMPass(bool reassociateFpReductions) {
   return std::make_unique<ConvertToLLVMPass>(reassociateFpReductions);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

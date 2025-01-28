@@ -34,6 +34,7 @@
 // IREE_COMPILER_GCC
 // IREE_COMPILER_GCC_COMPAT
 // IREE_COMPILER_MSVC
+// IREE_COMPILER_MSVC_COMPAT
 //
 // IREE_SANITIZER_ADDRESS
 // IREE_SANITIZER_MEMORY
@@ -65,18 +66,16 @@ enum iree_arch_enum_e {
   IREE_ARCH_ENUM_X86_64,
 };
 
-#if defined(__arm__) || defined(__arm64) || defined(__aarch64__) || \
-    defined(__thumb__) || defined(__TARGET_ARCH_ARM) ||             \
-    defined(__TARGET_ARCH_THUMB) || defined(_M_ARM)
-#if defined(__arm64) || defined(__aarch64__)
+#if defined(__arm64) || defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(_M_ARM64EC)
 #define IREE_ARCH "arm_64"
 #define IREE_ARCH_ENUM IREE_ARCH_ENUM_ARM_64
 #define IREE_ARCH_ARM_64 1
-#else
+#elif defined(__arm__) || defined(__thumb__) || defined(__TARGET_ARCH_ARM) || \
+    defined(__TARGET_ARCH_THUMB) || defined(_M_ARM)
 #define IREE_ARCH "arm_32"
 #define IREE_ARCH_ENUM IREE_ARCH_ENUM_ARM_32
 #define IREE_ARCH_ARM_32 1
-#endif  // __arm64
 #endif  // ARM
 
 #if defined(__riscv) && (__riscv_xlen == 32)
@@ -199,12 +198,18 @@ enum iree_arch_enum_e {
 
 #if defined(__clang__)
 #define IREE_COMPILER_CLANG 1
+#if defined(_MSC_VER)
+// clang-cl is msvc-like (but also still clang).
+#define IREE_COMPILER_MSVC_COMPAT 1
+#else
 #define IREE_COMPILER_GCC_COMPAT 1
+#endif  // _MSC_VER
 #elif defined(__GNUC__)
 #define IREE_COMPILER_GCC 1
 #define IREE_COMPILER_GCC_COMPAT 1
 #elif defined(_MSC_VER)
 #define IREE_COMPILER_MSVC 1
+#define IREE_COMPILER_MSVC_COMPAT 1
 #else
 #error Unrecognized compiler.
 #endif  // compiler versions
@@ -216,10 +221,14 @@ enum iree_arch_enum_e {
 #if __has_feature(memory_sanitizer)
 #define IREE_SANITIZER_MEMORY 1
 #endif  // __has_feature(memory_sanitizer)
-#if __has_feature(thread_sanitizer)
+#if __has_feature(thread_sanitizer) || defined(__SANITIZE_THREAD__)
 #define IREE_SANITIZER_THREAD 1
 #endif  // __has_feature(thread_sanitizer)
 #endif  // defined(__has_feature)
+
+#if defined(__SANITIZE_THREAD__) && !defined(IREE_SANITIZER_THREAD)
+#define IREE_SANITIZER_THREAD 1
+#endif  // __SANITIZE_THREAD__
 
 //==============================================================================
 // IREE_PLATFORM_*

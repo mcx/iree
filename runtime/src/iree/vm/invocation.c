@@ -12,7 +12,6 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/debugging.h"
-#include "iree/base/tracing.h"
 #include "iree/vm/ref.h"
 #include "iree/vm/stack.h"
 #include "iree/vm/value.h"
@@ -89,10 +88,11 @@ static iree_status_t iree_vm_invoke_marshal_inputs(
     }
     return iree_ok_status();
   } else if (IREE_UNLIKELY(expected_input_count != iree_vm_list_size(inputs))) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "input list and function mismatch; expected %zu "
-                            "arguments but passed %zu",
-                            expected_input_count, iree_vm_list_size(inputs));
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "input list and function mismatch; expected %" PRIhsz
+        " arguments but passed %" PRIhsz,
+        expected_input_count, iree_vm_list_size(inputs));
   }
 
   uint8_t* p = arguments.data;
@@ -133,7 +133,7 @@ static iree_status_t iree_vm_invoke_marshal_inputs(
         // TODO(benvanik): see if we can't remove this retain by instead relying
         // on the caller still owning the list.
         IREE_RETURN_IF_ERROR(
-            iree_vm_list_get_ref_retain(inputs, arg_i, (iree_vm_ref_t*)p));
+            iree_vm_list_get_ref_assign(inputs, arg_i, (iree_vm_ref_t*)p));
         p += sizeof(iree_vm_ref_t);
       } break;
     }
@@ -226,8 +226,8 @@ static iree_vm_invocation_id_t iree_vm_invoke_allocate_id(
     // The string must remain live for the lifetime of the process.
     // TODO(benvanik): name it based on the function?
     static iree_atomic_int32_t next_invocation_id = IREE_ATOMIC_VAR_INIT(1);
-    uint32_t invocation_id = iree_atomic_fetch_add_int32(
-        &next_invocation_id, 1, iree_memory_order_relaxed);
+    uint32_t invocation_id = iree_atomic_fetch_add(&next_invocation_id, 1,
+                                                   iree_memory_order_relaxed);
     IREE_LEAK_CHECK_DISABLE_PUSH();
     char* name = (char*)malloc(32);
     snprintf(name, 32, "invoke-%04d", invocation_id - 1);

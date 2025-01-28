@@ -16,8 +16,7 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Represents a position in the IR.
 // This may directly reference an MLIR instance such as a Value or Operation or
@@ -26,7 +25,7 @@ namespace iree_compiler {
 // This is the MLIR equivalent to the IRPosition used in LLVM (see
 // llvm/Transforms/IPO/Attributor.h).
 class Position {
- public:
+public:
   static const Position EmptyKey;
   static const Position TombstoneKey;
 
@@ -81,7 +80,7 @@ class Position {
   void print(llvm::raw_ostream &os) const;
   void print(llvm::raw_ostream &os, AsmState &asmState) const;
 
- private:
+private:
   template <typename T, typename Enable>
   friend struct llvm::DenseMapInfo;
   friend llvm::raw_ostream &operator<<(llvm::raw_ostream &os, Position pos);
@@ -99,7 +98,7 @@ class Position {
       llvm::PointerLikeTypeTraits<void *>::NumLowBitsAvailable;
   static_assert(NumEncodingBits >= 2, "At least two bits are required!");
   llvm::PointerIntPair<void *, NumEncodingBits, char> enc;
-  unsigned ordinal;  // used only with ENC_RETURNED_VALUE
+  unsigned ordinal; // used only with ENC_RETURNED_VALUE
 };
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, Position pos);
@@ -136,8 +135,7 @@ static inline auto getArgumentPositions(Block &block) {
 // positions are references to the combined results of the region.
 SmallVector<Position> getReturnedValuePositions(Region &region);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
 namespace llvm {
 
@@ -156,6 +154,6 @@ struct DenseMapInfo<Position> {
   static bool isEqual(const Position &a, const Position &b) { return a == b; }
 };
 
-}  // end namespace llvm
+} // end namespace llvm
 
-#endif  // IREE_COMPILER_DIALECT_UTIL_ANALYSIS_POSITION_H_
+#endif // IREE_COMPILER_DIALECT_UTIL_ANALYSIS_POSITION_H_

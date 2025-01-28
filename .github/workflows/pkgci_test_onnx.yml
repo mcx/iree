@@ -1,0 +1,175 @@
+# Copyright 2024 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+name: PkgCI Test ONNX
+on:
+  workflow_call:
+    inputs:
+      artifact_run_id:
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        type: string
+        default: ""
+
+jobs:
+  test_onnx_ops:
+    name: "test_onnx_ops :: ${{ matrix.name }}"
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU
+          - name: cpu_llvm_sync
+            config-file: onnx_ops_cpu_llvm_sync.json
+            numprocesses: auto
+            runs-on: ubuntu-24.04
+
+          # AMD GPU
+          - name: amdgpu_rocm_rdna3
+            numprocesses: 1
+            config-file: onnx_ops_gpu_rocm_rdna3.json
+            runs-on: nodai-amdgpu-w7900-x86-64
+          - name: amdgpu_vulkan
+            numprocesses: 4
+            config-file: onnx_ops_gpu_vulkan.json
+            runs-on: nodai-amdgpu-w7900-x86-64
+
+          # NVIDIA GPU
+          # TODO(#18238): migrate to new runner cluster
+          # - name: nvidiagpu_cuda
+          #   config-file: onnx_ops_gpu_cuda.json
+          #   numprocesses: 4
+          #   runs-on:
+          #     - self-hosted # must come first
+          #     - runner-group=${{ github.event_name == 'pull_request' && 'presubmit' || 'postsubmit' }}
+          #     - environment=prod
+          #     - gpu # TODO(scotttodd): qualify further with vendor/model
+          #     - os-family=Linux
+          # - name: nvidiagpu_vulkan
+          #   config-file: onnx_ops_gpu_vulkan.json
+          #   numprocesses: 4
+          #   runs-on:
+          #     - self-hosted # must come first
+          #     - runner-group=${{ github.event_name == 'pull_request' && 'presubmit' || 'postsubmit' }}
+          #     - environment=prod
+          #     - gpu # TODO(scotttodd): qualify further with vendor/model
+          #     - os-family=Linux
+    env:
+      PACKAGE_DOWNLOAD_DIR: ${{ github.workspace }}/.packages
+      CONFIG_FILE_PATH: tests/external/iree-test-suites/onnx_ops/${{ matrix.config-file }}
+      NUMPROCESSES: ${{ matrix.numprocesses }}
+      LOG_FILE_PATH: /tmp/test_onnx_ops_${{ matrix.name }}_logs.json
+      VENV_DIR: ${{ github.workspace }}/venv
+    steps:
+      - name: Checking out IREE repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          # Must match the subset of versions built in pkgci_build_packages.
+          python-version: "3.11"
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: linux_x86_64_release_packages
+          path: ${{ env.PACKAGE_DOWNLOAD_DIR }}
+      - name: Setup venv
+        run: |
+          ./build_tools/pkgci/setup_venv.py ${VENV_DIR} \
+            --artifact-path=${PACKAGE_DOWNLOAD_DIR} \
+            --fetch-gh-workflow=${{ inputs.artifact_run_id }}
+
+      - name: Checkout test suites repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: iree-org/iree-test-suites
+          ref: 8e6af9e75d874ef8c9f8ff55f12cb38157dd55eb
+          path: iree-test-suites
+      - name: Install ONNX ops test suite requirements
+        run: |
+          source ${VENV_DIR}/bin/activate
+          python -m pip install -r iree-test-suites/onnx_ops/requirements.txt
+      - name: Run ONNX ops test suite
+        run: |
+          source ${VENV_DIR}/bin/activate
+          pytest iree-test-suites/onnx_ops/ \
+              -rpfE \
+              --numprocesses ${NUMPROCESSES} \
+              --timeout=30 \
+              --durations=20 \
+              --config-files=${CONFIG_FILE_PATH} \
+              --report-log=${LOG_FILE_PATH}
+      - name: "Updating config file with latest XFAIL lists"
+        if: failure()
+        run: |
+          source ${VENV_DIR}/bin/activate
+          python iree-test-suites/onnx_ops/update_config_xfails.py \
+            --log-file=${LOG_FILE_PATH} \
+            --config-file=${CONFIG_FILE_PATH}
+          cat ${CONFIG_FILE_PATH}
+      - name: "Uploading new config file"
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: ${{ matrix.config-file }}
+          path: ${{ env.CONFIG_FILE_PATH }}
+
+  test_onnx_models:
+    name: "test_onnx_models :: ${{ matrix.name }}"
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU
+          - name: cpu_llvm_task
+            runs-on: ubuntu-24.04
+
+          # TODO(scotttodd): test other backends (parameterize the test suite)
+    env:
+      VENV_DIR: ${{ github.workspace }}/venv
+    steps:
+      - name: Checking out IREE repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          # Must match the subset of versions built in pkgci_build_packages.
+          python-version: "3.11"
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: linux_x86_64_release_packages
+          path: ${{ env.PACKAGE_DOWNLOAD_DIR }}
+      - name: Setup venv
+        run: |
+          ./build_tools/pkgci/setup_venv.py ${VENV_DIR} \
+            --artifact-path=${PACKAGE_DOWNLOAD_DIR} \
+            --fetch-gh-workflow=${{ inputs.artifact_run_id }}
+
+      - name: Checkout test suites repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: iree-org/iree-test-suites
+          ref: 8e6af9e75d874ef8c9f8ff55f12cb38157dd55eb
+          path: iree-test-suites
+      - name: Install ONNX models test suite requirements
+        run: |
+          source ${VENV_DIR}/bin/activate
+          python -m pip install -r iree-test-suites/onnx_models/requirements.txt
+      - name: Run ONNX models test suite
+        run: |
+          source ${VENV_DIR}/bin/activate
+          pytest iree-test-suites/onnx_models/ \
+              -rA \
+              --log-cli-level=info \
+              --override-ini=xfail_strict=false \
+              --timeout=120 \
+              --durations=0

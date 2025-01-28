@@ -7,28 +7,28 @@
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "iree/compiler/Dialect/VM/Conversion/TypeConverter.h"
-#include "iree/compiler/Dialect/VM/Conversion/UtilToVM/ConvertUtilToVM.h"
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
 namespace {
 
 static Value castToI64(Value value, OpBuilder &builder) {
-  if (value.getType().isInteger(64)) return value;
+  if (value.getType().isInteger(64))
+    return value;
   return builder.createOrFold<IREE::VM::ExtI32I64UOp>(
       value.getLoc(), builder.getI64Type(), value);
 }
 
 static Value castToIndex(Value value, OpBuilder &builder) {
-  if (value.getType().isIndex()) return value;
+  if (value.getType().isIndex())
+    return value;
   return builder.createOrFold<arith::IndexCastOp>(
       value.getLoc(), builder.getIndexType(), value);
 }
@@ -36,9 +36,9 @@ static Value castToIndex(Value value, OpBuilder &builder) {
 struct BufferConstantOpConversion
     : public OpConversionPattern<IREE::Util::BufferConstantOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferConstantOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto alignmentAttr = op.getAlignmentAttr();
     if (alignmentAttr) {
       alignmentAttr = rewriter.getI64IntegerAttr(alignmentAttr.getInt());
@@ -64,9 +64,9 @@ static Value getAlignment(Location loc, std::optional<APInt> alignment,
 struct BufferAllocOpConversion
     : public OpConversionPattern<IREE::Util::BufferAllocOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferAllocOp allocOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferAllocOp allocOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto resultType =
         getTypeConverter()->convertType(allocOp.getResult().getType());
     rewriter.replaceOpWithNewOp<IREE::VM::BufferAllocOp>(
@@ -79,9 +79,9 @@ struct BufferAllocOpConversion
 struct BufferDeallocOpConversion
     : public OpConversionPattern<IREE::Util::BufferDeallocOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferDeallocOp deallocOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferDeallocOp deallocOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     // No-op today. We could make this force a dealloc of the underlying storage
     // or have a vm.hint.reset or something to force a drop of the reference.
     rewriter.eraseOp(deallocOp);
@@ -95,9 +95,9 @@ struct BufferDeallocOpConversion
 struct BufferSliceOpConversion
     : public OpConversionPattern<IREE::Util::BufferSliceOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferSliceOp sliceOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferSliceOp sliceOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto resultType =
         getTypeConverter()->convertType(sliceOp.getResult().getType());
     auto sliceLength = castToI64(adaptor.getResultSize(), rewriter);
@@ -117,9 +117,9 @@ struct BufferSliceOpConversion
 struct BufferSizeOpConversion
     : public OpConversionPattern<IREE::Util::BufferSizeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferSizeOp sizeOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferSizeOp sizeOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Value size = rewriter.create<IREE::VM::BufferLengthOp>(
         sizeOp.getLoc(), rewriter.getI64Type(), adaptor.getOperand());
     rewriter.replaceOp(sizeOp, castToIndex(size, rewriter));
@@ -130,9 +130,9 @@ struct BufferSizeOpConversion
 struct BufferCopyOpConversion
     : public OpConversionPattern<IREE::Util::BufferCopyOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferCopyOp copyOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferCopyOp copyOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::VM::BufferCopyOp>(
         copyOp, adaptor.getSource(),
         castToI64(adaptor.getSourceOffset(), rewriter), adaptor.getTarget(),
@@ -145,9 +145,9 @@ struct BufferCopyOpConversion
 struct BufferCompareOpConversion
     : public OpConversionPattern<IREE::Util::BufferCompareOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferCompareOp compareOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferCompareOp compareOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto resultType =
         getTypeConverter()->convertType(compareOp.getResult().getType());
     rewriter.replaceOpWithNewOp<IREE::VM::BufferCompareOp>(
@@ -161,7 +161,8 @@ struct BufferCompareOpConversion
 
 static Value unscaleOffset(Location loc, Value offset, int64_t scale,
                            OpBuilder &builder) {
-  if (scale == 1) return offset;
+  if (scale == 1)
+    return offset;
   return builder.createOrFold<IREE::VM::DivI64SOp>(
       loc, offset.getType(), offset,
       builder.create<IREE::VM::ConstI64Op>(loc, scale));
@@ -170,12 +171,12 @@ static Value unscaleOffset(Location loc, Value offset, int64_t scale,
 struct BufferFillOpConversion
     : public OpConversionPattern<IREE::Util::BufferFillOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferFillOp fillOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferFillOp fillOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto oldType = fillOp.getPattern().getType();
     auto newType = adaptor.getPattern().getType();
-    if (oldType.isa<IndexType>()) {
+    if (llvm::isa<IndexType>(oldType)) {
       // Use the actual converted type for IndexType.
       oldType = newType;
     }
@@ -187,7 +188,7 @@ struct BufferFillOpConversion
     auto elementLength =
         unscaleOffset(fillOp.getLoc(), byteLength, elementSize, rewriter);
     auto pattern = adaptor.getPattern();
-    if (auto integerType = oldType.dyn_cast<IntegerType>()) {
+    if (auto integerType = llvm::dyn_cast<IntegerType>(oldType)) {
       if (integerType.isInteger(1) || integerType.isInteger(8)) {
         rewriter.replaceOpWithNewOp<IREE::VM::BufferFillI8Op>(
             fillOp, adaptor.getTarget(), byteOffset, byteLength, pattern);
@@ -221,19 +222,19 @@ struct BufferFillOpConversion
 struct BufferLoadOpConversion
     : public OpConversionPattern<IREE::Util::BufferLoadOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferLoadOp loadOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferLoadOp loadOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto oldType = loadOp.getResult().getType();
     auto newType = getTypeConverter()->convertType(oldType);
-    if (oldType.isa<IndexType>()) {
+    if (llvm::isa<IndexType>(oldType)) {
       oldType = newType;
     }
     auto byteOffset = castToI64(adaptor.getSourceOffset(), rewriter);
     int64_t elementSize = IREE::Util::getRoundedElementByteWidth(oldType);
     auto elementOffset =
         unscaleOffset(loadOp.getLoc(), byteOffset, elementSize, rewriter);
-    if (auto integerType = oldType.dyn_cast<IntegerType>()) {
+    if (auto integerType = llvm::dyn_cast<IntegerType>(oldType)) {
       if (integerType.isInteger(1) || integerType.isInteger(8)) {
         if (integerType.isSigned() || integerType.isSignless()) {
           rewriter.replaceOpWithNewOp<IREE::VM::BufferLoadI8SOp>(
@@ -277,12 +278,12 @@ struct BufferLoadOpConversion
 struct BufferStoreOpConversion
     : public OpConversionPattern<IREE::Util::BufferStoreOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::BufferStoreOp storeOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferStoreOp storeOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto oldType = storeOp.getSource().getType();
     auto newType = adaptor.getSource().getType();
-    if (oldType.isa<IndexType>()) {
+    if (llvm::isa<IndexType>(oldType)) {
       oldType = newType;
     }
     auto byteOffset = castToI64(adaptor.getTargetOffset(), rewriter);
@@ -315,14 +316,30 @@ struct BufferStoreOpConversion
   }
 };
 
-}  // namespace
+struct BufferHashOpConversion
+    : public OpConversionPattern<IREE::Util::BufferHashOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(IREE::Util::BufferHashOp hashOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto newType =
+        getTypeConverter()->convertType(hashOp.getResult().getType());
+    auto byteOffset = castToI64(adaptor.getSourceOffset(), rewriter);
+    auto length = castToI64(adaptor.getLength(), rewriter);
+    rewriter.replaceOpWithNewOp<IREE::VM::BufferHashOp>(
+        hashOp, newType, adaptor.getSource(), byteOffset, length);
+    return success();
+  }
+};
+
+} // namespace
 
 void populateUtilBufferToVMPatterns(MLIRContext *context,
                                     ConversionTarget &conversionTarget,
                                     TypeConverter &typeConverter,
                                     RewritePatternSet &patterns) {
   typeConverter.addConversion(
-      [](IREE::Util::BufferType type) -> Optional<Type> {
+      [](IREE::Util::BufferType type) -> std::optional<Type> {
         return IREE::VM::RefType::get(
             IREE::VM::BufferType::get(type.getContext()));
       });
@@ -338,7 +355,8 @@ void populateUtilBufferToVMPatterns(MLIRContext *context,
                     IREE::Util::BufferDeallocOp, IREE::Util::BufferSliceOp,
                     IREE::Util::BufferSizeOp, IREE::Util::BufferCopyOp,
                     IREE::Util::BufferCompareOp, IREE::Util::BufferFillOp,
-                    IREE::Util::BufferLoadOp, IREE::Util::BufferStoreOp>();
+                    IREE::Util::BufferLoadOp, IREE::Util::BufferStoreOp,
+                    IREE::Util::BufferHashOp>();
 
   patterns.insert<BufferConstantOpConversion>(typeConverter, context);
   patterns.insert<BufferAllocOpConversion>(typeConverter, context);
@@ -350,7 +368,7 @@ void populateUtilBufferToVMPatterns(MLIRContext *context,
   patterns.insert<BufferFillOpConversion>(typeConverter, context);
   patterns.insert<BufferLoadOpConversion>(typeConverter, context);
   patterns.insert<BufferStoreOpConversion>(typeConverter, context);
+  patterns.insert<BufferHashOpConversion>(typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

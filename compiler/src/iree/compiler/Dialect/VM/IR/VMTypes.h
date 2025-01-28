@@ -18,31 +18,32 @@
 
 // clang-format off: must be included after all LLVM/MLIR headers.
 #define GET_ATTRDEF_CLASSES
-#include "iree/compiler/Dialect/VM/IR/VMAttrs.h.inc"  // IWYU pragma: export
-#include "iree/compiler/Dialect/VM/IR/VMEnums.h.inc"  // IWYU pragma: keep
+#include "iree/compiler/Dialect/VM/IR/VMAttrs.h.inc" // IWYU pragma: export
+#include "iree/compiler/Dialect/VM/IR/VMEnums.h.inc" // IWYU pragma: keep
 // clang-format on
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 namespace detail {
 struct ListTypeStorage;
 struct RefTypeStorage;
-}  // namespace detail
+} // namespace detail
 
 /// A byte buffer.
 class BufferType : public Type::TypeBase<BufferType, Type, TypeStorage> {
- public:
+public:
   using Base::Base;
+
+  static constexpr StringLiteral name = "vm.buffer";
 };
 
 /// A list containing an optional element type.
 class ListType
     : public Type::TypeBase<ListType, Type, detail::ListTypeStorage> {
- public:
+public:
   using Base::Base;
+
+  static constexpr StringLiteral name = "vm.list";
 
   /// Returns true if the given type can be wrapped in a list.
   static bool isCompatible(Type type);
@@ -71,15 +72,19 @@ class ListType
 
 /// An opaque ref object that comes from an external source.
 class OpaqueType : public Type::TypeBase<OpaqueType, Type, TypeStorage> {
- public:
+public:
   using Base::Base;
+
+  static constexpr StringLiteral name = "vm.opaque";
 };
 
 /// A ref<T> containing a reference to a ref-object-compatible type.
 /// This models an iree_vm_ref_t intrusive reference counted object.
 class RefType : public Type::TypeBase<RefType, Type, detail::RefTypeStorage> {
- public:
+public:
   using Base::Base;
+
+  static constexpr StringLiteral name = "vm.ref";
 
   /// Returns true if the given type can be wrapped in a ref ptr.
   static bool isCompatible(Type type);
@@ -106,9 +111,6 @@ class RefType : public Type::TypeBase<RefType, Type, detail::RefTypeStorage> {
   Type getObjectType();
 };
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
-#endif  // IREE_COMPILER_DIALECT_VM_IR_VMTYPES_H_
+#endif // IREE_COMPILER_DIALECT_VM_IR_VMTYPES_H_

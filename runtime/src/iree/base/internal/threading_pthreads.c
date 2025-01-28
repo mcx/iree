@@ -24,23 +24,16 @@
 #include "iree/base/internal/call_once.h"
 #include "iree/base/internal/synchronization.h"
 #include "iree/base/internal/threading.h"
-#include "iree/base/tracing.h"
 
 #if defined(IREE_PLATFORM_EMSCRIPTEN)
 #include <emscripten/threading.h>
 #endif  // IREE_PLATFORM_EMSCRIPTEN
 
-// Older glibc doesn't have a gettid wrapper:
-// https://stackoverflow.com/a/63494768
-#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
-#define gettid() syscall(SYS_gettid)
-#endif
-
 struct iree_thread_t {
   iree_atomic_ref_count_t ref_count;
   iree_allocator_t allocator;
 
-  char name[16];
+  char name[32];
   pthread_t handle;
 
   iree_thread_entry_t entry;
@@ -58,8 +51,8 @@ static void iree_thread_set_priority_class(
 
 static bool iree_thread_resumed_predicate(void* arg) {
   iree_thread_t* thread = (iree_thread_t*)arg;
-  return iree_atomic_load_int32(&thread->suspend_count,
-                                iree_memory_order_acquire) == 0;
+  return iree_atomic_load(&thread->suspend_count, iree_memory_order_acquire) ==
+         0;
 }
 
 #if defined(IREE_PLATFORM_EMSCRIPTEN)
@@ -106,8 +99,8 @@ static void* iree_thread_start_routine(void* param) {
   IREE_TRACE_SET_THREAD_NAME(thread->name);
 
   // Wait until we resume if we were created suspended.
-  while (iree_atomic_load_int32(&thread->suspend_count,
-                                iree_memory_order_acquire) > 0) {
+  while (iree_atomic_load(&thread->suspend_count, iree_memory_order_acquire) >
+         0) {
     iree_notification_await(&thread->suspend_barrier,
                             iree_thread_resumed_predicate, thread,
                             iree_infinite_timeout());
@@ -119,10 +112,6 @@ static void* iree_thread_start_routine(void* param) {
   void* entry_arg = thread->entry_arg;
   thread->entry = NULL;
   thread->entry_arg = NULL;
-
-  // Release our ownership of the thread handle. If the creating thread doesn't
-  // want it this will free the memory and fully detach the thread.
-  iree_thread_release(thread);
 
   // Call the user thread entry point function.
   // Note that this can be a tail-call which saves a stack frame in all threads
@@ -164,9 +153,6 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
     pthread_attr_setstacksize(&thread_attr, params.stack_size);
   }
 
-  // Retain the thread for the thread itself; this way if the caller immediately
-  // releases the iree_thread_t handle the thread won't explode.
-  iree_thread_retain(thread);
   *out_thread = thread;
 
   // Unfortunately we can't create the thread suspended (no API). This means
@@ -183,7 +169,6 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
   }
   pthread_attr_destroy(&thread_attr);
   if (rc != 0) {
-    iree_thread_release(thread);  // for self
     iree_thread_release(thread);  // for caller
     *out_thread = NULL;
     IREE_TRACE_ZONE_END(z0);
@@ -350,11 +335,17 @@ void iree_thread_request_affinity(iree_thread_t* thread,
 void iree_thread_resume(iree_thread_t* thread) {
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  if (iree_atomic_exchange_int32(&thread->suspend_count, 0,
-                                 iree_memory_order_acq_rel) == 1) {
+  if (iree_atomic_exchange(&thread->suspend_count, 0,
+                           iree_memory_order_acq_rel) == 1) {
     iree_notification_post(&thread->suspend_barrier, IREE_ALL_WAITERS);
   }
 
+  IREE_TRACE_ZONE_END(z0);
+}
+
+void iree_thread_join(iree_thread_t* thread) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  pthread_join(thread->handle, NULL);
   IREE_TRACE_ZONE_END(z0);
 }
 

@@ -15,6 +15,11 @@ include(CMakeParseArguments)
 # SRCS: List of source files for the binary
 # DATA: List of other targets and files required for this binary
 # DEPS: List of other libraries to be linked in to the binary targets
+# DISABLE_LLVM_LINK_LLVM_DYLIB: Disables linking against the libLLVM.so dynamic
+#   library, even if the build is configured to do so. This must be used with
+#   care as it can only contain dependencies and be used by binaries that also
+#   so disable it (either in upstream LLVM or locally). In practice, it is used
+#   for LLVM dependency chains that must always result in static-linked tools.
 # COPTS: List of private compile options
 # DEFINES: List of public defines
 # LINKOPTS: List of link options
@@ -22,7 +27,7 @@ include(CMakeParseArguments)
 # HOSTONLY: host only; compile using host toolchain when cross-compiling
 # SETUP_INSTALL_RPATH: Sets an install RPATH which assumes the standard
 #   directory layout (to be used if linking against installed shared libs).
-#
+# INSTALL_COMPONENT: CMake install component (Defaults to "IREETool-${_RULE_NAME}").
 # Note:
 # iree_cc_binary will create a binary called ${PACKAGE_NAME}_${NAME}, e.g.
 # iree_base_foo with an alias to ${PACKAGE_NS}::${NAME}.
@@ -49,8 +54,8 @@ include(CMakeParseArguments)
 function(iree_cc_binary)
   cmake_parse_arguments(
     _RULE
-    "EXCLUDE_FROM_ALL;HOSTONLY;TESTONLY;SETUP_INSTALL_RPATH"
-    "NAME"
+    "EXCLUDE_FROM_ALL;HOSTONLY;TESTONLY;SETUP_INSTALL_RPATH;DISABLE_LLVM_LINK_LLVM_DYLIB"
+    "NAME;INSTALL_COMPONENT"
     "SRCS;COPTS;DEFINES;LINKOPTS;DATA;DEPS"
     ${ARGN}
   )
@@ -68,12 +73,19 @@ function(iree_cc_binary)
     set(_NAME "${_PACKAGE_NAME}_${_RULE_NAME}")
   endif()
 
+  if(_DEBUG_IREE_PACKAGE_NAME)
+    message(STATUS "  : iree_cc_binary(${_NAME})")
+  endif()
+
   add_executable(${_NAME} "")
 
   if(NOT "${_PACKAGE_NS}" STREQUAL "")
     # Alias the iree_package_name binary to iree::package::name.
     # This lets us more clearly map to Bazel and makes it possible to
     # disambiguate the underscores in paths vs. the separators.
+    if(_DEBUG_IREE_PACKAGE_NAME)
+      message(STATUS "  + alias ${_PACKAGE_NS}::${_RULE_NAME}")
+    endif()
     add_executable(${_PACKAGE_NS}::${_RULE_NAME} ALIAS ${_NAME})
 
     # If the binary name matches the package then treat it as a default. For
@@ -94,7 +106,7 @@ function(iree_cc_binary)
     )
   else()
     set(_DUMMY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_NAME}_dummy.cc")
-    file(WRITE ${_DUMMY_SRC} "")
+    iree_make_empty_file("${_DUMMY_SRC}")
     target_sources(${_NAME}
       PRIVATE
         ${_DUMMY_SRC}
@@ -112,6 +124,7 @@ function(iree_cc_binary)
   target_compile_options(${_NAME}
     PRIVATE
       ${IREE_DEFAULT_COPTS}
+      ${IREE_INTERFACE_COPTS}
       ${_RULE_COPTS}
   )
   target_link_options(${_NAME}
@@ -122,6 +135,9 @@ function(iree_cc_binary)
 
   # Replace dependencies passed by ::name with iree::package::name
   list(TRANSFORM _RULE_DEPS REPLACE "^::" "${_PACKAGE_NS}::")
+  if(NOT _RULE_DISABLE_LLVM_LINK_LLVM_DYLIB)
+    iree_redirect_llvm_dylib_deps(_RULE_DEPS)
+  endif()
 
   # Implicit deps.
   if(IREE_IMPLICIT_DEFS_CC_DEPS)
@@ -140,18 +156,23 @@ function(iree_cc_binary)
   set_property(TARGET ${_NAME} PROPERTY CXX_STANDARD ${IREE_CXX_STANDARD})
   set_property(TARGET ${_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 
+  set(_INSTALL_COMPONENT "${_RULE_INSTALL_COMPONENT}")
+  if(NOT _INSTALL_COMPONENT)
+    set(_INSTALL_COMPONENT "IREETool-${_RULE_NAME}")
+  endif()
+
   if(_RULE_EXCLUDE_FROM_ALL)
     set_property(TARGET ${_NAME} PROPERTY EXCLUDE_FROM_ALL ON)
     install(TARGETS ${_NAME}
             RENAME ${_RULE_NAME}
-            COMPONENT ${_RULE_NAME}
+            COMPONENT ${_INSTALL_COMPONENT}
             RUNTIME DESTINATION bin
             BUNDLE DESTINATION bin
             EXCLUDE_FROM_ALL)
   else()
     install(TARGETS ${_NAME}
       RENAME ${_RULE_NAME}
-      COMPONENT ${_RULE_NAME}
+      COMPONENT ${_INSTALL_COMPONENT}
       RUNTIME DESTINATION bin
       BUNDLE DESTINATION bin)
   endif()
@@ -178,12 +199,12 @@ function(iree_cc_binary)
       if (NOT _lib_dir)
         set(_lib_dir "lib")
       endif()
-      set(_install_rpath "${_origin_prefix}:${_origin_prefix}/../${_lib_dir}")
+      set(_install_rpath "${_origin_prefix}" "${_origin_prefix}/../${_lib_dir}")
       if(_lib_dir)
         cmake_path(IS_ABSOLUTE _lib_dir _is_abs_libdir)
         if(_is_abs_libdir)
           # Use the libdir verbatim.
-          set(_install_rpath "${_origin_prefix}:${_lib_dir}")
+          set(_install_rpath "${_origin_prefix}" "${_lib_dir}")
         endif()
       endif()
       set_target_properties(${_NAME} PROPERTIES

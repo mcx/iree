@@ -25,7 +25,7 @@ BUILD_DIR="build-emscripten"
 IREE_HOST_BIN_DIR="$(realpath ${IREE_HOST_BIN_DIR})"
 
 source build_tools/cmake/setup_build.sh
-source build_tools/cmake/setup_ccache.sh
+# Note: not using ccache since the runtime build should be fast already.
 
 cd "${BUILD_DIR}"
 
@@ -38,8 +38,8 @@ emcmake "${CMAKE_BIN?}" -G Ninja .. \
   -DIREE_HAL_DRIVER_DEFAULTS=OFF \
   -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
   -DIREE_HAL_DRIVER_LOCAL_TASK=ON \
-  -DIREE_ENABLE_CPUINFO=OFF \
   -DIREE_BUILD_TESTS=ON \
+  -DIREE_BUILD_ALL_CHECK_TEST_MODULES=OFF \
   -DIREE_BUILD_SAMPLES=ON
 
 echo "Building default targets"
@@ -49,7 +49,3 @@ echo "------------------------"
 echo "Building test deps"
 echo "------------------"
 "${CMAKE_BIN?}" --build . --target iree-test-deps -- -k 0
-
-if (( IREE_USE_CCACHE == 1 )); then
-  ccache --show-stats
-fi

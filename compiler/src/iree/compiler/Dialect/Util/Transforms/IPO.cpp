@@ -11,14 +11,12 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTraits.h"
-#include "iree/compiler/Dialect/Util/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
@@ -27,14 +25,15 @@
 
 #define DEBUG_TYPE "iree-util-ipo"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
+
+#define GEN_PASS_DEF_IPOPASS
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h.inc"
+
 namespace {
 
 struct LocAttr {
-  Optional<Location> loc;
+  std::optional<Location> loc;
   Type type;
   Attribute attr;
   operator bool() const { return attr != nullptr; }
@@ -49,9 +48,9 @@ static const int kUnassigned = -1;
 // callees for example.
 struct FuncAnalysis {
   // Function under analysis.
-  func::FuncOp funcOp;
+  IREE::Util::FuncOp funcOp;
   // All call sites across the whole program.
-  SmallVector<func::CallOp> callOps;
+  SmallVector<IREE::Util::CallOp> callOps;
 
   // Whether this function may be accessed indirectly or used externally.
   // This generally disables optimizations.
@@ -60,6 +59,7 @@ struct FuncAnalysis {
   // Which args are uniform from all call sites.
   BitVector callerUniformArgs;
   // Values for each arg if they are uniformly constant at all call sites.
+  // May be any constant attribute or an immutable global symbol ref.
   SmallVector<LocAttr> callerUniformArgValues;
   // Uniform call operand index -> deduplicated index.
   // Base/non-duplicated values will be identity.
@@ -73,6 +73,7 @@ struct FuncAnalysis {
   // Which results are uniform from all return sites in the function.
   BitVector calleeUniformResults;
   // Values for each result if they are uniformly constant at all return sites.
+  // May be any constant attribute or an immutable global symbol ref.
   SmallVector<LocAttr> calleeUniformResultValues;
   // Uniform callee return operand index -> deduplicated index.
   // Base/non-duplicated values will be identity.
@@ -87,8 +88,7 @@ struct FuncAnalysis {
 
   void print(llvm::raw_ostream &os, AsmState &asmState) {
     os << "FuncAnalysis: " << (isIncomplete ? "INCOMPLETE! " : "") << "@"
-       << funcOp.getName() << funcOp.getFunctionType() << " "
-       << "\n";
+       << funcOp.getName() << funcOp.getFunctionType() << " " << "\n";
     auto argTypes = funcOp.getArgumentTypes();
     os << "  args: " << argTypes.size() << "\n";
     for (unsigned i = 0; i < argTypes.size(); ++i) {
@@ -99,9 +99,13 @@ struct FuncAnalysis {
         os << "dupe(%arg" << callerUniformArgDupeMap[i] << ") ";
       }
       os << argTypes[i] << " ";
-      if (callerUniformArgValues[i]) {
-        os << "constant = ";
-        callerUniformArgValues[i].attr.print(os);
+      if (auto constant = callerUniformArgValues[i]) {
+        if (isa<SymbolRefAttr>(constant.attr)) {
+          os << "immutable global = ";
+        } else {
+          os << "constant = ";
+        }
+        constant.attr.print(os);
       }
       os << "\n";
     }
@@ -118,9 +122,13 @@ struct FuncAnalysis {
         os << "pass(%arg" << passthroughResultArgs[i] << ") ";
       }
       os << resultTypes[i] << " ";
-      if (calleeUniformResultValues[i]) {
-        os << "constant = ";
-        calleeUniformResultValues[i].attr.print(os);
+      if (auto constant = calleeUniformResultValues[i]) {
+        if (isa<SymbolRefAttr>(constant.attr)) {
+          os << "immutable global = ";
+        } else {
+          os << "constant = ";
+        }
+        constant.attr.print(os);
       }
       os << "\n";
     }
@@ -133,20 +141,38 @@ struct FuncAnalysis {
   }
 };
 
+// Returns a global symbol ref if the value is loaded from an immutable global.
+static SymbolRefAttr matchImmutableGlobalLoad(Value value) {
+  if (auto loadOp = dyn_cast_if_present<IREE::Util::GlobalLoadOpInterface>(
+          value.getDefiningOp())) {
+    if (loadOp.isGlobalImmutable()) {
+      return loadOp.getGlobalAttr();
+    }
+  }
+  return {};
+}
+
 // Note that the analysis results may be incomplete.
-static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
+static FuncAnalysis analyzeFuncOp(IREE::Util::FuncOp funcOp,
+                                  Explorer &explorer) {
   // Gather callers from across the program.
   FuncAnalysis analysis;
   analysis.funcOp = funcOp;
   analysis.isIncomplete = funcOp.isPublic() || funcOp.isExternal();
   if (explorer.walkIncomingCalls(funcOp, [&](mlir::CallOpInterface callOp) {
-        if (auto funcCallOp = dyn_cast<func::CallOp>((Operation *)callOp)) {
+        if (auto funcCallOp =
+                dyn_cast<IREE::Util::CallOp>((Operation *)callOp)) {
           analysis.callOps.push_back(funcCallOp);
         } else {
           analysis.isIncomplete = true;
         }
         return WalkResult::advance();
       }) == TraversalResult::INCOMPLETE) {
+    analysis.isIncomplete = true;
+  }
+
+  // TODO(benvanik): support functions with tied operands.
+  if (funcOp.hasAnyTiedOperands()) {
     analysis.isIncomplete = true;
   }
 
@@ -165,12 +191,13 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
 
   // Walk callee arguments.
   for (auto [i, value] : llvm::enumerate(funcOp.getArguments())) {
-    if (value.use_empty()) analysis.calleeUsedArgs.reset(i);
+    if (value.use_empty())
+      analysis.calleeUsedArgs.reset(i);
   }
 
   // Walk all return sites in the function.
   SmallVector<Value> seenResultValues(resultCount);
-  funcOp.walk([&](func::ReturnOp returnOp) {
+  funcOp.walk([&](IREE::Util::ReturnOp returnOp) {
     for (auto [i, value] : llvm::enumerate(returnOp.getOperands())) {
       // Check to see if the value returned is a constant and stash.
       // We'll only use this value if all return sites are uniform.
@@ -180,6 +207,12 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
             value.getLoc(),
             value.getType(),
             constantValue,
+        };
+      } else if (auto globalRef = matchImmutableGlobalLoad(value)) {
+        analysis.calleeUniformResultValues[i] = {
+            value.getLoc(),
+            value.getType(),
+            globalRef,
         };
       }
 
@@ -209,7 +242,7 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
 
       // If the result value is an argument track that here.
       // We'll only use this value if all return sites are uniform.
-      if (auto arg = value.dyn_cast<BlockArgument>()) {
+      if (auto arg = llvm::dyn_cast<BlockArgument>(value)) {
         if (arg.getParentBlock()->isEntryBlock()) {
           analysis.passthroughResultArgs[i] =
               static_cast<int>(arg.getArgNumber());
@@ -229,17 +262,39 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
       // We'll only use this value if all call sites are uniform.
       Attribute constantValue;
       if (matchPattern(value, m_Constant(&constantValue))) {
-        analysis.callerUniformArgValues[i] = {
-            value.getLoc(),
-            value.getType(),
-            constantValue,
-        };
+        if (!seenArgAttrs[i]) {
+          // First call site with a constant: stash so we can inline it if it's
+          // uniform.
+          seenArgAttrs[i] = constantValue;
+          analysis.callerUniformArgValues[i] = {
+              value.getLoc(),
+              value.getType(),
+              constantValue,
+          };
+        } else if (seenArgAttrs[i] != constantValue) {
+          // Value constant has changed from prior calls: mark non-uniform.
+          analysis.callerUniformArgs.reset(i);
+        }
+      } else if (auto globalRef = matchImmutableGlobalLoad(value)) {
+        if (!seenArgAttrs[i]) {
+          // First call site with a constant or immutable global: stash so we
+          // can inline it if it's uniform.
+          seenArgAttrs[i] = globalRef;
+          analysis.callerUniformArgValues[i] = {
+              value.getLoc(),
+              value.getType(),
+              globalRef,
+          };
+        } else if (seenArgAttrs[i] != globalRef) {
+          // Value constant has changed from prior calls: mark non-uniform.
+          analysis.callerUniformArgs.reset(i);
+        }
       } else {
         // Check to see if the value is the same as previously seen.
         // This will ensure that across calling functions we set non-uniform
         // _unless_ it's a constant value.
         if (!seenArgValues[i]) {
-          // First call site: take the value directly.
+          // First call site with a value: take the value directly.
           seenArgValues[i] = value;
         } else if (seenArgValues[i] != value) {
           // Value has changed and is not constant: mark non-uniform.
@@ -247,13 +302,8 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
         }
       }
 
-      // Check to see if the constant value is the same as previously seen.
-      // NOTE: unlike callee results we only check constant values.
-      if (!seenArgAttrs[i]) {
-        // First call site: take the value directly.
-        seenArgAttrs[i] = constantValue;
-      } else if (seenArgAttrs[i] != constantValue) {
-        // Value has changed: mark non-uniform.
+      // Mark non-uniform if we've seen both constant and non-constant values.
+      if (seenArgValues[i] && seenArgAttrs[i]) {
         analysis.callerUniformArgs.reset(i);
       }
 
@@ -277,7 +327,8 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
     // Note that we need to track unused results as an AND such that all callers
     // need to not use them. We'll flip the bits below so that `used = true`.
     for (auto [i, value] : llvm::enumerate(callOp.getResults())) {
-      if (!value.use_empty()) callerUnusedResults.reset(i);
+      if (!value.use_empty())
+        callerUnusedResults.reset(i);
     }
   }
   if (!analysis.callOps.empty()) {
@@ -325,11 +376,12 @@ static FuncAnalysis analyzeFuncOp(func::FuncOp funcOp, Explorer &explorer) {
   // we know all callers will stop passing them.
   for (unsigned i = 0; i < resultCount; ++i) {
     int argIndex = analysis.passthroughResultArgs[i];
-    if (argIndex == kUnassigned) continue;
+    if (argIndex == kUnassigned)
+      continue;
     auto arg = funcOp.getArgument(argIndex);
     bool onlyReturnUsers = true;
     for (auto user : arg.getUsers()) {
-      if (!isa<func::ReturnOp>(user)) {
+      if (!isa<IREE::Util::ReturnOp>(user)) {
         onlyReturnUsers = false;
         break;
       }
@@ -359,12 +411,21 @@ static void replaceValueWithConstant(Value value, LocAttr constantValue,
                                      OpBuilder &builder) {
   Operation *op = nullptr;
 
+  // Immutable global loads are represented as constant symbol refs.
+  if (auto globalRef = dyn_cast<SymbolRefAttr>(constantValue.attr)) {
+    op = builder.create<IREE::Util::GlobalLoadOp>(
+        constantValue.loc.value(), constantValue.type,
+        globalRef.getLeafReference().getValue(),
+        /*is_immutable=*/true);
+  }
+
   // Handle special builtin types that for some reason can't materialize
   // themselves.
   if (arith::ConstantOp::isBuildableWith(constantValue.attr,
                                          constantValue.type)) {
-    op = builder.create<arith::ConstantOp>(
-        constantValue.loc.value(), constantValue.attr, constantValue.type);
+    op = builder.create<arith::ConstantOp>(constantValue.loc.value(),
+                                           constantValue.type,
+                                           cast<TypedAttr>(constantValue.attr));
   }
 
   // Try the attr and type dialects to see if they can materialize.
@@ -396,7 +457,8 @@ static void replaceValueWithConstant(Value value, LocAttr constantValue,
 }
 
 // Returns true if any changes were made.
-static bool applyFuncChanges(FuncAnalysis &analysis, func::FuncOp funcOp) {
+static bool applyFuncChanges(FuncAnalysis &analysis,
+                             IREE::Util::FuncOp funcOp) {
   // Build the new set of function arguments and inline uniform constants.
   auto builder = OpBuilder::atBlockBegin(&funcOp.getBlocks().front());
   auto oldArgTypes = llvm::to_vector(funcOp.getArgumentTypes());
@@ -456,12 +518,14 @@ static bool applyFuncChanges(FuncAnalysis &analysis, func::FuncOp funcOp) {
   }
 
   // Early out if no changes.
-  if (deadArgs.none() && deadResults.none()) return false;
+  if (deadArgs.none() && deadResults.none())
+    return false;
 
   // Erase dead results from all return sites.
-  funcOp.walk([&](func::ReturnOp returnOp) {
+  funcOp.walk([&](IREE::Util::ReturnOp returnOp) {
     for (int i = deadResults.size() - 1; i >= 0; --i) {
-      if (deadResults.test(i)) returnOp.getOperandsMutable().erase(i);
+      if (deadResults.test(i))
+        returnOp.getOperandsMutable().erase(i);
     }
   });
 
@@ -475,7 +539,8 @@ static bool applyFuncChanges(FuncAnalysis &analysis, func::FuncOp funcOp) {
 }
 
 // Returns true if any changes were made.
-static bool applyCallChanges(FuncAnalysis &analysis, func::CallOp callOp) {
+static bool applyCallChanges(FuncAnalysis &analysis,
+                             IREE::Util::CallOp &callOp) {
   // Build the new set of call operands.
   SmallVector<Value> oldOperands = callOp.getOperands();
   SmallVector<Value> newOperands;
@@ -541,11 +606,14 @@ static bool applyCallChanges(FuncAnalysis &analysis, func::CallOp callOp) {
   }
 
   // Early out if no changes.
-  if (deadOperands.none() && deadResults.none()) return false;
+  if (deadOperands.none() && deadResults.none())
+    return false;
 
   // Fully replace call op because we may have changed result count.
-  auto newCallOp = OpBuilder(callOp).create<func::CallOp>(
-      callOp.getLoc(), callOp.getCalleeAttr(), newResultTypes, newOperands);
+  // TODO(benvanik): update tied operands.
+  auto newCallOp = OpBuilder(callOp).create<IREE::Util::CallOp>(
+      callOp.getLoc(), newResultTypes, callOp.getCalleeAttr(), newOperands,
+      /*tied_operands=*/ArrayAttr{});
   newCallOp->setDialectAttrs(callOp->getDialectAttrs());
 
   // Remap live old results -> new results.
@@ -557,16 +625,27 @@ static bool applyCallChanges(FuncAnalysis &analysis, func::CallOp callOp) {
   // Erase old op now that all uses are (or should be) replaced.
   callOp.erase();
 
+  callOp = newCallOp;
   return true;
 }
 
-class IPOPass : public IPOBase<IPOPass> {
- public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
+// Returns true if |funcOp| performs no work (no args/results, no ops).
+// We could make this a little smarter in the future by checking that there's
+// no side-effecting work.
+static bool isFuncEmpty(FunctionOpInterface funcOp) {
+  if (funcOp.isExternal()) {
+    return false;
+  } else if (funcOp.getNumArguments() > 0 || funcOp.getNumResults() > 0) {
+    return false;
+  } else if (funcOp.getBlocks().size() > 1) {
+    return false;
+  } else {
+    return funcOp.front().getOperations().size() == 1;
   }
+}
 
+class IPOPass : public impl::IPOPassBase<IPOPass> {
+public:
   void runOnOperation() override {
     auto moduleOp = getOperation();
 
@@ -582,7 +661,7 @@ class IPOPass : public IPOBase<IPOPass> {
     // across the whole program we can't perform any mutations during this
     // analysis.
     std::vector<FuncAnalysis> analysisResults;
-    for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
+    for (auto funcOp : moduleOp.getOps<IREE::Util::FuncOp>()) {
       analysisResults.push_back(analyzeFuncOp(funcOp, explorer));
     }
 
@@ -596,10 +675,21 @@ class IPOPass : public IPOBase<IPOPass> {
     // Use analysis results to mutate functions.
     bool anyChanges = false;
     for (auto &analysis : analysisResults) {
-      if (analysis.isIncomplete) continue;
+      if (analysis.isIncomplete) {
+        continue;
+      }
       anyChanges = applyFuncChanges(analysis, analysis.funcOp) || anyChanges;
-      for (auto callOp : analysis.callOps) {
+      for (auto &callOp : analysis.callOps) {
         anyChanges = applyCallChanges(analysis, callOp) || anyChanges;
+      }
+      if (isFuncEmpty(analysis.funcOp)) {
+        // If the function is empty after the changes then erase it and all
+        // calls to it.
+        for (auto callOp : analysis.callOps) {
+          callOp.erase();
+        }
+        analysis.funcOp.erase();
+        anyChanges = true;
       }
     }
 
@@ -611,15 +701,6 @@ class IPOPass : public IPOBase<IPOPass> {
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createIPOPass() {
-  return std::make_unique<IPOPass>();
-}
-
-static PassRegistration<IPOPass> pass;
-
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

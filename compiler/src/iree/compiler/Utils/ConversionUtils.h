@@ -11,8 +11,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// Report whether the given operation, and all nested operations, are legal as
 /// specified by the give ConversionTarget. Returns failure and emits error
@@ -23,9 +22,8 @@ LogicalResult verifyAllOperationsAreLegal(Operation *op,
 
 // Returns |oldAttr| converted to its new type via |typeConverter|, if needed.
 Attribute convertAttribute(Location loc, Attribute oldAttr,
-                           TypeConverter &typeConverter);
+                           const TypeConverter &typeConverter);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_UTILS_CONVERSIONUTILS_H_
+#endif // IREE_COMPILER_UTILS_CONVERSIONUTILS_H_

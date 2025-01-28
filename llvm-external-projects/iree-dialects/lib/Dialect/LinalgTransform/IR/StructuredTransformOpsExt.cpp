@@ -6,28 +6,23 @@
 
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 
-#include "iree-dialects/Dialect/LinalgExt/Passes/Passes.h"
-#include "iree-dialects/Dialect/LinalgTransform/LinalgTransformOps.h"
-#include "iree-dialects/Dialect/LinalgTransform/ScopedTransform.h"
-#include "iree-dialects/Transforms/ListenerCSE.h"
 #include "iree-dialects/Transforms/TransformMatchers.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/AsyncToLLVM/AsyncToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
-#include "mlir/Conversion/LinalgToLLVM/LinalgToLLVM.h"
 #include "mlir/Conversion/LinalgToStandard/LinalgToStandard.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Async/Passes.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Hoisting.h"
@@ -36,7 +31,9 @@
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
-#include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
+#include "mlir/Dialect/Transform/PDLExtension/PDLExtensionOps.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
@@ -49,22 +46,26 @@
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE << "]: ")
 
 using namespace mlir;
-using mlir::iree_compiler::IREE::LinalgExt::LinalgEnablingOptions;
 
 //===----------------------------------------------------------------------===//
 // Additional constraints for PDLMatchOp.
 //===----------------------------------------------------------------------===//
 
-/// Hook for PDL driver to check if an operation (`values[0]`) is directly
+/// Hook for PDL driver to check if an operation (`pdlValues[0]`) is directly
 /// nested in a function with the name provided by an attribute
-/// (`values[1]`).
+/// (`pdlValues[1]`).
 /// TODO: PDL needs user-defined "questions".
 static LogicalResult nestedInFunc(PatternRewriter &rewriter,
-                                  Operation *operation, Attribute attr) {
-  auto func = operation->getParentOfType<func::FuncOp>();
+                                  PDLResultList &pdlResults,
+                                  ArrayRef<PDLValue> pdlValues) {
+  assert(pdlValues.size() == 2 && "expected 2 PDL values");
+  Operation *operation = pdlValues[0].cast<Operation *>();
+  Attribute attr = pdlValues[1].cast<Attribute>();
+
+  auto func = operation->getParentOfType<mlir::FunctionOpInterface>();
   if (!func)
     return rewriter.notifyMatchFailure(operation, "not nested in a function");
-  auto functionSymbol = attr.dyn_cast<SymbolRefAttr>();
+  auto functionSymbol = dyn_cast<SymbolRefAttr>(attr);
   if (!functionSymbol)
     return rewriter.notifyMatchFailure(operation, "not a function identifier");
   return success(functionSymbol.getLeafReference() == func.getName());
@@ -116,12 +117,12 @@ static LogicalResult isEquivalentToOpImpl(PatternRewriter &rewriter,
                                           linalg::LinalgOp linalgModelOp) {
   // If basic properties do not match, return failure.
   {
-    OpOperandVector opInputs = linalgOp.getDpsInputOperands();
-    OpOperandVector modelInputs = linalgModelOp.getDpsInputOperands();
-    OpOperandVector opOutputs = linalgOp.getDpsInitOperands();
-    OpOperandVector modelOutputs = linalgModelOp.getDpsInitOperands();
-    auto notEqualFn = [](std::tuple<OpOperand *, OpOperand *> in) -> bool {
-      return std::get<0>(in)->get() != std::get<1>(in)->get();
+    SmallVector<Value> opInputs = linalgOp.getDpsInputs();
+    SmallVector<Value> modelInputs = linalgModelOp.getDpsInputs();
+    ValueRange opOutputs = linalgOp.getDpsInits();
+    ValueRange modelOutputs = linalgModelOp.getDpsInits();
+    auto notEqualFn = [](std::tuple<Value, Value> in) -> bool {
+      return std::get<0>(in) != std::get<1>(in);
     };
 
     if (opInputs.size() != modelInputs.size() ||
@@ -141,9 +142,8 @@ static LogicalResult isEquivalentToOpImpl(PatternRewriter &rewriter,
     Region &r = linalgModelOp->getRegion(0);
     Block *bodyBlock = rewriter.createBlock(
         &r, r.end(), linalgOp.getBlock()->getArgumentTypes(),
-        llvm::to_vector<4>(
-            llvm::map_range(linalgOp.getBlock()->getArguments(),
-                            [](Value v) { return v.getLoc(); })));
+        llvm::map_to_vector<4>(linalgOp.getBlock()->getArguments(),
+                               [](Value v) { return v.getLoc(); }));
     ImplicitLocOpBuilder b(linalgModelOp.getLoc(), rewriter);
     auto regionBuilder = linalgModelOp.getRegionBuilder();
     llvm::ArrayRef<mlir::NamedAttribute> attrs = {};
@@ -153,24 +153,28 @@ static LogicalResult isEquivalentToOpImpl(PatternRewriter &rewriter,
   return haveEquivalentBodies(linalgOp, linalgModelOp, rewriter);
 }
 
-/// Check whether the unique Operation* stored in `values[0]` (assumed) is
-/// equivalent to the unique StringRefAttr passed in `values[1]` (assumed).
+/// Check whether the unique Operation* stored in `pdlValues[0]` (assumed) is
+/// equivalent to the unique StringRefAttr passed in `pdlValues[1]` (assumed).
 /// Equivalence is achieved when either:
-///   1. `values[0]` has the name stored in `values[1]`.
-///   2. `values[0]` and `values[1]` are both linalg ops and their structured
-///      interfaces as well as their bodies are equivalent.
+///   1. `pdlValues[0]` has the name stored in `pdlValues[1]`.
+///   2. `pdlValues[0]` and `pdlValues[1]` are both linalg ops and their
+///      structured interfaces as well as their bodies are equivalent.
 ///      Structured interfaces equivalence is a simple attribute level check.
 ///      Body equivalence is more involved and currently limited:
 ///        a. the current impl constructs an instance of the op whose name is
-///           specified in `values[1]` and checks for exact body equality.
+///           specified in `pdlValues[1]` and checks for exact body equality.
 ///        b. a more advanced version would "subtract" the bodies and fold, cse
 ///           and canonicalize to fixed point. If the result is "all zeros",
 ///           then the bodies would be equivalent (really isomorphic).
 ///   3. other cases TBD (e.g. vector.generic when available).
 static LogicalResult isEquivalentToOp(PatternRewriter &rewriter,
-                                      Operation *operation,
-                                      Attribute attribute) {
-  auto modelOpNameAttr = attribute.dyn_cast<StringAttr>();
+                                      PDLResultList &pdlResults,
+                                      ArrayRef<PDLValue> pdlValues) {
+  assert(pdlValues.size() == 2 && "expected 2 PDL values");
+  Operation *operation = pdlValues[0].cast<Operation *>();
+  Attribute attribute = pdlValues[1].cast<Attribute>();
+
+  auto modelOpNameAttr = dyn_cast<StringAttr>(attribute);
   if (!modelOpNameAttr)
     return failure(); // TODO: notifyMatchFailure needs an Operation* handle.
   auto modelOpName = modelOpNameAttr.strref();
@@ -197,16 +201,21 @@ static LogicalResult isEquivalentToOp(PatternRewriter &rewriter,
 }
 
 /// Assume that:
-///   1. `values[0]` is an operands range
-///   2. `values[1]` contains a DictAttr with `operand_number`, `dim` and
+///   1. `pdlValues[0]` is an operands range
+///   2. `pdlValues[1]` contains a DictAttr with `operand_number`, `dim` and
 ///      `divisor` IntegerAttr entries.
 /// Succeed if `operands`[`operand_number`] is a ranked type whose `dim` is a
 /// multiple of `divisor`.
 /// Note: 0 is the convention to express "do not tile", it is considered to
 /// divide everything.
 static LogicalResult isDimMultipleOf(PatternRewriter &rewriter,
-                                     ValueRange operands, Attribute attribute) {
-  auto dict = attribute.dyn_cast<DictionaryAttr>();
+                                     PDLResultList &pdlResults,
+                                     ArrayRef<PDLValue> pdlValues) {
+  assert(pdlValues.size() == 2 && "expected 2 PDL values");
+  ValueRange operands = pdlValues[0].cast<ValueRange>();
+  Attribute attribute = pdlValues[1].cast<Attribute>();
+
+  auto dict = dyn_cast<DictionaryAttr>(attribute);
   if (!dict)
     return failure(); // TODO: notifyMatchFailure needs an Operation* handle.
 
@@ -230,7 +239,7 @@ static LogicalResult isDimMultipleOf(PatternRewriter &rewriter,
 
   ShapedType shapedType;
   if (static_cast<int64_t>(operands.size()) > operandNumber)
-    shapedType = operands[operandNumber].getType().dyn_cast<ShapedType>();
+    shapedType = dyn_cast<ShapedType>(operands[operandNumber].getType());
   if (!shapedType || shapedType.getRank() <= dim)
     return failure();
   return success(divisor == 0 || (shapedType.getShape()[dim] > 0 &&
@@ -238,14 +247,19 @@ static LogicalResult isDimMultipleOf(PatternRewriter &rewriter,
 }
 
 /// Assume that:
-///   1. `values[0]` is an operands range
-///   2. `values[1]` contains a DictAttr with `operand_number` and `dim`
+///   1. `pdlValues[0]` is an operands range
+///   2. `pdlValues[1]` contains a DictAttr with `operand_number` and `dim`
 ///       IntegerAttr entries.
 /// Succeed if `value`[`operand_number`] is a ranked type whose `dim` is
 /// dynamic.
-static LogicalResult isDimStatic(PatternRewriter &rewriter, ValueRange operands,
-                                 Attribute attribute) {
-  auto dict = attribute.dyn_cast<DictionaryAttr>();
+static LogicalResult isDimStatic(PatternRewriter &rewriter,
+                                 PDLResultList &pdlResults,
+                                 ArrayRef<PDLValue> pdlValues) {
+  assert(pdlValues.size() == 2 && "expected 2 PDL values");
+  ValueRange operands = pdlValues[0].cast<ValueRange>();
+  Attribute attribute = pdlValues[1].cast<Attribute>();
+
+  auto dict = dyn_cast<DictionaryAttr>(attribute);
   if (!dict)
     return failure(); // TODO: notifyMatchFailure needs an Operation* handle.
 
@@ -263,19 +277,24 @@ static LogicalResult isDimStatic(PatternRewriter &rewriter, ValueRange operands,
 
   ShapedType shapedType;
   if (static_cast<int64_t>(operands.size()) > operandNumber)
-    shapedType = operands[operandNumber].getType().dyn_cast<ShapedType>();
+    shapedType = dyn_cast<ShapedType>(operands[operandNumber].getType());
   return success(shapedType && !shapedType.isDynamicDim(dim));
 }
 
 /// Assume that:
-///   1. `values[0]` is an operands range
-///   2. `values[1]` contains a DictAttr with `operand_number` and `dim`
+///   1. `pdlValues[0]` is an operands range
+///   2. `pdlValues[1]` contains a DictAttr with `operand_number` and `dim`
 ///       IntegerAttr entries.
 /// Succeed if `value`[`operand_number`] is a ranked type whose `dim` is
 /// dynamic.
 static LogicalResult isDimDynamic(PatternRewriter &rewriter,
-                                  ValueRange operands, Attribute attribute) {
-  auto dict = attribute.dyn_cast<DictionaryAttr>();
+                                  PDLResultList &pdlResults,
+                                  ArrayRef<PDLValue> pdlValues) {
+  assert(pdlValues.size() == 2 && "expected 2 PDL values");
+  ValueRange operands = pdlValues[0].cast<ValueRange>();
+  Attribute attribute = pdlValues[1].cast<Attribute>();
+
+  auto dict = dyn_cast<DictionaryAttr>(attribute);
   if (!dict)
     return failure(); // TODO: notifyMatchFailure needs an Operation* handle.
 
@@ -293,7 +312,7 @@ static LogicalResult isDimDynamic(PatternRewriter &rewriter,
 
   ShapedType shapedType;
   if (static_cast<int64_t>(operands.size()) > operandNumber)
-    shapedType = operands[operandNumber].getType().dyn_cast<ShapedType>();
+    shapedType = dyn_cast<ShapedType>(operands[operandNumber].getType());
   return success(shapedType && shapedType.isDynamicDim(dim));
 }
 
@@ -308,11 +327,16 @@ mlir::transform_ext::StructuredTransformOpsExtension::
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.cpp.inc"
       >();
 
-  registerPDLMatchConstraintFn("nestedInFunc", nestedInFunc);
-  registerPDLMatchConstraintFn("isDimDynamic", isDimDynamic);
-  registerPDLMatchConstraintFn("isDimMultipleOf", isDimMultipleOf);
-  registerPDLMatchConstraintFn("isDimStatic", isDimStatic);
-  registerPDLMatchConstraintFn("isEquivalentToOp", isEquivalentToOp);
+  addDialectDataInitializer<transform::PDLMatchHooks>(
+      [&](transform::PDLMatchHooks &hooks) {
+        llvm::StringMap<PDLConstraintFunction> constraints;
+        constraints.try_emplace("nestedInFunc", nestedInFunc);
+        constraints.try_emplace("isDimDynamic", isDimDynamic);
+        constraints.try_emplace("isDimMultipleOf", isDimMultipleOf);
+        constraints.try_emplace("isDimStatic", isDimStatic);
+        constraints.try_emplace("isEquivalentToOp", isEquivalentToOp);
+        hooks.mergeInPDLMatchHooks(std::move(constraints));
+      });
 
   declareDependentDialect<bufferization::BufferizationDialect>();
   declareDependentDialect<vector::VectorDialect>();
@@ -322,289 +346,28 @@ mlir::transform_ext::StructuredTransformOpsExtension::
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.cpp.inc"
 
 //===----------------------------------------------------------------------===//
-// TrackingListener
+// ErrorCheckingTrackingListener
 //===----------------------------------------------------------------------===//
 
-/// Find the linalg op that defines all values in range, potentially
-/// transitively through tensor casts.
-static FailureOr<linalg::LinalgOp>
-findSingleLinalgOpDefiningAll(ValueRange range) {
-  LLVM_DEBUG(DBGS() << "Start findSingleLinalgOpDefiningAll\n");
-  linalg::LinalgOp sourceOp = nullptr;
-  for (Value value : range) {
-    // See through tensor casts and reshape ops.
-    //
-    // TODO: we may need some generalization (interfaces?) of this for other
-    // operations, especially multi-operand ones to understand which of their
-    // operands may be coming from a Linalg op. Or a completely different
-    // mechanism of tracking op replacement at creation, or even different
-    // patterns that identify the "main" result of a transformation.
-    while (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
-               tensor::InsertSliceOp>(value.getDefiningOp())) {
-      value = llvm::TypeSwitch<Operation *, Value>(value.getDefiningOp())
-                  .Case([](tensor::CastOp op) { return op.getSource(); })
-                  .Case([](tensor::CollapseShapeOp op) { return op.getSrc(); })
-                  .Case([](tensor::ExpandShapeOp op) { return op.getSrc(); })
-                  .Case([](tensor::InsertSliceOp op) { return op.getSource(); })
-                  .Default([](Operation *) {
-                    llvm_unreachable("Wrong op type");
-                    return Value();
-                  });
-    }
-
-    if (auto currentSourceOp = value.getDefiningOp<linalg::LinalgOp>()) {
-      if (!sourceOp || sourceOp == currentSourceOp) {
-        sourceOp = currentSourceOp;
-        continue;
-      }
-
-      LLVM_DEBUG(
-          DBGS() << "--different source linalg ops for replacing one op: \n"
-                 << sourceOp << "\n"
-                 << currentSourceOp << "\n");
-      return failure();
-    }
-    LLVM_DEBUG(DBGS() << "--replacing linalg op with unknown non-linalg op:\n"
-                      << *value.getDefiningOp() << "\n");
-    return failure();
-  }
-  return sourceOp;
-}
-
-/// Find the scf "for" op that defines all values in the range.
-/// Take into account the the op may just disappear when it is replaced by its
-/// body, in the case od a single iteration loop.
-// It is unclear atm how to account for this properly.
-static FailureOr<Operation *> findSingleForOpDefiningAll(ValueRange range) {
-  LLVM_DEBUG(DBGS() << "Start findSingleForOpDefiningAll\n");
-  Operation *forOp = nullptr;
-  for (Value value : range) {
-    LLVM_DEBUG(DBGS() << "--find for: " << value << "\n");
-    // Block arguments are just dropped.
-    auto currentSourceOp = value.getDefiningOp();
-    if (!currentSourceOp) {
-      LLVM_DEBUG(DBGS() << "--replacing tracked op with bbarg -> SKIP\n");
-      continue;
-    }
-    auto currentForOp = dyn_cast<scf::ForOp>(currentSourceOp);
-    if (!forOp || (currentForOp && forOp == currentForOp)) {
-      forOp = currentSourceOp;
-      continue;
-    }
-    LLVM_DEBUG(DBGS() << "---no single scf.for replacement found -> SKIP\n");
-    LLVM_DEBUG(
-        DBGS() << "---WARNING: this will drop tracking of the scf.for\n");
-    return nullptr;
-  }
-  return forOp;
-}
-
-/// Find the op that defines all values in the range.
-static FailureOr<Operation *> findSingleOpDefiningAll(ValueRange range) {
-  Operation *op = nullptr;
-  for (Value value : range) {
-    // Block arguments are just dropped.
-    auto currentSourceOp = value.getDefiningOp();
-    if (!currentSourceOp) {
-      LLVM_DEBUG(DBGS() << "replacing tracked op with bbarg\n");
-      continue;
-    }
-
-    if (!op || op == currentSourceOp) {
-      op = currentSourceOp;
-      continue;
-    }
-
-    LLVM_DEBUG(DBGS() << "different source op when replacing one op\n");
-    return failure();
-  }
-  return op;
-}
-
-// Find a single op that defines all values in the range, optionally
-// transitively through other operations in an op-specific way.
-static FailureOr<Operation *> findSingleDefiningOp(Operation *replacedOp,
-                                                   ValueRange range) {
-  return llvm::TypeSwitch<Operation *, FailureOr<Operation *>>(replacedOp)
-      .Case<linalg::LinalgOp>([&](linalg::LinalgOp) -> FailureOr<Operation *> {
-        auto op = findSingleLinalgOpDefiningAll(range);
-        if (failed(op))
-          return failure();
-        return op->getOperation();
-      })
-      .Case<scf::ForOp>([&](scf::ForOp) -> FailureOr<Operation *> {
-        return findSingleForOpDefiningAll(range);
-      })
-      .Default([&](Operation *) -> FailureOr<Operation *> {
-        return findSingleOpDefiningAll(range);
-      });
-}
-
-void mlir::TrackingListener::notifyOperationReplaced(Operation *op,
-                                                     ValueRange newValues) {
-  // Bail out if in error state.
-  if (hadErrors)
-    return;
-
-  // Exit early if the op is not tracked.
-  SmallVector<Value> handles;
-  if (failed(getTransformState().getHandlesForPayloadOp(op, handles))) {
-    LLVM_DEBUG(DBGS() << "no tracking handle to remove\n");
+void ErrorCheckingTrackingListener::notifyPayloadReplacementNotFound(
+    Operation *op, ValueRange values, DiagnosedSilenceableFailure &&diag) {
+  // Certain ops can dropped safely.
+  if (isa<scf::ForOp>(op)) {
+    LLVM_DEBUG(DBGS() << "Silently dropping scf.for op mapping\n");
     return;
   }
 
-  FailureOr<Operation *> replacement = findSingleDefiningOp(op, newValues);
-  if (failed(replacement)) {
-    LLVM_DEBUG(DBGS() << "could not find replacement for tracked op\n");
-    emitError(op) << "could not find replacement for tracked op";
-    return;
-  }
+  SmallVector<Diagnostic> diags;
+  diag.takeDiagnostics(diags);
+  if (!status.succeeded())
+    status.takeDiagnostics(diags);
+  status = DiagnosedSilenceableFailure::silenceableFailure(std::move(diags));
 
-  // If this would cause an error with replacement, drop instead.
-  if (*replacement && (*replacement)->getNumResults() != op->getNumResults()) {
-    LLVM_DEBUG(DBGS() << "failsafe error tracking activated due to mismatched "
-                         "number of results for op: "
-                      << op << " and replacement " << *replacement << "\n");
-    replacement = nullptr;
-  }
-
-  if (*replacement == nullptr) {
-    // TODO: Check if the handle is dead. Otherwise, the op should not be
-    // dropped. This needs a change in the transform dialect interpreter.
-    LLVM_DEBUG(DBGS() << "removing tracked @" << op << " : " << *op << "\n");
-  } else {
-    LLVM_DEBUG(DBGS() << "replacing tracked @" << op << " : " << *op << " with "
-                      << **replacement << "\n");
-  }
-  mayFail(replacePayloadOp(op, *replacement));
-}
-
-void mlir::TrackingListener::notifyOperationRemoved(Operation *op) {
-  // Bail out if in error state.
-  if (hadErrors)
-    return;
-
-  // TODO: Walk can be removed when D144193 has landed.
-  op->walk([&](Operation *op) {
-    // Exit early if the op is not tracked.
-    SmallVector<Value> handles;
-    if (failed(getTransformState().getHandlesForPayloadOp(op, handles))) {
-      LLVM_DEBUG(DBGS() << "no tracking handle to remove\n");
-      return;
-    }
-    LLVM_DEBUG(DBGS() << "removing tracked @" << op << " : " << *op << "\n");
-    mayFail(replacePayloadOp(op, nullptr));
-  });
-}
-
-void mlir::TrackingListener::removeMappings(Operation *op) {
-  // Bail out if in error state.
-  if (hadErrors)
-    return;
-
-  // Replacing the tracked op with null will stop the tracking.
-  LLVM_DEBUG(DBGS() << "removing mappings @" << op << " : " << *op << "\n");
-  mayFail(replacePayloadOp(op, nullptr));
-}
-
-//===----------------------------------------------------------------------===//
-// TODO: WILL MIGRATE
-//===----------------------------------------------------------------------===//
-
-using namespace mlir::linalg;
-
-//===---------------------------------------------------------------------===//
-// LowerToLLVMOp
-//===---------------------------------------------------------------------===//
-
-DiagnosedSilenceableFailure
-transform_ext::LowerToLLVMOp::apply(mlir::transform::TransformResults &result,
-                                    mlir::transform::TransformState &state) {
-
-  //===------------------------------------------------------------------===//
-  // BEGIN: Copied from upstream, this needs to be retired once we have a
-  // proper upstream transform op.
-  //===------------------------------------------------------------------===//
-
-  // TODO: it is feasible to scope lowering at arbitrary level and introduce
-  // unrealized casts, but there needs to be the final module-wise cleanup in
-  // the end. Keep module-level for now.
-  PassManager pm(getContext());
-
-  auto enableOpaquePointers = [](auto options) {
-    options.useOpaquePointers = true;
-    return options;
-  };
-
-  // Blanket-convert any remaining high-level vector ops to loops if any remain.
-  pm.addNestedPass<func::FuncOp>(createConvertVectorToSCFPass());
-  // Blanket-convert any remaining linalg ops to loops if any remain.
-  pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
-  if (getEnableAsync()) {
-    pm.addPass(createAsyncToAsyncRuntimePass());
-    pm.addPass(createAsyncRuntimeRefCountingPass());
-    pm.addPass(createAsyncRuntimeRefCountingOptPass());
-  }
-  pm.addPass(createCanonicalizerPass());
-  // Blanket-convert any remaining affine ops if any remain.
-  pm.addPass(createLowerAffinePass());
-  // Convert SCF to CF (always needed).
-  pm.addPass(createConvertSCFToCFPass());
-  // Sprinkle some cleanups.
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-  // Blanket-convert any remaining linalg ops to LLVM if any remain.
-  pm.addPass(createConvertLinalgToLLVMPass());
-  {
-    auto options = ConvertVectorToLLVMPassOptions();
-    options.reassociateFPReductions = getReassociateFpReductions();
-    options.force32BitVectorIndices = getEnableIndexOptimizations();
-    options.armNeon = getEnableArmNeon();
-    options.armSVE = getEnableArmSve();
-    options.amx = getEnableAmx();
-    options.x86Vector = getEnableX86vector();
-    options.useOpaquePointers = true;
-    pm.addPass(createConvertVectorToLLVMPass(options));
-  }
-  // Convert Math to LLVM (always needed).
-  pm.addNestedPass<func::FuncOp>(createConvertMathToLLVMPass());
-  // Expand complicated MemRef operations before lowering them.
-  pm.addPass(memref::createExpandStridedMetadataPass());
-  // The expansion may create affine expressions. Get rid of them.
-  pm.addPass(createLowerAffinePass());
-  // Convert MemRef to LLVM (always needed).
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass(
-      enableOpaquePointers(FinalizeMemRefToLLVMConversionPassOptions{})));
-  if (getEnableAsync())
-    pm.addPass(createConvertAsyncToLLVMPass());
-  // Convert Func to LLVM (always needed).
-  pm.addPass(createConvertFuncToLLVMPass(
-      enableOpaquePointers(ConvertFuncToLLVMPassOptions{})));
-  // Convert Index to LLVM (always needed).
-  pm.addPass(createConvertIndexToLLVMPass());
-  // Convert remaining unrealized_casts (always needed).
-  pm.addPass(createReconcileUnrealizedCastsPass());
-
-  if (failed(pm.run(state.getTopLevel())))
-    return DiagnosedSilenceableFailure::definiteFailure();
-
-  //===------------------------------------------------------------------===//
-  // END: Copied from upstream, this needs to be retired once we have a
-  // proper upstream transform op.
-  //===------------------------------------------------------------------===//
-
-  // Make all arguments noalias for now.
-  // FIXME: this is a terrible hack!
-  state.getTopLevel()->walk([](LLVM::LLVMFuncOp funcOp) {
-    for (int64_t i = 0; i < funcOp.getNumArguments(); ++i) {
-      if (!funcOp.getFunctionType()
-               .getParamType(i)
-               .isa<LLVM::LLVMPointerType>())
-        continue;
-      funcOp.setArgAttr(i, "llvm.noalias", UnitAttr::get(funcOp.getContext()));
-    }
-  });
-  return DiagnosedSilenceableFailure::success();
+  status = emitSilenceableFailure(
+      getTransformOp(), "!!! tracking listener failed to find replacement op");
+  status.attachNote(op->getLoc()) << "replaced op";
+  for (Value v : values)
+    status.attachNote(v.getLoc()) << "replacement value";
 }
 
 //===---------------------------------------------------------------------===//
@@ -612,6 +375,7 @@ transform_ext::LowerToLLVMOp::apply(mlir::transform::TransformResults &result,
 //===---------------------------------------------------------------------===//
 
 DiagnosedSilenceableFailure transform_ext::MatchCallbackOp::apply(
+    mlir::transform::TransformRewriter &rewriter,
     mlir::transform::TransformResults &results,
     mlir::transform::TransformState &state) {
   auto setEmptyResults = [&results, this] {
@@ -663,7 +427,7 @@ DiagnosedSilenceableFailure transform_ext::MatchCallbackOp::apply(
 
 void transform_ext::MatchCallbackOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  mlir::transform::onlyReadsHandle(getInputs(), effects);
+  mlir::transform::onlyReadsHandle(getInputsMutable(), effects);
   mlir::transform::producesHandle(getOutputs(), effects);
   // TODO: it doesn't really modify the payload, we need a separate resource for
   // this mapping.
@@ -671,7 +435,7 @@ void transform_ext::MatchCallbackOp::getEffects(
 }
 
 //===---------------------------------------------------------------------===//
-// RegisterMatchCallbacksOp
+// Callbacks for tests driven by RegisterMatchCallbacksOp
 //===---------------------------------------------------------------------===//
 
 /// Match callback for "_test_match_callback" hook. Matches any payload
@@ -701,11 +465,12 @@ testMatchCallbackCallback(transform_ext::MatchCallbackResult &res, Location loc,
 static DiagnosedSilenceableFailure testRepeatedMatcherUseCallback(
     transform_ext::MatchCallbackResult &res, Location loc,
     const mlir::transform::TransformState &state, ValueRange handles) {
-  if (handles.size() != 1 || state.getPayloadOps(handles[0]).size() != 1) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
     return emitSilenceableFailure(loc)
            << "expected one handle to one operation";
   }
-  Operation *root = state.getPayloadOps(handles[0])[0];
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
 
   transform_ext::MatcherContext matcherContext;
   auto &operand = transform_ext::m_StructuredOp(matcherContext);
@@ -733,11 +498,12 @@ static DiagnosedSilenceableFailure
 testValueMatcherCallback(transform_ext::MatchCallbackResult &res, Location loc,
                          const mlir::transform::TransformState &state,
                          ValueRange handles) {
-  if (handles.size() != 1 || state.getPayloadOps(handles[0]).size() != 1) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
     return emitSilenceableFailure(loc)
            << "expected one handle to one operation";
   }
-  Operation *root = state.getPayloadOps(handles[0])[0];
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
 
   transform_ext::MatcherContext matcherContext;
   auto &operand = transform_ext::m_Value(matcherContext);
@@ -753,6 +519,111 @@ testValueMatcherCallback(transform_ext::MatchCallbackResult &res, Location loc,
 
     res.addPayloadGroup({first.getCaptured()});
     res.addPayloadGroup({second.getCaptured()});
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+static DiagnosedSilenceableFailure testShapedValueMatcherCallback(
+    transform_ext::MatchCallbackResult &res, Location loc,
+    const mlir::transform::TransformState &state, ValueRange handles) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
+
+  int64_t rank;
+  SmallVector<int64_t> dims;
+  transform_ext::MatcherContext matcherContext;
+  auto &value = transform_ext::m_ShapedValue(matcherContext);
+  value.rank(transform_ext::CaptureRank(rank))
+      .dim(transform_ext::AllDims(), transform_ext::CaptureDims(dims));
+  auto &opMatcher =
+      transform_ext::m_Operation<linalg::GenericOp>(matcherContext);
+  opMatcher.result(0, value);
+
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    opMatcher.resetCapture();
+    if (!matchPattern(op, opMatcher))
+      return WalkResult::advance();
+
+    op->emitRemark() << "rank: " << rank;
+    std::string message;
+    llvm::raw_string_ostream os(message);
+    llvm::interleaveComma(dims, os);
+    os.flush();
+    op->emitRemark() << "dimensions: " << message;
+
+    res.addPayloadGroup({opMatcher.getCaptured()});
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+//===---------------------------------------------------------------------===//
+// Callbacks for codegen driven by RegisterMatchCallbacksOp.
+//===---------------------------------------------------------------------===//
+
+/// Match callback for a convolution with optional fill and trailing
+/// elementwise operations. Matches *the first* occurrence of such a convolution
+/// within an op associated with the given handle.
+///
+/// Input handles:
+///
+///   - container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - the "fill" op preceding the convolution, if present;
+///   - convolution op;
+///   - trailing elementwise op, if any.
+static DiagnosedSilenceableFailure
+convolutionCallback(transform_ext::MatchCallbackResult &res, Location loc,
+                    const mlir::transform::TransformState &state,
+                    ValueRange handles) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_ext::StructuredOpMatcher *pattern, *fill, *trailing;
+  transform_ext::MatchedConvolutionCaptures ignore;
+  transform_ext::MatcherContext matcherContext;
+  makeConvolutionMatcher(matcherContext, pattern, fill, trailing, ignore,
+                         /*mustMatchEntireFunc=*/true);
+
+  // TODO: need a mechanism for this to go around the entire IR,
+  // potentially with list matches for each group.
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
+
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    pattern->resetCapture();
+    if (!matchPattern(op, *pattern))
+      return WalkResult::advance();
+
+    // TODO: notify properly.
+    LLVM_DEBUG({
+      DBGS() << "fill:\n";
+      if (fill->getCaptured())
+        DBGS() << fill->getCaptured() << "\n";
+      DBGS() << "pattern: " << pattern->getCaptured() << "\n";
+      DBGS() << "trailing:\n";
+      if (trailing->getCaptured())
+        DBGS() << trailing->getCaptured() << "\n";
+    });
+
+    res.addPotentiallyEmptyPayloadGroup(fill->getCaptured());
+    res.addPayloadGroup({pattern->getCaptured()});
+    res.addPotentiallyEmptyPayloadGroup(trailing->getCaptured());
     return WalkResult::interrupt();
   });
 
@@ -778,8 +649,9 @@ testValueMatcherCallback(transform_ext::MatchCallbackResult &res, Location loc,
 static DiagnosedSilenceableFailure
 reductionCallback(transform_ext::MatchCallbackResult &res, Location loc,
                   const mlir::transform::TransformState &state,
-                  ValueRange handles) {
-  if (handles.size() != 1 || state.getPayloadOps(handles[0]).size() != 1) {
+                  ValueRange handles, bool mustMatchEntireFunc) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
     return emitSilenceableFailure(loc)
            << "expected one handle to one operation";
   }
@@ -787,12 +659,12 @@ reductionCallback(transform_ext::MatchCallbackResult &res, Location loc,
   transform_ext::StructuredOpMatcher *pattern, *fill, *leading, *trailing;
   transform_ext::MatchedReductionCaptures ignore;
   transform_ext::MatcherContext matcherContext;
-  makeReductionMatcher(matcherContext, pattern, fill, leading, trailing,
-                       ignore);
+  makeReductionMatcher(matcherContext, pattern, fill, leading, trailing, ignore,
+                       mustMatchEntireFunc);
 
   // TODO: need a mechanism for this to go around the entire IR,
   // potentially with list matches for each group.
-  Operation *root = state.getPayloadOps(handles[0])[0];
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
 
   WalkResult walkResult = root->walk([&](Operation *op) {
     pattern->resetCapture();
@@ -823,7 +695,172 @@ reductionCallback(transform_ext::MatchCallbackResult &res, Location loc,
   return emitSilenceableFailure(loc) << "failed to match";
 }
 
+/// Match callback for a matmul with fill and optional trailing
+/// elementwise operations. Matches *the first* occurrence of such a convolution
+/// within an op associated with the given handle.
+///
+/// Input handles:
+///
+///   - container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - the "fill" op preceding the convolution, if present;
+///   - convolution op;
+///   - trailing elementwise op, if any.
+static DiagnosedSilenceableFailure
+matmulCallback(transform_ext::MatchCallbackResult &res, Location loc,
+               const mlir::transform::TransformState &state,
+               ValueRange handles) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_ext::StructuredOpMatcher *pattern, *fill, *trailing;
+  transform_ext::MatchedMatmulCaptures ignore;
+  transform_ext::MatcherContext matcherContext;
+  makeMatmulMatcher(matcherContext, pattern, fill, trailing, ignore,
+                    /*mustMatchEntireFunc=*/true);
+
+  // TODO: need a mechanism for this to go around the entire IR,
+  // potentially with list matches for each group.
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
+
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    pattern->resetCapture();
+    if (!matchPattern(op, *pattern))
+      return WalkResult::advance();
+
+    // TODO: notify properly.
+    LLVM_DEBUG({
+      DBGS() << "fill:\n";
+      if (fill->getCaptured())
+        DBGS() << fill->getCaptured() << "\n";
+      DBGS() << "pattern: " << pattern->getCaptured() << "\n";
+      DBGS() << "trailing:\n";
+      if (trailing->getCaptured())
+        DBGS() << trailing->getCaptured() << "\n";
+    });
+
+    res.addPayloadGroup({fill->getCaptured()});
+    res.addPayloadGroup({pattern->getCaptured()});
+    res.addPotentiallyEmptyPayloadGroup(trailing->getCaptured());
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+/// Match callback for linalg.batch_matmul and its linalg.generic equivalent fed
+/// by a linalg.fill.
+///
+/// Input handles:
+///
+///   - the container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - the fill op initializing the output;
+///   - the main compute op.
+static DiagnosedSilenceableFailure
+batchMatmulCallback(transform_ext::MatchCallbackResult &res, Location loc,
+                    const mlir::transform::TransformState &state,
+                    ValueRange handles) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_ext::StructuredOpMatcher *pattern, *fill;
+  transform_ext::MatchedMatmulCaptures ignore;
+  transform_ext::MatcherContext matcherContext;
+  transform_ext::makeBatchMatmulMatcher(matcherContext, pattern, fill, ignore,
+                                        /*mustMatchEntireFunc*/ true);
+
+  // TODO: need a mechanism for this to go around the entire IR,
+  // potentially with list matches for each group.
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
+
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    pattern->resetCapture();
+    if (!matchPattern(op, *pattern))
+      return WalkResult::advance();
+
+    // TODO: notify properly
+    LLVM_DEBUG({
+      DBGS() << "fill:" << fill->getCaptured() << "\n";
+      DBGS() << "pattern: " << pattern->getCaptured() << "\n";
+    });
+
+    res.addPayloadGroup({fill->getCaptured()});
+    res.addPayloadGroup({pattern->getCaptured()});
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match batch matmul";
+}
+
+/// Match callback for a tensor.pad. Matches *the first* occurrence of such pad
+/// within an op associated with the given handle.
+///
+/// Input handles:
+///
+///   - the container op, must be associated with one operation.
+///
+/// Output handles:
+///
+///   - the pad op.
+static DiagnosedSilenceableFailure
+padCallback(transform_ext::MatchCallbackResult &res, Location loc,
+            const mlir::transform::TransformState &state, ValueRange handles,
+            bool mustMatchEntireFunc) {
+  if (handles.size() != 1 ||
+      !llvm::hasSingleElement(state.getPayloadOps(handles[0]))) {
+    return emitSilenceableFailure(loc)
+           << "expected one handle to one operation";
+  }
+
+  transform_ext::CapturingOpMatcher *pattern;
+  transform_ext::MatchedPadCaptures ignore;
+  transform_ext::MatcherContext matcherContext;
+  makePadMatcher(matcherContext, pattern, ignore, mustMatchEntireFunc);
+
+  Operation *root = *state.getPayloadOps(handles[0]).begin();
+
+  WalkResult walkResult = root->walk([&](Operation *op) {
+    pattern->resetCapture();
+    if (!matchPattern(op, *pattern))
+      return WalkResult::advance();
+
+    // TODO: notify properly.
+    LLVM_DEBUG({
+      DBGS() << "pad:\n";
+      if (pattern->getCaptured())
+        DBGS() << pattern->getCaptured() << "\n";
+    });
+
+    res.addPayloadGroup({pattern->getCaptured()});
+    return WalkResult::interrupt();
+  });
+
+  if (walkResult.wasInterrupted())
+    return DiagnosedSilenceableFailure::success();
+  return emitSilenceableFailure(loc) << "failed to match";
+}
+
+//===---------------------------------------------------------------------===//
+// RegisterMatchCallbacksOp
+//===---------------------------------------------------------------------===//
+
 DiagnosedSilenceableFailure transform_ext::RegisterMatchCallbacksOp::apply(
+    mlir::transform::TransformRewriter &rewriter,
     mlir::transform::TransformResults &results,
     mlir::transform::TransformState &state) {
   auto &registry = state.addExtension<transform_ext::MatchCallbacksRegistry>();
@@ -832,7 +869,16 @@ DiagnosedSilenceableFailure transform_ext::RegisterMatchCallbacksOp::apply(
                             testRepeatedMatcherUseCallback);
   registry.registerCallback("_test_value_matcher_callback",
                             testValueMatcherCallback);
-  registry.registerCallback("reduction", reductionCallback);
+  registry.registerCallback("_test_shaped_value_matcher_callback",
+                            testShapedValueMatcherCallback);
+  registry.registerCallback("convolution", convolutionCallback);
+  registry.registerCallback("matmul", matmulCallback);
+  registry.registerCallback("batch_matmul", batchMatmulCallback);
+  registry.registerCallback("pad", wrapAsEntireFuncMatch(padCallback));
+  registry.registerCallback("reduction",
+                            wrapAsEntireFuncMatch(reductionCallback));
+  registry.registerCallback("reduction_partial",
+                            wrapAsPartialMatch(reductionCallback));
   return DiagnosedSilenceableFailure::success();
 }
 
@@ -848,16 +894,17 @@ void transform_ext::RegisterMatchCallbacksOp::getEffects(
 //===---------------------------------------------------------------------===//
 
 DiagnosedSilenceableFailure
-transform_ext::TakeFirstOp::apply(mlir::transform::TransformResults &results,
+transform_ext::TakeFirstOp::apply(mlir::transform::TransformRewriter &rewriter,
+                                  mlir::transform::TransformResults &results,
                                   mlir::transform::TransformState &state) {
   SmallVector<Operation *> concatenated;
   bool found = false;
   for (Value handle : getInputs()) {
-    ArrayRef<Operation *> payloads = state.getPayloadOps(handle);
+    auto payloads = state.getPayloadOps(handle);
     if (payloads.empty())
       continue;
     if (!found) {
-      results.set(getFirst().cast<OpResult>(), payloads);
+      results.set(cast<OpResult>(getFirst()), payloads);
       found = true;
     } else {
       llvm::append_range(concatenated, payloads);
@@ -865,16 +912,15 @@ transform_ext::TakeFirstOp::apply(mlir::transform::TransformResults &results,
   }
 
   if (!found)
-    results.set(getFirst().cast<OpResult>(), {});
-  results.set(getRest().cast<OpResult>(), concatenated);
+    results.set(cast<OpResult>(getFirst()), {});
+  results.set(cast<OpResult>(getRest()), concatenated);
   return DiagnosedSilenceableFailure::success();
 }
 
 void transform_ext::TakeFirstOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  mlir::transform::onlyReadsHandle(getInputs(), effects);
-  mlir::transform::producesHandle(getFirst(), effects);
-  mlir::transform::producesHandle(getRest(), effects);
+  mlir::transform::onlyReadsHandle(getInputsMutable(), effects);
+  mlir::transform::producesHandle(getOperation()->getOpResults(), effects);
 }
 
 //===---------------------------------------------------------------------===//
@@ -882,7 +928,8 @@ void transform_ext::TakeFirstOp::getEffects(
 //===---------------------------------------------------------------------===//
 
 DiagnosedSilenceableFailure transform_ext::EmitRemarkOp::applyToOne(
-    Operation *target, mlir::transform::ApplyToEachResultList &results,
+    transform::TransformRewriter &rewriter, Operation *target,
+    mlir::transform::ApplyToEachResultList &results,
     mlir::transform::TransformState &state) {
   for (Operation *payload : state.getPayloadOps(getHandle())) {
     payload->emitRemark(getMessage());
@@ -892,6 +939,6 @@ DiagnosedSilenceableFailure transform_ext::EmitRemarkOp::applyToOne(
 
 void transform_ext::EmitRemarkOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
-  mlir::transform::onlyReadsHandle(getHandle(), effects);
+  mlir::transform::onlyReadsHandle(getHandleMutable(), effects);
   mlir::transform::onlyReadsPayload(effects);
 }

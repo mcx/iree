@@ -8,7 +8,6 @@
 
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
-#include "iree/compiler/Dialect/Util/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Transforms/Patterns.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -16,13 +15,16 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
 
-class ApplyPatternsPass : public ApplyPatternsBase<ApplyPatternsPass> {
- public:
+#define GEN_PASS_DEF_APPLYPATTERNSPASS
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h.inc"
+
+namespace {
+
+class ApplyPatternsPass
+    : public impl::ApplyPatternsPassBase<ApplyPatternsPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry
         .insert<BuiltinDialect, func::FuncDialect, IREE::Util::UtilDialect>();
@@ -41,7 +43,7 @@ class ApplyPatternsPass : public ApplyPatternsBase<ApplyPatternsPass> {
     IREE::Util::populateCommonPatterns(context, patterns);
 
     FrozenRewritePatternSet frozenPatterns(std::move(patterns));
-    if (failed(applyPatternsAndFoldGreedily(getOperation(), frozenPatterns))) {
+    if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
       getOperation()->emitError()
           << "failed to apply patterns, likely due to a bad pattern that "
              "causes an infinite fixed point iteration";
@@ -50,11 +52,6 @@ class ApplyPatternsPass : public ApplyPatternsBase<ApplyPatternsPass> {
   }
 };
 
-std::unique_ptr<OperationPass<void>> createApplyPatternsPass() {
-  return std::make_unique<ApplyPatternsPass>();
-}
+} // namespace
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

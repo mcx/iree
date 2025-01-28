@@ -1,3 +1,11 @@
+---
+hide:
+  - tags
+tags:
+  - CPU
+icon: octicons/cpu-16
+---
+
 # RISC-V cross-compilation
 
 Running on a platform like RISC-V involves cross-compiling from a _host_
@@ -9,7 +17,7 @@ and operating system):
 * IREE's _runtime_ is built on the host for the target. The runtime is then
   pushed to the target to run natively.
 
-## Prerequisites
+## :octicons-download-16: Prerequisites
 
 ### Host environment setup
 
@@ -26,7 +34,7 @@ See instructions in the following links
 
 * [Clang getting started](https://clang.llvm.org/get_started.html)
 * [RISC-V GNU toolchain](https://github.com/riscv/riscv-gnu-toolchain)
-* [QEMU](https://github.com/qemu/qemu)
+* [QEMU](https://gitlab.com/qemu-project/qemu)
 * [RISC-V Linux QEMU](https://risc-v-getting-started-guide.readthedocs.io/en/latest/linux-qemu.html)
 
 !!! note
@@ -43,12 +51,17 @@ from the IREE root directory:
 ./build_tools/riscv/riscv_bootstrap.sh
 ```
 
+!!! note
+    The prebuilt toolchain is built with AlmaLinux release 8.8
+    [docker](https://quay.io/pypa/manylinux_2_28_x86_64)
+    It requires glibc >= 2.28 for your host machine.
+
 #### Support vector extension
 
 For RISC-V vector extensions support, see
 [additional instructions](#optional-configuration)
 
-## Configure and build
+## :octicons-sliders-16: Configure and build
 
 ### Host configuration
 
@@ -68,7 +81,7 @@ cmake --build ../iree-build/ --target install
 
 The following instruction shows how to build for a RISC-V 64-bit Linux machine.
 For other RISC-V targets, please refer to
-[riscv.toolchain.cmake](https://github.com/openxla/iree/blob/main/build_tools/cmake/riscv.toolchain.cmake)
+[riscv.toolchain.cmake](https://github.com/iree-org/iree/blob/main/build_tools/cmake/riscv.toolchain.cmake)
 as a reference of how to set up the cmake configuration.
 
 #### RISC-V 64-bit Linux target
@@ -85,12 +98,12 @@ cmake -GNinja -B ../iree-build-riscv/ \
 cmake --build ../iree-build-riscv/
 ```
 
-## Running IREE bytecode modules on the RISC-V system
+## :octicons-code-16: Running IREE bytecode modules on the RISC-V system
 
 !!! note
     The following instructions are meant for the RISC-V 64-bit Linux
     target. For the bare-metal target, please refer to
-    [simple_embedding](https://github.com/openxla/iree/blob/main/samples/simple_embedding)
+    [simple_embedding](https://github.com/iree-org/iree/blob/main/samples/simple_embedding)
     to see how to build a ML workload for a bare-metal machine.
 
 Set the path to qemu-riscv64 Linux emulator binary in the `QEMU_BIN` environment
@@ -130,25 +143,24 @@ ${QEMU_BIN} \
  toolchain and the emulator, build the tools from the following sources:
 
 * RISC-V toolchain is built from
-<https://github.com/llvm/llvm-project> (main branch).
+<https://github.com/llvm/llvm-project>.
     * Currently, the LLVM compiler is built on GNU toolchain, including libgcc,
       GNU linker, and C libraries. You need to build GNU toolchain first.
     * Clone GNU toolchain from:
-      <https://github.com/riscv/riscv-gnu-toolchain>
-      (master branch). Switch the "riscv-binutils" submodule to
-      `git://sourceware.org/git/binutils-gdb.git` (master branch) manually.
+      <https://github.com/riscv/riscv-gnu-toolchain>.
+      Switch the "riscv-binutils" submodule to
+      `git://sourceware.org/git/binutils-gdb.git` manually.
 * RISC-V QEMU is built from
-[https://github.com/sifive/qemu/tree/v5.2.0-rvv-rvb-zfh](https://github.com/sifive/qemu/tree/v5.2.0-rvv-rvb-zfh).
+<https://gitlab.com/qemu-project/qemu/tree/v8.1.2>.
 
 The SIMD code can be generated following the
-[IREE CPU flow](../deployment-configurations/cpu.md)
+[IREE CPU flow](../guides/deployment-configurations/cpu.md)
 with the additional command-line flags
 
-```shell hl_lines="3 4 5 6 7 8"
+```shell hl_lines="3-6"
 tools/iree-compile \
   --iree-hal-target-backends=llvm-cpu \
   --iree-llvmcpu-target-triple=riscv64 \
-  --iree-llvmcpu-target-cpu=generic-rv64 \
   --iree-llvmcpu-target-abi=lp64d \
   --iree-llvmcpu-target-cpu-features="+m,+a,+f,+d,+zvl512b,+v" \
   --riscv-v-fixed-length-vector-lmul-max=8 \
@@ -159,7 +171,7 @@ Then run on the RISC-V QEMU:
 
 ```shell hl_lines="2 5"
 ${QEMU_BIN} \
-  -cpu rv64,x-v=true,x-k=true,vlen=512,elen=64,vext_spec=v1.0 \
+  -cpu rv64,Zve64d=true,vlen=512,elen=64,vext_spec=v1.0 \
   -L ${RISCV_TOOLCHAIN_ROOT}/sysroot/ \
   ../iree-build-riscv/tools/iree-run-module \
   --device=local-task \

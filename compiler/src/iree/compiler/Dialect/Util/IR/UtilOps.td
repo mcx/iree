@@ -7,15 +7,18 @@
 #ifndef IREE_DIALECT_UTIL_IR_UTIL_OPS
 #define IREE_DIALECT_UTIL_IR_UTIL_OPS
 
+include "iree/compiler/Dialect/Util/IR/UtilAttrs.td"
 include "iree/compiler/Dialect/Util/IR/UtilBase.td"
 include "iree/compiler/Dialect/Util/IR/UtilInterfaces.td"
 include "iree/compiler/Dialect/Util/IR/UtilTypes.td"
 include "mlir/IR/BuiltinAttributeInterfaces.td"
-include "mlir/IR/FunctionInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/CallInterfaces.td"
+include "mlir/Interfaces/CastInterfaces.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/FunctionInterfaces.td"
+include "mlir/Interfaces/InferIntRangeInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
@@ -33,10 +36,19 @@ class Util_PureOp<string mnemonic, list<Trait> traits = []> :
     Util_Op<mnemonic, !listconcat(traits, [Pure])>;
 
 //===----------------------------------------------------------------------===//
-// Byte buffers and host data
+// Type manipulation
 //===----------------------------------------------------------------------===//
 
-def Util_NullOp : Util_PureOp<"null"> {
+def OpGroupTypeManipulationOps : OpDocGroup {
+  let summary = "Type manipulation ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupTypeManipulationOps in {
+
+def Util_NullOp : Util_PureOp<"null", [
+  ConstantLike,
+]> {
   let summary = [{returns a null type value}];
   let description = [{
     Defines an SSA value that is lowered into dialects supporting
@@ -50,6 +62,38 @@ def Util_NullOp : Util_PureOp<"null"> {
   let assemblyFormat = [{
     attr-dict `:` type($result)
   }];
+
+  let hasFolder = 1;
+}
+
+def Util_CastOp : Util_PureOp<"cast", [
+  DeclareOpInterfaceMethods<CastOpInterface>,
+  DeclareOpInterfaceMethods<Util_TiedOpInterface, [
+    "getTiedResult",
+    "getTiedResultOperand",
+    "getTiedResultOperandIndex",
+    "getTiedResultOperandIndices",
+  ]>,
+]> {
+  let summary = [{casts one util type to another ala static_cast/dynamic_cast}];
+  let description = [{
+    Performs a type cast between object types known to the util dialect.
+  }];
+
+  let arguments = (ins
+    AnyType:$operand
+  );
+  let results = (outs
+    AnyType:$result
+  );
+
+  let assemblyFormat = [{
+    $operand attr-dict `:` type($operand) `to` type($result)
+  }];
+
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 }
 
 def Util_CmpEQOp : Util_PureOp<"cmp.eq", [
@@ -77,9 +121,43 @@ def Util_CmpEQOp : Util_PureOp<"cmp.eq", [
   let hasFolder = 1;
 }
 
+def Util_CmpNEOp : Util_PureOp<"cmp.ne", [
+  AllTypesMatch<["lhs", "rhs"]>,
+  Commutative,
+]> {
+  let summary = [{compares two values for inequality}];
+  let description = [{
+    Compares two operands for inequality. This is intended for comparing IREE
+    reference types (like !util.buffer) that cannot be used with std.cmpi.
+  }];
+
+  let arguments = (ins
+    AnyType:$lhs,
+    AnyType:$rhs
+  );
+  let results = (outs
+    I1:$result
+  );
+
+  let assemblyFormat = [{
+    operands attr-dict `:` type($lhs)
+  }];
+
+  let hasFolder = 1;
+}
+
+} // OpGroupTypeManipulationOps
+
 //===----------------------------------------------------------------------===//
 // Data type conversions
 //===----------------------------------------------------------------------===//
+
+def OpGroupDataTypeConversionOps : OpDocGroup {
+  let summary = "Data type conversion ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupDataTypeConversionOps in {
 
 def Util_NumericOptionalNarrowOp : Util_PureOp<"numeric.optional_narrow", [
   SameOperandsAndResultType
@@ -126,7 +204,7 @@ def Util_NumericOptionalNarrowOp : Util_PureOp<"numeric.optional_narrow", [
     OpBuilder<(ins
       "Value":$operand,
       "Type":$type,
-      "Optional<std::pair<int64_t, int64_t>>":$integerRange
+      "std::optional<std::pair<int64_t, int64_t>>":$integerRange
     ),
     [{
       IntegerAttr minValueAttr;
@@ -142,19 +220,28 @@ def Util_NumericOptionalNarrowOp : Util_PureOp<"numeric.optional_narrow", [
 
   let extraClassDeclaration = [{
     bool isSigned() {
-      if (auto integerType = getType().dyn_cast<IntegerType>()) {
+      if (auto integerType = dyn_cast<IntegerType>(getType())) {
         return !integerType.isUnsigned();
       }
       return true;
     }
 
-    Optional<std::pair<int64_t, int64_t>> getIntegerRange();
+    std::optional<std::pair<int64_t, int64_t>> getIntegerRange();
   }];
 }
+
+} // OpGroupDataTypeConversionOps
 
 //===----------------------------------------------------------------------===//
 // Range arithmetic
 //===----------------------------------------------------------------------===//
+
+def OpGroupRangeArithmeticOps : OpDocGroup {
+  let summary = "Range arithmetic ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupRangeArithmeticOps in {
 
 def Util_RangeMinOp : Util_PureOp<"range.min", [
   SameOperandsAndResultType,
@@ -235,25 +322,36 @@ def Util_RangeExtentsOp : Util_PureOp<"range.extents", [
   let hasCanonicalizer = 1;
 }
 
+} // OpGroupRangeArithmeticOps
+
 //===----------------------------------------------------------------------===//
-// Address/offset Arithmetic
+// Address/offset arithmetic
 //===----------------------------------------------------------------------===//
 
+def OpGroupAddressOffsetArithmeticOps : OpDocGroup {
+  let summary = "Address/offset arithmetic ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupAddressOffsetArithmeticOps in {
+
 def Util_AlignOp : Util_PureOp<"align", [
-  SameOperandsAndResultType
-  ]> {
+    SameOperandsAndResultType,
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>,
+    DeclareOpInterfaceMethods<InferIntDivisibilityOpInterface, ["inferResultRanges"]>
+]> {
   let summary = "Aligns up to a power-of-two alignment if required";
   let description = [{
      Aligns |value| up to the given power-of-two |alignment| if required.
   }];
 
   let arguments = (ins
-    SignlessIntegerLike:$value,
-    SignlessIntegerLike:$alignment
+    SignlessIntegerOrIndexLike:$value,
+    SignlessIntegerOrIndexLike:$alignment
   );
 
   let results = (outs
-    SignlessIntegerLike:$result
+    SignlessIntegerOrIndexLike:$result
   );
 
   let assemblyFormat = [{
@@ -301,9 +399,130 @@ def Util_SizeOfOp : Util_PureOp<"sizeof"> {
   let hasFolder = 1;
 }
 
+} // OpGroupAddressOffsetArithmeticOps
+
+//===----------------------------------------------------------------------===//
+// Value utility ops
+//===----------------------------------------------------------------------===//
+
+def OpGroupValueUtilityOps : OpDocGroup {
+  let summary = "Value utility ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupValueUtilityOps in {
+
+def Util_SwitchOp : Util_PureOp<"switch", [
+  AllTypesMatch<["default_value", "result"]>,
+]> {
+  let summary = [{primitive switch operation}];
+  let description = [{
+    Returns the value with the given `index` in `values` or `default_value` if
+    the index is out of bounds.
+
+    ```mlir
+    // Switch %index to cases of %c100/%c200/%c300 if index==0, ==1, ==2.
+    // If %index is out of range (<0 or >2) then default to %c5.
+    %0 = util.switch %index[%c100, %c200, %c300] else %c5 : i32
+    ```
+  }];
+
+  let arguments = (ins
+    Index:$index,
+    Util_Primitive:$default_value,
+    Variadic<Util_Primitive>:$values
+  );
+  let results = (outs
+    Util_Primitive:$result
+  );
+
+  let assemblyFormat = [{
+    type($default_value) `from`
+    custom<TypedValueList>(ref(type($default_value)), $values, type($values))
+    `at` $index
+    `else` $default_value
+    attr-dict
+    `:` type($result)
+  }];
+
+  let hasFolder = 1;
+}
+
+} // OpGroupValueUtilityOps
+
 //===----------------------------------------------------------------------===//
 // Compiler hints
 //===----------------------------------------------------------------------===//
+
+def OpGroupCompilerHintOps : OpDocGroup {
+  let summary = "Compiler hint ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupCompilerHintOps in {
+
+def Util_AssumeIntOp : Util_PureOp<"assume.int", [
+    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>,
+    DeclareOpInterfaceMethods<InferIntDivisibilityOpInterface, ["inferResultRanges"]>,
+    AllTypesMatch<["operands", "results"]>
+]> {
+  let summary = "memorializes assumptions about index/integer values.";
+  let description = [{
+    This op is used to memorialize the result of some integer analysis or
+    outside knowledge across a boundary beyond which such information can
+    not be easily recovered. Assumptions are made per op/result pair.
+
+    Assumptions are tied to operands as rows of permutations of an
+    `#util.assume.int` per operand. The number of permutations is the rank.
+    Typically multiple permutations record a specific subset of assumptions
+    broken down per call-site in some way that is meaningful to the receiver.
+    Implementations can use this information to specialize on each
+    permutation if it is meaninful to do so (i.e. vs unioning across them).
+    In such cases, there will typically be one such op at the top of a
+    function or scope which passes all covered operands through it.
+  }];
+
+  let arguments = (ins
+    Variadic<AnySignlessIntegerOrIndex>:$operands,
+    Util_MultiValueIntAssumptionAttrList:$assumptions
+  );
+  let results = (outs
+    Variadic<AnySignlessIntegerOrIndex>:$results
+  );
+  let builders = [
+    // Helper for building simple single operand/single assumption ops.
+    OpBuilder<(ins
+      "Value":$singleOperand,
+      "IntAssumptionAttr":$singleAssumption
+    )>,
+    OpBuilder<(ins
+      "ArrayRef<Value>":$operands,
+      "ArrayRef<ArrayAttr>":$assumptions
+    )>,
+  ];
+
+  let extraClassDeclaration = [{
+    // Gets the list of assumptions for an operand.
+    SmallVector<IntAssumptionAttr> getOperandAssumptions(unsigned operandIndex);
+
+    // Gets the unioned unsigned range for an operand. If there are multiple
+    // assumptions for the operand, this will return the bounding range for
+    // them all. If there is no umin/umax for any row in the set, then
+    // std::nullopt will be returned for that position.
+    std::pair<std::optional<uint64_t>, std::optional<uint64_t>>
+      getUnionedUnsignedRange(unsigned operandIndex);
+
+    // Gets the unioned divisor for an operand. If there are multiple divisor
+    // assumptions, the gcd of all of them is returned. If there are no
+    // divisor assumptions or if there is not a udiv for any row, std::nullopt
+    // is returned.
+    std::optional<uint64_t> getUnionedUnsignedDivisor(unsigned operandIndex);
+  }];
+
+  let hasCanonicalizeMethod  = 1;
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
 
 def Util_OptimizationBarrierOp : Util_Op<"optimization_barrier", [
   SameOperandsAndResultType,
@@ -351,10 +570,10 @@ def Util_UnfoldableConstantOp : Util_Op<"unfoldable_constant"> {
 }
 
 def Util_UnreachableOp : Util_Op<"unreachable", [
-    NoMemoryEffect,
-    ReturnLike,
-    Terminator
-  ]> {
+  NoMemoryEffect,
+  ReturnLike,
+  Terminator
+]> {
   let summary = [{unreachable assertion op}];
   let description = [{
     Signals to the compiler that the parent block should not be reachable.
@@ -379,16 +598,25 @@ def Util_UnreachableOp : Util_Op<"unreachable", [
   let assemblyFormat = "$message attr-dict";
 }
 
+} // OpGroupCompilerHintOps
+
 //===----------------------------------------------------------------------===//
 // Structural ops
 //===----------------------------------------------------------------------===//
 
+def OpGroupStructuralOps : OpDocGroup {
+  let summary = "Structural ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupStructuralOps in {
+
 def Util_InitializerOp : Util_Op<"initializer", [
-    IsolatedFromAbove,
-    FunctionOpInterface,
-    CallableOpInterface,
-    Util_InitializerOpInterface,
-  ]> {
+  IsolatedFromAbove,
+  FunctionOpInterface,
+  CallableOpInterface,
+  Util_InitializerOpInterface,
+]> {
   let summary = [{global initialization function}];
   let description = [{
     A function that is called in definition order upon module initialization.
@@ -428,6 +656,18 @@ def Util_InitializerOp : Util_Op<"initializer", [
     Region *getCallableRegion() { return &getBody(); }
     ArrayRef<Type> getCallableResults() { return {}; }
 
+    /// Returns the argument attributes for all callable region arguments or
+    /// null if there are none.
+    ::mlir::ArrayAttr getCallableArgAttrs() {
+      return getArgAttrs().value_or(nullptr);
+    }
+
+    /// Returns the result attributes for all callable region results or
+    /// null if there are none.
+    ::mlir::ArrayAttr getCallableResAttrs() {
+      return getResAttrs().value_or(nullptr);
+    }
+
     /// Make symbol optional as this op has no symbol.
     bool isOptionalSymbol() { return true; }
   }];
@@ -435,8 +675,170 @@ def Util_InitializerOp : Util_Op<"initializer", [
   let hasCanonicalizer = 1;
 }
 
-def Util_InitializerReturnOp : Util_Op<"initializer.return", [
-  HasParent<"IREE::Util::InitializerOp">,
+def Util_FuncOp : Util_Op<"func", [
+  AffineScope,
+  AutomaticAllocationScope,
+  FunctionOpInterface,
+  IsolatedFromAbove,
+  OpAsmOpInterface,
+]> {
+  let summary = [{function operation containing a CFG region}];
+  let description = [{
+    An operation declaring a callable function.
+
+    An external function declaration (used when referring to a function declared
+    in some other module) has no body.
+  }];
+
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    TypeAttrOf<FunctionType>:$function_type,
+    OptionalAttr<Util_TiedOpStorageAttr>:$tied_operands,
+    OptionalAttr<StrAttr>:$sym_visibility,
+    OptionalAttr<DictArrayAttr>:$arg_attrs,
+    OptionalAttr<DictArrayAttr>:$res_attrs,
+    OptionalAttr<Util_InliningPolicyAttrInterface>:$inlining_policy
+  );
+
+  let regions = (region AnyRegion:$body);
+
+  let builders = [
+    OpBuilder<(ins
+      "StringRef":$name,
+      "FunctionType":$type,
+      CArg<"ArrayAttr", "{}">:$tiedOperands,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs,
+      CArg<"ArrayRef<DictionaryAttr>", "{}">:$argAttrs,
+      CArg<"ArrayRef<DictionaryAttr>", "{}">:$resAttrs
+    )>,
+  ];
+
+  let extraClassDeclaration = [{
+    static FuncOp create(Location location, StringRef name, FunctionType type,
+                         ArrayRef<int64_t> tiedOperands = {},
+                         ArrayRef<NamedAttribute> attrs = {},
+                         ArrayRef<DictionaryAttr> argAttrs = {},
+                         ArrayRef<DictionaryAttr> resAttrs = {});
+
+    bool isDeclaration() { return isExternal(); }
+
+    ::mlir::Region *getCallableRegion() { return &getBody(); }
+    ArrayRef<Type> getCallableResults() { return getFunctionType().getResults(); }
+    ::mlir::ArrayAttr getCallableArgAttrs() { return getArgAttrs().value_or(nullptr); }
+    ::mlir::ArrayAttr getCallableResAttrs() { return getResAttrs().value_or(nullptr); }
+
+    ArrayRef<Type> getArgumentTypes() { return getFunctionType().getInputs(); }
+    ArrayRef<Type> getResultTypes() { return getFunctionType().getResults(); }
+
+    bool canDiscardOnUseEmpty();
+
+    // Returns true if any operand is tied to a result.
+    bool hasAnyTiedOperands();
+
+    // Updates the function signature to potentially expand each argument and
+    // result. Only the signature and the metadata on the function (tied
+    // operands, argument/result attrs, etc) are updated and the body region
+    // remains unchanged.
+    //
+    // Any type that may be tied must remain in the same relative order (expand
+    // by appending types after the base type).
+    //
+    // If |newSignature| is provided
+    void expandSignature(
+        std::function<void(unsigned, Type, SmallVectorImpl<Type> &)> expandArgument,
+        std::function<void(unsigned, Type, SmallVectorImpl<Type> &)> expandResult);
+  }];
+
+  let hasCustomAssemblyFormat = 1;
+}
+
+def Util_CallOp : Util_Op<"call", [
+  CallOpInterface,
+  Util_TiedOpInterface,
+  DeclareOpInterfaceMethods<SymbolUserOpInterface>,
+]> {
+  let summary = [{function call operation}];
+  let description = [{
+    Represents a direct call to a function that is within the same symbol scope
+    as the call. The operands and result types of the call must match the
+    specified function type.
+
+    Calls support tied operands which indicate that specific results alias
+    a specific operand. The operand and result types are allowed to differ if
+    a cast is performed within the callee.
+
+    Example:
+    ```mlir
+    util.func @fn(%arg0: i32, %arg1: tensor<f32>) -> (f32, %arg1 as tensor<i32>)
+    ...
+    %0 = util.call @fn(%0, %1) : (i32, tensor<f32>) -> (f32, %1 as tensor<i32>)
+    ```
+  }];
+
+  let arguments = (ins
+    FlatSymbolRefAttr:$callee,
+    Variadic<AnyType>:$operands,
+    OptionalAttr<Util_TiedOpStorageAttr>:$tied_operands
+  );
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      CArg<"FunctionOpInterface">:$callee,
+      CArg<"ValueRange">:$operands,
+      CArg<"ArrayAttr", "{}">:$tied_operands,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs
+    ), [{
+      build($_builder, $_state, callee.getResultTypes(), callee.getName(),
+            operands, tied_operands);
+      $_state.addAttributes(attrs);
+    }]>,
+  ];
+
+  let assemblyFormat = [{
+    $callee `(` $operands `)`
+    attr-dict `:`
+    custom<OperandTypeList>(type($operands))
+    `->`
+    custom<TiedFunctionResultList>(ref($operands),
+                                   ref(type($operands)),
+                                   type($results),
+                                   $tied_operands)
+  }];
+
+  let extraClassDeclaration = [{
+    FunctionType getCalleeType();
+
+    operand_range getArgOperands() { return {arg_operand_begin(), arg_operand_end()}; }
+    MutableOperandRange getArgOperandsMutable() { return getOperandsMutable(); }
+    operand_iterator arg_operand_begin() { return operand_begin(); }
+    operand_iterator arg_operand_end() { return operand_end(); }
+
+    CallInterfaceCallable getCallableForCallee() {
+      return (*this)->getAttrOfType<SymbolRefAttr>("callee");
+    }
+    void setCalleeFromCallable(CallInterfaceCallable callee) {
+      (*this)->setAttr("callee", cast<SymbolRefAttr>(callee));
+    }
+
+    // Clones the call and potentially expands each operand and result.
+    // Callers can then replace result uses using the returned op.
+    // Any type that may be tied must remain in the same relative order (expand
+    // by appending types after the base type).
+    IREE::Util::CallOp cloneAndExpand(
+        std::function<void(unsigned, Value, SmallVectorImpl<Value> &)> expandOperand,
+        std::function<void(unsigned, Type, SmallVectorImpl<Type> &)> expandResult,
+        OpBuilder &builder);
+  }];
+}
+
+def Util_ReturnOp : Util_Op<"return", [
+  ParentOneOf<[
+    "IREE::Util::InitializerOp",
+    "IREE::Util::FuncOp",
+  ]>,
   Pure,
   ReturnLike,
   Terminator,
@@ -446,14 +848,36 @@ def Util_InitializerReturnOp : Util_Op<"initializer.return", [
     Returns control from an initializer function.
   }];
 
-  let arguments = (ins);
+  let arguments = (ins
+    Variadic<AnyType>:$operands
+  );
 
-  let assemblyFormat = "attr-dict";
+  let builders = [
+    OpBuilder<(ins), [{
+      build($_builder, $_state, std::nullopt);
+    }]>,
+  ];
+
+  let assemblyFormat = [{
+    attr-dict
+    ($operands^ `:` type($operands))?
+  }];
+
+  let hasVerifier = 1;
 }
+
+} // OpGroupStructuralOps
 
 //===----------------------------------------------------------------------===//
 // Globals
 //===----------------------------------------------------------------------===//
+
+def OpGroupGlobalOps : OpDocGroup {
+  let summary = "Global ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupGlobalOps in {
 
 def Util_GlobalOp : Util_Op<"global", [
   Symbol,
@@ -471,7 +895,8 @@ def Util_GlobalOp : Util_Op<"global", [
     SymbolNameAttr:$sym_name,
     TypeAttr:$type,
     UnitAttr:$is_mutable,
-    OptionalAttr<TypedAttrInterface>:$initial_value
+    OptionalAttr<TypedAttrInterface>:$initial_value,
+    OptionalAttr<Util_InliningPolicyAttrInterface>:$inlining_policy
   );
 
   let assemblyFormat = [{
@@ -482,13 +907,12 @@ def Util_GlobalOp : Util_Op<"global", [
     custom<TypeOrAttr>($type, $initial_value)
   }];
 
-  let skipDefaultBuilders = 1;
   let builders = [
     OpBuilder<(ins
       "StringRef":$name,
       "bool":$isMutable,
       "Type":$type,
-      "Optional<TypedAttr>":$initialValue,
+      "std::optional<TypedAttr>":$initialValue,
       CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs
     )>,
     OpBuilder<(ins
@@ -498,6 +922,13 @@ def Util_GlobalOp : Util_Op<"global", [
       CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs
     )>,
   ];
+
+  let extraClassDeclaration = [{
+    bool canDiscardOnUseEmpty();
+
+    IREE::Util::GlobalLoadOpInterface createLoadOp(Location loc, OpBuilder &builder);
+    IREE::Util::GlobalStoreOpInterface createStoreOp(Location loc, Value value, OpBuilder &builder);
+  }];
 
   let hasCanonicalizer = 1;
 }
@@ -514,13 +945,15 @@ def Util_GlobalAddressOp : Util_PureOp<"global.address", [
   }];
 
   let arguments = (ins
-    Util_GlobalRefAttr:$global
+    Util_GlobalRefAttr:$global,
+    UnitAttr:$is_immutable
   );
   let results = (outs
     Util_AnyGlobalPtr:$result
   );
 
   let assemblyFormat = [{
+    (`immutable` $is_immutable^)?
     $global attr-dict `:` qualified(type($result))
   }];
 
@@ -544,13 +977,15 @@ def Util_GlobalLoadOp : Util_Op<"global.load", [
   }];
 
   let arguments = (ins
-    Arg<Util_GlobalRefAttr, "", []>:$global
+    Arg<Util_GlobalRefAttr, "", []>:$global,
+    UnitAttr:$is_immutable
   );
   let results = (outs
     AnyType:$result
   );
 
   let assemblyFormat = [{
+    (`immutable` $is_immutable^)?
     $global attr-dict `:` type($result)
   }];
 
@@ -577,13 +1012,15 @@ def Util_GlobalLoadIndirectOp : Util_Op<"global.load.indirect", [
   }];
 
   let arguments = (ins
-    Arg<Util_AnyGlobalPtr, "", []>:$global
+    Arg<Util_AnyGlobalPtr, "", []>:$global,
+    UnitAttr:$is_immutable
   );
   let results = (outs
     AnyType:$result
   );
 
   let assemblyFormat = [{
+    (`immutable` $is_immutable^)?
     $global attr-dict `:` qualified(type($global)) `->` type($result)
   }];
 
@@ -649,6 +1086,8 @@ def Util_GlobalStoreIndirectOp : Util_Op<"global.store.indirect", [
   let hasCanonicalizer = 1;
 }
 
+} // OpGroupGlobalOps
+
 //===----------------------------------------------------------------------===//
 // !util.list<T>
 //===----------------------------------------------------------------------===//
@@ -657,8 +1096,18 @@ def Util_GlobalStoreIndirectOp : Util_Op<"global.store.indirect", [
 // new SSA values. This would make optimizing the list usage much easier and
 // enable hoisting/CSE of list access/mutation.
 
-def Util_ListCreateOp : Util_PureOp<
-    "list.create", [MemoryEffects<[MemAlloc]>]> {
+def OpGroupListOps : OpDocGroup {
+  let summary = "List ops";
+  let description = [{
+    Ops for `!util.list<T>` (mostly just a placeholder for now).
+  }];
+}
+
+let opDocGroup = OpGroupListOps in {
+
+def Util_ListCreateOp : Util_PureOp<"list.create", [
+  MemoryEffects<[MemAlloc]>,
+]> {
   let summary = [{creates a new empty list}];
   let description = [{
     Creates a new empty list with an optional initial capacity.
@@ -674,7 +1123,9 @@ def Util_ListCreateOp : Util_PureOp<
   let assemblyFormat = "($initial_capacity^)? attr-dict `:` qualified(type($result))";
 }
 
-def Util_ListSizeOp : Util_Op<"list.size", [MemoryEffects<[MemRead]>]> {
+def Util_ListSizeOp : Util_Op<"list.size", [
+  MemoryEffects<[MemRead]>,
+]> {
   let summary = [{the size of the list in elements}];
   let description = [{
     Returns the current size of the list in elements.
@@ -690,7 +1141,9 @@ def Util_ListSizeOp : Util_Op<"list.size", [MemoryEffects<[MemRead]>]> {
   let assemblyFormat = "operands attr-dict `:` qualified(type($list))";
 }
 
-def Util_ListResizeOp : Util_Op<"list.resize", [MemoryEffects<[MemWrite]>]> {
+def Util_ListResizeOp : Util_Op<"list.resize", [
+  MemoryEffects<[MemWrite]>,
+]> {
   let summary = [{resizes the list to a new count in elements}];
   let description = [{
     Resizes the list to contain `new_size` elements. This will either truncate
@@ -706,7 +1159,9 @@ def Util_ListResizeOp : Util_Op<"list.resize", [MemoryEffects<[MemWrite]>]> {
   let assemblyFormat = "operands attr-dict `:` qualified(type($list))";
 }
 
-def Util_ListGetOp : Util_Op<"list.get", [MemoryEffects<[MemRead]>]> {
+def Util_ListGetOp : Util_Op<"list.get", [
+  MemoryEffects<[MemRead]>,
+]> {
   let summary = [{element accessor}];
   let description = [{
     Returns the value of the element at the given index. Note that the value
@@ -726,7 +1181,9 @@ def Util_ListGetOp : Util_Op<"list.get", [MemoryEffects<[MemRead]>]> {
   let hasVerifier = 1;
 }
 
-def Util_ListSetOp : Util_Op<"list.set", [MemoryEffects<[MemWrite]>]> {
+def Util_ListSetOp : Util_Op<"list.set", [
+  MemoryEffects<[MemWrite]>,
+]> {
   let summary = [{element mutator}];
   let description = [{
     Sets the element at the given index to the new value.
@@ -743,9 +1200,18 @@ def Util_ListSetOp : Util_Op<"list.set", [MemoryEffects<[MemWrite]>]> {
   let hasVerifier = 1;
 }
 
+} // OpGroupListOps
+
 //===----------------------------------------------------------------------===//
 // !util.buffer
 //===----------------------------------------------------------------------===//
+
+def OpGroupBufferOps : OpDocGroup {
+  let summary = "Buffer ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupBufferOps in {
 
 def Util_BufferConstantOp : Util_PureOp<"buffer.constant", [
   DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
@@ -1168,9 +1634,52 @@ def Util_BufferStoreOp : Util_Op<"buffer.store", [
   }];
 }
 
+def Util_BufferHashOp : Util_Op<"buffer.hash", [
+  MemoryEffects<[MemRead]>,
+  Util_SizeAwareOp,
+  DeclareOpInterfaceMethods<Util_SubrangeOperandOpInterface>,
+]> {
+  let summary = [{computes the hash of a byte range of a buffer}];
+  let description = [{
+    Computes the SipHash-2-4 of a value at a byte offset with the given length.
+    This always uses a seed of `0x0001020304...0e0f` and produces a single 64
+    bit value.
+  }];
+
+  let arguments = (ins
+    Util_BufferType:$source,
+    Util_Size:$source_size,
+    Util_Offset:$source_offset,
+    Util_Size:$length
+  );
+  let results = (outs
+    I64:$result
+  );
+
+  let assemblyFormat = [{
+    $source `[` $source_offset `for` $length `]`
+    `:` type($source) `` `{` $source_size `}` `->` type($result)
+    attr-dict-with-keyword
+  }];
+
+  let extraClassDeclaration = [{
+    Value getOperandSize(unsigned idx) { return getSourceSize(); }
+    Value getResultSize(unsigned idx) { return {}; }
+  }];
+}
+
+} // OpGroupBufferOps
+
 //===----------------------------------------------------------------------===//
 // Status
 //===----------------------------------------------------------------------===//
+
+def OpGroupStatusOps : OpDocGroup {
+  let summary = "Status ops";
+  let description = "";
+}
+
+let opDocGroup = OpGroupStatusOps in {
 
 def Util_StatusCheckOkOp : Util_Op<"status.check_ok"> {
   let summary = [{raises a global failure if a status is not 'ok'}];
@@ -1205,5 +1714,7 @@ def Util_StatusCheckOkOp : Util_Op<"status.check_ok"> {
     }]>,
   ];
 }
+
+} // OpGroupStatusOps
 
 #endif  // IREE_DIALECT_UTIL_IR_UTIL_OPS

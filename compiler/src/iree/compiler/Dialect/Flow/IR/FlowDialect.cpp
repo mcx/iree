@@ -11,7 +11,6 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "llvm/Support/SourceMgr.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -20,10 +19,7 @@
 #include "mlir/Transforms/FoldUtils.h"
 #include "mlir/Transforms/InliningUtils.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+namespace mlir::iree_compiler::IREE::Flow {
 
 namespace {
 
@@ -58,7 +54,7 @@ struct FlowFolderInterface : public DialectFoldInterface {
   }
 };
 
-}  // namespace
+} // namespace
 
 FlowDialect::FlowDialect(MLIRContext *context)
     : Dialect(getDialectNamespace(), context, TypeID::get<FlowDialect>()) {
@@ -78,12 +74,13 @@ FlowDialect::FlowDialect(MLIRContext *context)
 
 Operation *FlowDialect::materializeConstant(OpBuilder &builder, Attribute value,
                                             Type type, Location loc) {
-  if (arith::ConstantOp::isBuildableWith(value, type))
-    return builder.create<arith::ConstantOp>(loc, type, value);
+  if (arith::ConstantOp::isBuildableWith(value, type)) {
+    return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(value));
+  } else if (IREE::Flow::TensorConstantOp::isBuildableWith(value, type)) {
+    return builder.create<IREE::Flow::TensorConstantOp>(loc, type,
+                                                        cast<TypedAttr>(value));
+  }
   return nullptr;
 }
 
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Flow

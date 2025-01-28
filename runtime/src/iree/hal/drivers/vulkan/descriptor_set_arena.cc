@@ -11,11 +11,10 @@
 #include <utility>
 
 #include "iree/base/internal/math.h"
-#include "iree/base/tracing.h"
+#include "iree/hal/drivers/vulkan/base_buffer.h"
 #include "iree/hal/drivers/vulkan/extensibility_util.h"
-#include "iree/hal/drivers/vulkan/native_pipeline_layout.h"
+#include "iree/hal/drivers/vulkan/pipeline_layout.h"
 #include "iree/hal/drivers/vulkan/status_util.h"
-#include "iree/hal/drivers/vulkan/vma_buffer.h"
 
 namespace iree {
 namespace hal {
@@ -24,9 +23,8 @@ namespace vulkan {
 namespace {
 
 static void PopulateDescriptorSetWriteInfos(
-    iree_host_size_t binding_count,
-    const iree_hal_descriptor_set_binding_t* bindings, VkDescriptorSet dst_set,
-    Arena* arena, iree_host_size_t* out_info_count,
+    iree_host_size_t binding_count, const iree_hal_buffer_ref_t* bindings,
+    VkDescriptorSet dst_set, Arena* arena, iree_host_size_t* out_info_count,
     VkWriteDescriptorSet** out_infos) {
   arena->Reset();
   auto buffer_infos =
@@ -37,20 +35,19 @@ static void PopulateDescriptorSetWriteInfos(
     const auto& binding = bindings[i];
 
     auto& buffer_info = buffer_infos[i];
-    buffer_info.buffer =
-        binding.buffer ? iree_hal_vulkan_vma_buffer_handle(
-                             iree_hal_buffer_allocated_buffer(binding.buffer))
-                       : VK_NULL_HANDLE;
+    buffer_info.buffer = binding.buffer
+                             ? iree_hal_vulkan_buffer_handle(binding.buffer)
+                             : VK_NULL_HANDLE;
     buffer_info.offset =
         iree_hal_buffer_byte_offset(binding.buffer) + binding.offset;
-    if (binding.length == IREE_WHOLE_BUFFER) {
+    if (binding.length == IREE_HAL_WHOLE_BUFFER) {
       buffer_info.range = VK_WHOLE_SIZE;
     } else {
-      // Round up to a multiple of 32-bit. 32-bit is the most native bitwidth on
-      // GPUs; it has the best support compared to other bitwidths. We use VMA
-      // to manage GPU memory for us and VMA should already handled proper
-      // alignment when performing allocations; here we just need to provide the
-      // proper "view" to Vulkan drivers over the allocated memory.
+      // Round up to a multiple of 32-bit. 32-bit is the defacto native bitwidth
+      // on GPUs; it has the best support compared to other bitwidths. The
+      // allocator should already handled proper alignment when performing
+      // allocations; here we just need to provide the proper "view" to Vulkan
+      // drivers over the allocated memory.
       //
       // Note this is needed because we can see unusal buffers like
       // tensor<3xi8>. Depending on GPU capabilities, this might not always be
@@ -62,7 +59,7 @@ static void PopulateDescriptorSetWriteInfos(
       // to match the ABI and provide the buffer as 32-bit aligned, otherwise
       // the whole read by the shader is considered as out of bounds per the
       // Vulkan spec. See
-      // https://github.com/openxla/iree/issues/2022#issuecomment-640617234 for
+      // https://github.com/iree-org/iree/issues/2022#issuecomment-640617234 for
       // more details.
       buffer_info.range = iree_device_align(
           std::min(binding.length, iree_hal_buffer_byte_length(binding.buffer) -
@@ -74,7 +71,7 @@ static void PopulateDescriptorSetWriteInfos(
     write_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write_info.pNext = nullptr;
     write_info.dstSet = dst_set;
-    write_info.dstBinding = binding.binding;
+    write_info.dstBinding = (uint32_t)i;
     write_info.dstArrayElement = 0;
     write_info.descriptorCount = 1;
     write_info.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -85,22 +82,6 @@ static void PopulateDescriptorSetWriteInfos(
 
   *out_info_count = write_infos.size();
   *out_infos = write_infos.data();
-}
-
-static VkDescriptorSetAllocateInfo PopulateDescriptorSetsAllocateInfo(
-    const DescriptorPool& descriptor_pool,
-    iree_hal_descriptor_set_layout_t* set_layout) {
-  VkDescriptorSetAllocateInfo allocate_info;
-  allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-  allocate_info.pNext = nullptr;
-  allocate_info.descriptorPool = descriptor_pool.handle;
-
-  VkDescriptorSetLayout set_layout_handle =
-      iree_hal_vulkan_native_descriptor_set_layout_handle(set_layout);
-  allocate_info.descriptorSetCount = 1;
-  allocate_info.pSetLayouts = &set_layout_handle;
-
-  return allocate_info;
 }
 
 }  // namespace
@@ -119,9 +100,9 @@ DescriptorSetArena::~DescriptorSetArena() {
 }
 
 iree_status_t DescriptorSetArena::BindDescriptorSet(
-    VkCommandBuffer command_buffer, iree_hal_pipeline_layout_t* pipeline_layout,
-    uint32_t set, iree_host_size_t binding_count,
-    const iree_hal_descriptor_set_binding_t* bindings) {
+    VkCommandBuffer command_buffer,
+    iree_hal_vulkan_pipeline_layout_t* pipeline_layout, uint32_t set,
+    iree_host_size_t binding_count, const iree_hal_buffer_ref_t* bindings) {
   // Always prefer using push descriptors when available as we can avoid the
   // additional API overhead of updating/resetting pools.
   if (logical_device_->enabled_extensions().push_descriptors) {
@@ -130,10 +111,9 @@ iree_status_t DescriptorSetArena::BindDescriptorSet(
     return iree_ok_status();
   }
 
-  IREE_TRACE_SCOPE0("DescriptorSetArena::BindDescriptorSet");
+  IREE_TRACE_SCOPE_NAMED("DescriptorSetArena::BindDescriptorSet");
 
-  auto* set_layout =
-      iree_hal_vulkan_native_pipeline_layout_set(pipeline_layout, set);
+  auto* set_layout = iree_hal_vulkan_pipeline_layout_set(pipeline_layout, set);
 
   // Pick a bucket based on the number of descriptors required.
   // NOTE: right now we are 1:1 with bindings.
@@ -162,7 +142,7 @@ iree_status_t DescriptorSetArena::BindDescriptorSet(
   allocate_info.pNext = nullptr;
   allocate_info.descriptorPool = descriptor_pool.handle;
   VkDescriptorSetLayout set_layout_handle =
-      iree_hal_vulkan_native_descriptor_set_layout_handle(set_layout);
+      iree_hal_vulkan_descriptor_set_layout_handle(set_layout);
   allocate_info.descriptorSetCount = 1;
   allocate_info.pSetLayouts = &set_layout_handle;
 
@@ -210,19 +190,19 @@ iree_status_t DescriptorSetArena::BindDescriptorSet(
   // Bind the descriptor set.
   syms().vkCmdBindDescriptorSets(
       command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-      iree_hal_vulkan_native_pipeline_layout_handle(pipeline_layout), set, 1,
+      iree_hal_vulkan_pipeline_layout_handle(pipeline_layout), set, 1,
       &descriptor_set, 0, nullptr);
 
   return iree_ok_status();
 }
 
 void DescriptorSetArena::PushDescriptorSet(
-    VkCommandBuffer command_buffer, iree_hal_pipeline_layout_t* pipeline_layout,
-    uint32_t set, iree_host_size_t binding_count,
-    const iree_hal_descriptor_set_binding_t* bindings) {
-  IREE_TRACE_SCOPE0("DescriptorSetArena::PushDescriptorSet");
+    VkCommandBuffer command_buffer,
+    iree_hal_vulkan_pipeline_layout_t* pipeline_layout, uint32_t set,
+    iree_host_size_t binding_count, const iree_hal_buffer_ref_t* bindings) {
+  IREE_TRACE_SCOPE_NAMED("DescriptorSetArena::PushDescriptorSet");
   VkPipelineLayout device_pipeline_layout =
-      iree_hal_vulkan_native_pipeline_layout_handle(pipeline_layout);
+      iree_hal_vulkan_pipeline_layout_handle(pipeline_layout);
 
   // Get a list of VkWriteDescriptorSet structs with all bound buffers.
   iree_host_size_t write_info_count = 0;
@@ -239,7 +219,7 @@ void DescriptorSetArena::PushDescriptorSet(
 }
 
 DescriptorSetGroup DescriptorSetArena::Flush() {
-  IREE_TRACE_SCOPE0("DescriptorSetArena::Flush");
+  IREE_TRACE_SCOPE_NAMED("DescriptorSetArena::Flush");
 
   if (used_descriptor_pools_.empty()) {
     // No resources to free.

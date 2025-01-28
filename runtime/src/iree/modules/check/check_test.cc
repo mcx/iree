@@ -27,8 +27,8 @@ namespace {
 class CheckTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
-    IREE_ASSERT_OK(
-        iree_vm_instance_create(iree_allocator_system(), &instance_));
+    IREE_ASSERT_OK(iree_vm_instance_create(
+        IREE_VM_TYPE_CAPACITY_DEFAULT, iree_allocator_system(), &instance_));
     IREE_ASSERT_OK(iree_hal_module_register_all_types(instance_));
 
     iree_hal_driver_t* hal_driver = nullptr;
@@ -44,9 +44,10 @@ class CheckTest : public ::testing::Test {
     }
     IREE_ASSERT_OK(iree_hal_driver_create_default_device(
         hal_driver, iree_allocator_system(), &device_));
-    IREE_ASSERT_OK(
-        iree_hal_module_create(instance_, device_, IREE_HAL_MODULE_FLAG_NONE,
-                               iree_allocator_system(), &hal_module_));
+    IREE_ASSERT_OK(iree_hal_module_create(
+        instance_, /*device_count=*/1, &device_, IREE_HAL_MODULE_FLAG_NONE,
+        iree_hal_module_debug_sink_stdio(stderr), iree_allocator_system(),
+        &hal_module_));
     iree_hal_driver_release(hal_driver);
 
     IREE_ASSERT_OK(iree_check_module_create(instance_, iree_allocator_system(),
@@ -91,9 +92,10 @@ class CheckTest : public ::testing::Test {
     params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
                    IREE_HAL_BUFFER_USAGE_TRANSFER |
                    IREE_HAL_BUFFER_USAGE_MAPPING;
-    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer(
-        allocator_, shape.size(), shape.data(), IREE_HAL_ELEMENT_TYPE_INT_32,
-        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
+    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer_copy(
+        device_, allocator_, shape.size(), shape.data(),
+        IREE_HAL_ELEMENT_TYPE_INT_32, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        params,
         iree_make_const_byte_span(contents.data(),
                                   contents.size() * sizeof(int32_t)),
         &*out_buffer_view));
@@ -113,9 +115,10 @@ class CheckTest : public ::testing::Test {
     params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
                    IREE_HAL_BUFFER_USAGE_TRANSFER |
                    IREE_HAL_BUFFER_USAGE_MAPPING;
-    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer(
-        allocator_, shape.size(), shape.data(), IREE_HAL_ELEMENT_TYPE_FLOAT_16,
-        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
+    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer_copy(
+        device_, allocator_, shape.size(), shape.data(),
+        IREE_HAL_ELEMENT_TYPE_FLOAT_16, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        params,
         iree_make_const_byte_span(contents.data(),
                                   contents.size() * sizeof(uint16_t)),
         &*out_buffer_view));
@@ -135,9 +138,10 @@ class CheckTest : public ::testing::Test {
     params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
                    IREE_HAL_BUFFER_USAGE_TRANSFER |
                    IREE_HAL_BUFFER_USAGE_MAPPING;
-    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer(
-        allocator_, shape.size(), shape.data(), IREE_HAL_ELEMENT_TYPE_FLOAT_32,
-        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
+    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer_copy(
+        device_, allocator_, shape.size(), shape.data(),
+        IREE_HAL_ELEMENT_TYPE_FLOAT_32, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        params,
         iree_make_const_byte_span(contents.data(),
                                   contents.size() * sizeof(float)),
         &*out_buffer_view));
@@ -157,9 +161,10 @@ class CheckTest : public ::testing::Test {
     params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
                    IREE_HAL_BUFFER_USAGE_TRANSFER |
                    IREE_HAL_BUFFER_USAGE_MAPPING;
-    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer(
-        allocator_, shape.size(), shape.data(), IREE_HAL_ELEMENT_TYPE_FLOAT_64,
-        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, params,
+    IREE_ASSERT_OK(iree_hal_buffer_view_allocate_buffer_copy(
+        device_, allocator_, shape.size(), shape.data(),
+        IREE_HAL_ELEMENT_TYPE_FLOAT_64, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        params,
         iree_make_const_byte_span(contents.data(),
                                   contents.size() * sizeof(double)),
         &*out_buffer_view));
@@ -180,7 +185,7 @@ class CheckTest : public ::testing::Test {
   iree_status_t InvokeValue(const char* function_name,
                             std::vector<iree_vm_value_t> args) {
     IREE_RETURN_IF_ERROR(
-        iree_vm_list_create(/*element_type=*/nullptr, args.size(),
+        iree_vm_list_create(iree_vm_make_undefined_type_def(), args.size(),
                             iree_allocator_system(), &inputs_));
     for (auto& arg : args) {
       IREE_RETURN_IF_ERROR(iree_vm_list_push_value(inputs_.get(), &arg));
@@ -191,14 +196,20 @@ class CheckTest : public ::testing::Test {
   iree_status_t Invoke(const char* function_name,
                        std::vector<vm::ref<iree_hal_buffer_view_t>> args) {
     IREE_RETURN_IF_ERROR(
-        iree_vm_list_create(/*element_type=*/nullptr, args.size(),
+        iree_vm_list_create(iree_vm_make_undefined_type_def(), args.size(),
                             iree_allocator_system(), &inputs_));
+    iree_vm_ref_t device_ref = iree_hal_device_retain_ref(device_);
+    IREE_RETURN_IF_ERROR(
+        iree_vm_list_push_ref_move(inputs_.get(), &device_ref));
     for (auto& arg : args) {
-      iree_vm_ref_t arg_ref = iree_hal_buffer_view_move_ref(arg.get());
+      iree_vm_ref_t arg_ref = iree_hal_buffer_view_retain_ref(arg.get());
       IREE_RETURN_IF_ERROR(iree_vm_list_push_ref_move(inputs_.get(), &arg_ref));
     }
     return Invoke(function_name);
   }
+
+  static iree_hal_device_t*& device() { return CheckTest::device_; }
+  static iree_vm_instance_t*& instance() { return CheckTest::instance_; }
 
  private:
   static iree_hal_device_t* device_;
@@ -214,6 +225,27 @@ iree_hal_device_t* CheckTest::device_ = nullptr;
 iree_vm_instance_t* CheckTest::instance_ = nullptr;
 iree_vm_module_t* CheckTest::check_module_ = nullptr;
 iree_vm_module_t* CheckTest::hal_module_ = nullptr;
+
+TEST_F(CheckTest, HalModuleDebugSinkDestroyCallbackIsCalled) {
+  struct UserData {
+    bool is_callback_called = false;
+  };
+
+  iree_hal_module_debug_sink_t sink = {};
+  sink.destroy.fn = [](void* user_data) {
+    reinterpret_cast<UserData*>(user_data)->is_callback_called = true;
+    return iree_ok_status();
+  };
+  UserData user_data;
+  sink.destroy.user_data = &user_data;
+  iree_vm_module_t* hal_module;
+  IREE_ASSERT_OK(iree_hal_module_create(
+      instance(), /*device_count=*/1, &device(), IREE_HAL_MODULE_FLAG_NONE,
+      sink, iree_allocator_system(), &hal_module));
+  IREE_ASSERT_FALSE(user_data.is_callback_called);
+  iree_vm_module_release(hal_module);
+  IREE_ASSERT_TRUE(user_data.is_callback_called);
+}
 
 TEST_F(CheckTest, ExpectTrueSuccess) {
   IREE_ASSERT_OK(InvokeValue("expect_true", {iree_vm_value_make_i32(1)}));

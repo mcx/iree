@@ -8,6 +8,12 @@ if(NOT IREE_TARGET_BACKEND_CUDA OR NOT IREE_HAL_DRIVER_CUDA)
   return()
 endif()
 
+# TODO(#17933): fix cuda_ukernel_unkernel.cu.bc compilation on MSVC (use compiler-rt?)
+if(MSVC)
+  message(STATUS "IREE custom_dispatch/cuda/kernels example ignored -- #17933 required to make MSVC work")
+  return()
+endif()
+
 # NOTE: this is not how one should actually build their PTX files. Do not use
 # this as an authoritative source for compilation settings or CMake goo. If you
 # choose to go the route of custom CUDA kernels you must bring your own build
@@ -87,7 +93,7 @@ function(cuda_kernel_ptx_clang _ARCH)
     DEPENDS
       ${_PTX_SRC_NAME}
       ${IREE_CLANG_TARGET}
-    COMMAND ${IREE_CLANG_TARGET}
+    COMMAND ${IREE_CLANG_BINARY}
       -x cuda
       -Wno-unknown-cuda-version
       --cuda-path=${CUDAToolkit_ROOT}
@@ -126,4 +132,34 @@ iree_lit_test_suite(
   LABELS
     "driver=cuda"
     "hostonly"
+)
+
+iree_cuda_bitcode_library(
+  NAME
+    cuda_ukernel
+  CUDA_ARCH
+    sm_60
+  SRCS
+    "ukernel.cu"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
+    check_cuda_ukernel
+  SRCS
+    "ukernel_example.mlir"
+  TARGET_BACKEND
+    "cuda"
+  COMPILER_FLAGS
+    "--iree-link-bitcode=cuda_ukernel.bc"
+  DRIVER
+    "cuda"
+  LABELS
+    "noasan"
+    "nomsan"
+    "notsan"
+    "noubsan"
+    "requires-gpu-nvidia"
+  DEPENDS
+    ::cuda_ukernel
 )

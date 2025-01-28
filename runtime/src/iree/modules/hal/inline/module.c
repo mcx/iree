@@ -8,7 +8,6 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/cpu.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/api.h"
 #include "iree/modules/hal/utils/buffer_diagnostics.h"
 #include "iree/vm/api.h"
@@ -94,7 +93,7 @@ static iree_status_t iree_hal_inline_storage_buffer_create(
   // requires mapping.
   iree_status_t status = iree_hal_buffer_map_range(
       hal_buffer, IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_ANY, 0,
-      IREE_WHOLE_BUFFER, &storage->mapping);
+      IREE_HAL_WHOLE_BUFFER, &storage->mapping);
 
   // Initializes the VM buffer to reference the mapped memory.
   // Since the VM buffer is what we pass back to the VM and gets reference
@@ -137,6 +136,7 @@ typedef struct iree_hal_inline_module_t {
   iree_allocator_t host_allocator;
   iree_hal_allocator_t* device_allocator;
   iree_hal_inline_module_flags_t flags;
+  iree_hal_module_debug_sink_t debug_sink;
   // TODO(benvanik): types.
 } iree_hal_inline_module_t;
 
@@ -148,6 +148,7 @@ typedef struct iree_hal_inline_module_state_t {
   iree_allocator_t host_allocator;
   iree_hal_allocator_t* device_allocator;
   iree_hal_inline_module_flags_t flags;
+  iree_hal_module_debug_sink_t debug_sink;
 } iree_hal_inline_module_state_t;
 
 static void IREE_API_PTR iree_hal_inline_module_destroy(void* base_module) {
@@ -171,6 +172,7 @@ iree_hal_inline_module_alloc_state(void* self, iree_allocator_t host_allocator,
   state->device_allocator = module->device_allocator;
   iree_hal_allocator_retain(state->device_allocator);
   state->flags = module->flags;
+  state->debug_sink = module->debug_sink;
 
   *out_module_state = (iree_vm_module_state_t*)state;
   IREE_TRACE_ZONE_END(z0);
@@ -190,6 +192,20 @@ static void IREE_API_PTR iree_hal_inline_module_free_state(
   IREE_TRACE_ZONE_END(z0);
 }
 
+static iree_status_t IREE_API_PTR iree_hal_inline_module_fork_state(
+    void* self, iree_vm_module_state_t* parent_state,
+    iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+
+  // NOTE: parent state contains nothing useful and is unused.
+  // We just realloc new state.
+  iree_status_t status =
+      iree_hal_inline_module_alloc_state(self, allocator, out_child_state);
+
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
 static iree_status_t IREE_API_PTR iree_hal_inline_module_notify(
     void* self, iree_vm_module_state_t* module_state, iree_vm_signal_t signal) {
   switch (signal) {
@@ -203,13 +219,6 @@ static iree_status_t IREE_API_PTR iree_hal_inline_module_notify(
 //===----------------------------------------------------------------------===//
 // Utilities
 //===----------------------------------------------------------------------===//
-
-// Casts a VM value to a C host size.
-static iree_host_size_t iree_hal_cast_host_size(int64_t value) {
-  // TODO(benvanik): make this return status and check for overflow if host
-  // size is 32-bits.
-  return (iree_host_size_t)value;
-}
 
 // Casts a VM value to a HAL device size.
 static iree_device_size_t iree_hal_cast_device_size(int64_t value) {
@@ -233,10 +242,10 @@ static iree_status_t iree_hal_inline_module_buffer_allocate_with_storage(
   // the storage in. Today this is all intentionally simple and something we can
   // change in the runtime without impacting the compiler/artifacts.
 
-  // Try allocating the buffer first
+  // Allocate the buffer with uninitialized contents.
   iree_hal_buffer_t* buffer = NULL;
   IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
-      device_allocator, params, allocation_size, initial_data, &buffer));
+      device_allocator, params, allocation_size, &buffer));
 
   // Map and retain the HAL buffer and return a VM buffer that is usable as if
   // it were a native iree_vm_buffer_t.
@@ -246,6 +255,13 @@ static iree_status_t iree_hal_inline_module_buffer_allocate_with_storage(
   if (!iree_status_is_ok(status)) {
     iree_hal_buffer_release(buffer);
     return status;
+  }
+
+  // Now that we know we have a host pointer mapped we can copy over the initial
+  // data (if any).
+  if (!iree_const_byte_span_is_empty(initial_data)) {
+    memcpy(iree_vm_buffer_data(storage), initial_data.data,
+           iree_min(initial_data.data_length, allocation_size));
   }
 
   *out_buffer = buffer;
@@ -350,7 +366,7 @@ IREE_VM_ABI_EXPORT(iree_hal_inline_module_buffer_subspan,  //
   iree_hal_buffer_t* subspan_buffer = NULL;
   IREE_RETURN_IF_ERROR(
       iree_hal_buffer_subspan(source_buffer, source_offset, length,
-                              &subspan_buffer),
+                              state->host_allocator, &subspan_buffer),
       "invalid subspan of an existing buffer (source_offset=%" PRIdsz
       ", length=%" PRIdsz ")",
       source_offset, length);
@@ -408,7 +424,7 @@ IREE_VM_ABI_EXPORT(iree_hal_inline_module_buffer_view_create,  //
       source_length != iree_hal_buffer_byte_length(source_buffer)) {
     IREE_RETURN_IF_ERROR(
         iree_hal_buffer_subspan(source_buffer, source_offset, source_length,
-                                &subspan_buffer),
+                                state->host_allocator, &subspan_buffer),
         "invalid subspan of an existing buffer (source_offset=%" PRIdsz
         ", length=%" PRIdsz ")",
         source_offset, source_length);
@@ -494,8 +510,26 @@ IREE_VM_ABI_EXPORT(iree_hal_inline_module_buffer_view_dim,  //
 IREE_VM_ABI_EXPORT(iree_hal_inline_module_buffer_view_trace,  //
                    iree_hal_inline_module_state_t,            //
                    rCrD, v) {
-  return iree_hal_modules_buffer_view_trace(args->r0, args->a1_count, args->a1,
-                                            state->host_allocator);
+  if (state->debug_sink.buffer_view_trace.fn) {
+    iree_vm_buffer_t* key = NULL;
+    IREE_RETURN_IF_ERROR(iree_vm_buffer_check_deref(args->r0, &key));
+    iree_string_view_t key_str = iree_vm_buffer_as_string(key);
+    iree_host_size_t buffer_view_count = (iree_host_size_t)args->a1_count;
+    if (buffer_view_count > 128) {
+      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "too many buffer views for a single trace call");
+    }
+    iree_hal_buffer_view_t** buffer_views =
+        iree_alloca(buffer_view_count * sizeof(iree_hal_buffer_view_t*));
+    for (iree_host_size_t i = 0; i < buffer_view_count; ++i) {
+      IREE_RETURN_IF_ERROR(
+          iree_hal_buffer_view_check_deref(args->a1[i].r0, &buffer_views[i]));
+    }
+    return state->debug_sink.buffer_view_trace.fn(
+        state->debug_sink.buffer_view_trace.user_data, key_str,
+        buffer_view_count, buffer_views, state->host_allocator);
+  }
+  return iree_ok_status();
 }
 
 //===----------------------------------------------------------------------===//
@@ -585,6 +619,7 @@ static const iree_vm_native_module_descriptor_t
 
 IREE_API_EXPORT iree_status_t iree_hal_inline_module_create(
     iree_vm_instance_t* instance, iree_hal_inline_module_flags_t flags,
+    iree_hal_module_debug_sink_t debug_sink,
     iree_hal_allocator_t* device_allocator, iree_allocator_t host_allocator,
     iree_vm_module_t** out_module) {
   IREE_ASSERT_ARGUMENT(instance);
@@ -598,6 +633,7 @@ IREE_API_EXPORT iree_status_t iree_hal_inline_module_create(
       .destroy = iree_hal_inline_module_destroy,
       .alloc_state = iree_hal_inline_module_alloc_state,
       .free_state = iree_hal_inline_module_free_state,
+      .fork_state = iree_hal_inline_module_fork_state,
       .notify = iree_hal_inline_module_notify,
   };
 
@@ -621,6 +657,7 @@ IREE_API_EXPORT iree_status_t iree_hal_inline_module_create(
   module->device_allocator = device_allocator;
   iree_hal_allocator_retain(module->device_allocator);
   module->flags = flags;
+  module->debug_sink = debug_sink;
 
   *out_module = base_module;
   return iree_ok_status();

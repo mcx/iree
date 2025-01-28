@@ -12,8 +12,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Escapes a command line component where required.
 // It's easy to run afoul of quoting rules on Windows, such as when using
@@ -40,7 +39,20 @@ std::string findToolInEnvironment(SmallVector<std::string> toolNames);
 std::string findTool(SmallVector<std::string> toolNames);
 std::string findTool(std::string toolName);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+// Finds a bundled directory containing platform libraries for the given
+// platform name, returning an empty string if not found. We store bundled
+// platform libraries in a directory like:
+//   iree_platform_libs/{platformName}
+// adjacent to the shared library hosting the compiler (i.e. this entry
+// point). On a Posix system, this will typically be in a "lib" dir and
+// on Windows, it will be adjacent to executables (i.e. a "bin" or "tools"
+// dir). Note that if installed to a system library directory on a Posix
+// system, this would be under something like:
+//   /usr/lib/iree_platform_libs/{platformName}
+// This is not atypical to how other dependencies are located in a qualified
+// lib directory.
+std::string findPlatformLibDirectory(StringRef platformName);
 
-#endif  // IREE_COMPILER_UTILS_TOOLUTILS_H_
+} // namespace mlir::iree_compiler
+
+#endif // IREE_COMPILER_UTILS_TOOLUTILS_H_

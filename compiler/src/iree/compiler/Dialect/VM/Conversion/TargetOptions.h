@@ -10,10 +10,7 @@
 #include "iree/compiler/Utils/OptionUtils.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 // Controls VM translation targets.
 struct TargetOptions {
@@ -23,7 +20,7 @@ struct TargetOptions {
   // Whether the f32 extension is enabled in the target VM.
   bool f32Extension = true;
   // Whether the f64 extension is enabled in the target VM.
-  bool f64Extension = false;
+  bool f64Extension = true;
 
   // Whether to truncate f64 types to f32 when the f64 extension is not
   // enabled.
@@ -36,9 +33,6 @@ struct TargetOptions {
   using FromFlags = OptionsFromFlags<TargetOptions>;
 };
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
-#endif  // IREE_COMPILER_DIALECT_VM_CONVERSION_TARGETOPTIONS_H_
+#endif // IREE_COMPILER_DIALECT_VM_CONVERSION_TARGETOPTIONS_H_

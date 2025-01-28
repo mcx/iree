@@ -12,9 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "iree/base/alignment.h"
 #include "iree/base/api.h"
-#include "iree/base/target_platform.h"
 
 // Haswell or later, gcc compile time option: -mlzcnt
 #if defined(__LZCNT__)
@@ -70,7 +68,7 @@ static inline uint64_t iree_math_rotr_u64(const uint64_t n, uint32_t c) {
 //==============================================================================
 
 static inline int iree_math_count_leading_zeros_u32(const uint32_t n) {
-#if defined(IREE_COMPILER_MSVC)
+#if defined(IREE_COMPILER_MSVC_COMPAT)
   unsigned long result = 0;  // NOLINT(runtime/int)
   if (_BitScanReverse(&result, n)) {
     return (int)(31 - result);
@@ -99,7 +97,7 @@ static inline int iree_math_count_leading_zeros_u32(const uint32_t n) {
 }
 
 static inline int iree_math_count_leading_zeros_u64(uint64_t n) {
-#if defined(IREE_COMPILER_MSVC) && \
+#if defined(IREE_COMPILER_MSVC_COMPAT) && \
     (defined(IREE_ARCH_ARM_64) || defined(IREE_ARCH_X86_64))
   // MSVC does not have __buitin_clzll. Use _BitScanReverse64.
   unsigned long result = 0;  // NOLINT(runtime/int)
@@ -107,7 +105,7 @@ static inline int iree_math_count_leading_zeros_u64(uint64_t n) {
     return (int)(63 - result);
   }
   return 64;
-#elif defined(IREE_COMPILER_MSVC)
+#elif defined(IREE_COMPILER_MSVC_COMPAT)
   // MSVC does not have __buitin_clzll. Compose two calls to _BitScanReverse
   unsigned long result = 0;  // NOLINT(runtime/int)
   if ((n >> 32) && _BitScanReverse(&result, n >> 32)) {
@@ -143,7 +141,7 @@ static inline int iree_math_count_leading_zeros_u64(uint64_t n) {
 }
 
 static inline int iree_math_count_trailing_zeros_u32(uint32_t n) {
-#if defined(IREE_COMPILER_MSVC)
+#if defined(IREE_COMPILER_MSVC_COMPAT)
   unsigned long result = 0;  // NOLINT(runtime/int)
   _BitScanForward(&result, n);
   return (int)result;
@@ -162,11 +160,11 @@ static inline int iree_math_count_trailing_zeros_u32(uint32_t n) {
 }
 
 static inline int iree_math_count_trailing_zeros_u64(uint64_t n) {
-#if defined(IREE_COMPILER_MSVC) && defined(IREE_PTR_SIZE_64)
+#if defined(IREE_COMPILER_MSVC_COMPAT) && defined(IREE_PTR_SIZE_64)
   unsigned long result = 0;  // NOLINT(runtime/int)
   _BitScanForward64(&result, n);
   return (int)result;
-#elif defined(IREE_COMPILER_MSVC) && defined(IREE_PTR_SIZE_32)
+#elif defined(IREE_COMPILER_MSVC_COMPAT) && defined(IREE_PTR_SIZE_32)
   unsigned long result = 0;  // NOLINT(runtime/int)
   if ((uint32_t)(n) == 0) {
     _BitScanForward(&result, n >> 32);
@@ -266,66 +264,256 @@ static inline uint64_t iree_math_round_up_to_pow2_u64(uint64_t n) {
 }
 
 //==============================================================================
-// FP16 support
+// FP16, BFloat16 and FP8 support
 //==============================================================================
 
-// Converts a 16-bit floating-point value to a 32-bit C `float`.
-//
-// NOTE: this implementation does not handle all corner cases around NaN and
-// such; we can improve this implementation over time if it is used for such
-// cases.
-static inline float iree_math_f16_to_f32(const uint16_t f16_value) {
-  const uint32_t sign = ((uint32_t)((f16_value & 0x8000u) >> 15)) << 31;
-  uint32_t exp = ((f16_value & 0x7C00u) >> 10);
-  uint32_t mantissa = 0;
-  if (exp == 0x1Fu) {
-    // NaN or Inf case.
-    exp = 0xFFu << 23;
-    // For NaN mantissa should not be 0.
-    if ((f16_value & 0x3FFu) != 0) mantissa = 1;
+// NOTE: We used to have code here using built-in _Float16 type support.
+// It worked well (https://godbolt.org/z/3a6WM39M1) until it didn't for
+// some people (#14549). It's not worth the hassle, this is only used
+// in slow generic fallbacks or test code, and we weren't able to use
+// a builtin for bf16 anyway.
 
-  } else if (exp > 0) {
-    exp = (exp + 127 - 15) << 23;
-    mantissa = ((uint32_t)(f16_value & 0x3FFu)) << (23 - 10);
+// Define some helper constants for working with a floating-point format with
+// the given number of {exponent,mantissa} bits.
+#define IREE_MATH_FP_FORMAT_CONSTANTS(prefix, ebits, mbits, bias_tweak)      \
+  const int prefix##exp_bits IREE_ATTRIBUTE_UNUSED = ebits;                  \
+  const int prefix##mantissa_bits IREE_ATTRIBUTE_UNUSED = mbits;             \
+  const int prefix##sign_shift IREE_ATTRIBUTE_UNUSED = ebits + mbits;        \
+  const int prefix##exp_shift IREE_ATTRIBUTE_UNUSED = prefix##mantissa_bits; \
+  const int prefix##sign_mask IREE_ATTRIBUTE_UNUSED = 1u                     \
+                                                      << prefix##sign_shift; \
+  const int prefix##mantissa_mask IREE_ATTRIBUTE_UNUSED =                    \
+      (1u << prefix##exp_shift) - 1;                                         \
+  const int prefix##exp_mask IREE_ATTRIBUTE_UNUSED =                         \
+      (1u << prefix##sign_shift) - (1u << prefix##exp_shift);                \
+  const int prefix##exp_bias IREE_ATTRIBUTE_UNUSED =                         \
+      bias_tweak + (1u << (prefix##exp_bits - 1)) - 1;
+
+// Generic conversion from any less-than-32-bit floating-point format to f32.
+// The `src` value is typed as a uint32_t for genericity but occupies only the
+// bottom (1 + exp_bits + mantissa_bits) bits. The upper bits of `src` are
+// unused.
+static inline float iree_math_make_f32_from_bits(uint32_t src, int exp_bits,
+                                                 int mantissa_bits,
+                                                 bool have_infinity,
+                                                 int bias_tweak,
+                                                 bool nan_as_neg_zero) {
+  IREE_MATH_FP_FORMAT_CONSTANTS(src_, exp_bits, mantissa_bits, bias_tweak)
+  IREE_MATH_FP_FORMAT_CONSTANTS(f32_, 8, 23, 0)
+  const uint32_t src_sign = src & src_sign_mask;
+  const uint32_t f32_sign = src_sign << (f32_sign_shift - src_sign_shift);
+  const uint32_t src_exp = src & src_exp_mask;
+  const uint32_t src_mantissa = src & src_mantissa_mask;
+  // Initializing f32_exp and f32_mantissa for the case of normal finite values.
+  // Below we will overload that in other cases.
+  uint32_t f32_exp = ((src_exp >> src_exp_shift) + f32_exp_bias - src_exp_bias)
+                     << f32_exp_shift;
+  uint32_t f32_mantissa = src_mantissa
+                          << (f32_mantissa_bits - src_mantissa_bits);
+  if (src_exp == src_exp_mask) {
+    // Top exponent value normally means infinity or NaN.
+    if (have_infinity) {
+      // NaN or Inf case.
+      f32_exp = f32_exp_mask;
+      if (src_mantissa) {
+        f32_mantissa = f32_mantissa_mask;  // Quiet NaN.
+      } else {
+        f32_mantissa = 0;  // Inf.
+      }
+    } else {
+      // No infinities => more large finite values, unless this is a NaN.
+      bool is_finite = src_mantissa != src_mantissa_mask || nan_as_neg_zero;
+      if (is_finite) {
+        f32_exp = ((src_exp >> src_exp_shift) + f32_exp_bias - src_exp_bias)
+                  << f32_exp_shift;
+        f32_mantissa = src_mantissa << (f32_mantissa_bits - src_mantissa_bits);
+      } else {
+        // NaN. Generate a quiet NaN.
+        f32_exp = f32_exp_mask;
+        f32_mantissa = f32_mantissa_mask;
+      }
+    }
+  } else if (src_exp == 0) {
+    // Zero or subnormal. Generate zero, except in one case: if the source type
+    // encodes NaN as signed zero, we handle that now.
+    if (nan_as_neg_zero && src == src_sign_mask) {
+      f32_exp = f32_exp_mask;
+      f32_mantissa = f32_mantissa_mask;
+    } else {
+      f32_exp = 0;
+      f32_mantissa = 0;
+    }
   }
-  const uint32_t u32_value = sign | exp | mantissa;
+  const uint32_t u32_value = f32_sign | f32_exp | f32_mantissa;
   float f32_value;
-  memcpy(&f32_value, &u32_value, sizeof(f32_value));
+  memcpy(&f32_value, &u32_value, sizeof f32_value);
   return f32_value;
 }
 
-// Converts a 32-bit C `float` value to a 16-bit floating-point value.
-//
-// NOTE: this implementation does not handle corner cases around NaN and such;
-// we can improve this implementation over time if it is used for such cases.
-static inline uint16_t iree_math_f32_to_f16(const float f32_value) {
+// Generic conversion from f32 to any less-than-32-bit floating-point format,
+// rounding to nearest-even. The return value is typed as a uint32_t for
+// genericity but occupies only the bottom (1 + exp_bits + mantissa_bits) bits.
+// The upper bits of the return value are unused.
+static inline uint32_t iree_math_truncate_f32_to_bits_rounding_to_nearest_even(
+    float value, int exp_bits, int mantissa_bits, bool have_infinity,
+    int bias_tweak, bool nan_as_neg_zero) {
+  IREE_MATH_FP_FORMAT_CONSTANTS(dst_, exp_bits, mantissa_bits, bias_tweak)
+  IREE_MATH_FP_FORMAT_CONSTANTS(f32_, 8, 23, 0)
   uint32_t u32_value;
-  memcpy(&u32_value, &f32_value, sizeof(u32_value));
-  const uint32_t sign = ((u32_value & 0x80000000u) >> 31) << 15;
-  uint32_t mantissa = (u32_value & 0x007FFFFFu) >> (23 - 10);
-  int32_t exp = ((u32_value & 0x7F800000u) >> 23) - 127 + 15;
-  if (exp > 31) {
-    exp = 31 << 10;
-    // zero out the mantissa for infinity.
-    mantissa = 0;
-    // If this is a NaN value set the mantissa to a non zero value.
-    if (((u32_value & 0x7F800000u) >> 23) == 0xFF) {
-      if (((u32_value & 0x007FFFFFu) != 0)) {
-        mantissa = 1;
+  memcpy(&u32_value, &value, sizeof value);
+  const uint32_t f32_sign = u32_value & f32_sign_mask;
+  uint32_t dst_sign = f32_sign >> (f32_sign_shift - dst_sign_shift);
+  const uint32_t f32_exp = u32_value & f32_exp_mask;
+  const uint32_t f32_mantissa = u32_value & f32_mantissa_mask;
+  uint32_t dst_exp = 0;
+  uint32_t dst_mantissa = 0;
+  bool generate_nan = false;
+  if (f32_exp >= f32_exp_mask) {
+    // NaN or Inf case.
+    dst_exp = dst_exp_mask;
+    if (f32_mantissa || !have_infinity) {
+      // NaN. Generate a quiet NaN.
+      generate_nan = true;
+    } else {
+      // Inf. Leave zero mantissa.
+    }
+  } else if (f32_exp == 0) {
+    // Zero or subnormal. Generate zero. Leave zero mantissa.
+    if (nan_as_neg_zero) {
+      // The destination has no signed zero. Avoid accidentally generating NaN.
+      dst_sign = 0;
+    }
+  } else {
+    // Normal finite value.
+    int arithmetic_exp = (f32_exp >> f32_exp_shift) - f32_exp_bias;
+    // Test if the exponent is too large for the destination type. If
+    // the destination type does not have infinities, that frees up the
+    // max exponent value for additional finite values.
+    if (arithmetic_exp > (1 << (dst_exp_bits - 1)) - have_infinity) {
+      // Overflow. Generate Inf. Leave zero mantissa.
+      dst_exp = dst_exp_mask;
+      if (!have_infinity) {
+        // Generate NaN.
+        generate_nan = true;
+      }
+    } else if (arithmetic_exp < -(1 << (dst_exp_bits - 1))) {
+      // Underflow. Generate zero. Leave zero mantissa.
+      dst_exp = 0;
+    } else {
+      // Normal case.
+      // Implement round-to-nearest-even, by adding a bias before truncating.
+      int even_bit = 1u << (f32_mantissa_bits - dst_mantissa_bits);
+      int odd_bit = even_bit >> 1;
+      uint32_t biased_f32_mantissa =
+          f32_mantissa +
+          ((f32_mantissa & even_bit) ? (odd_bit) : (odd_bit - 1));
+      // Adding the bias may cause an exponent increment.
+      if (biased_f32_mantissa > f32_mantissa_mask) {
+        // Note: software implementations that try to be fast tend to get this
+        // conditional increment of exp and zeroing of mantissa for free by
+        // simplying incrementing the whole uint32 encoding of the float value,
+        // so that the mantissa overflows into the exponent bits.
+        // This results in magical-looking code like in the following links.
+        // We'd rather not care too much about performance of this function;
+        // we should only care about fp16 performance on fp16 hardware, and
+        // then, we should use hardware instructions.
+        // https://github.com/pytorch/pytorch/blob/e1502c0cdbfd17548c612f25d5a65b1e4b86224d/c10/util/BFloat16.h#L76
+        // https://gitlab.com/libeigen/eigen/-/blob/21cd3fe20990a5ac1d683806f605110962aac3f1/Eigen/src/Core/arch/Default/BFloat16.h#L565
+        biased_f32_mantissa = 0;
+        ++arithmetic_exp;
+      }
+      // The exponent increment in the above if() branch may cause overflow.
+      // This is exercised by converting 65520.0f from f32 to f16. When the
+      // destination type has infinities, no special handling is needed for this
+      // case: the above if() branch already set biased_f32_mantissa=0, so we
+      // will be generating a 0 mantissa, as needed for infinite values. The one
+      // case where special handling is needed is when the destination type has
+      // no infinities and we need to generate NaN.
+      dst_exp = (arithmetic_exp + dst_exp_bias) << dst_exp_shift;
+      dst_mantissa =
+          biased_f32_mantissa >> (f32_mantissa_bits - dst_mantissa_bits);
+      if (!have_infinity && dst_exp > dst_exp_mask) {
+        generate_nan = true;
       }
     }
-  } else if (exp < 0) {
-    exp = 0;
-  } else {
-    exp = exp << 10;
   }
-  return (uint16_t)(sign | exp | mantissa);
+  if (generate_nan) {
+    if (nan_as_neg_zero) {
+      return dst_sign_mask;
+    } else {
+      return dst_sign | dst_exp_mask | dst_mantissa_mask;
+    }
+  } else {
+    if (nan_as_neg_zero && dst_exp == 0 && dst_mantissa == 0) {
+      // Negative zero needs to be rounded to positive zero to avoid
+      // accidentally producing NaN when negative-zero is the NaN encoding.
+      return 0;
+    } else {
+      return dst_sign | dst_exp | dst_mantissa;
+    }
+  }
 }
 
-// Rounds of 32-bit C `float` value to nearest 16-bit value and returns
-// 32-bit `float`
-static inline float iree_math_round_to_nearest_f16(const float f32_value) {
-  return iree_math_f16_to_f32(iree_math_f32_to_f16(f32_value));
-}
+#define IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(NAME, INT_TYPE, EXP_BITS,     \
+                                          MANTISSA_BITS, HAVE_INFINITY, \
+                                          BIAS_TWEAK, NAN_AS_NEG_ZERO)  \
+  /* Converts a to a 32-bit C `float`. */                               \
+  static inline float iree_math_##NAME##_to_f32(INT_TYPE src) {         \
+    return iree_math_make_f32_from_bits(src, EXP_BITS, MANTISSA_BITS,   \
+                                        HAVE_INFINITY, BIAS_TWEAK,      \
+                                        NAN_AS_NEG_ZERO);               \
+  }                                                                     \
+  /* Truncates a 32-bit C `float`, rounding to nearest even. */         \
+  static inline INT_TYPE iree_math_f32_to_##NAME(float value) {         \
+    return iree_math_truncate_f32_to_bits_rounding_to_nearest_even(     \
+        value, EXP_BITS, MANTISSA_BITS, HAVE_INFINITY, BIAS_TWEAK,      \
+        NAN_AS_NEG_ZERO);                                               \
+  }                                                                     \
+  /* Round-trip f32->f32 rounding via the narrow float type */          \
+  static inline float iree_math_round_to_nearest_##NAME(float value) {  \
+    return iree_math_##NAME##_to_f32(iree_math_f32_to_##NAME(value));   \
+  }
+
+// IEEE half-precision a.k.a. float16,
+// https://en.wikipedia.org/wiki/Half-precision_floating-point_format
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(f16, uint16_t, 5, 10, /*have_infinity=*/true,
+                                  /*bias_tweak=*/0, /*nan_as_neg_zero=*/false)
+
+// Bfloat16, https://en.wikipedia.org/wiki/Bfloat16_floating-point_format
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(bf16, uint16_t, 8, 7, /*have_infinity=*/true,
+                                  /*bias_tweak=*/0, /*nan_as_neg_zero=*/false)
+
+// F8E5M2 type, https://arxiv.org/abs/2209.05433
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(f8e5m2, uint8_t, 5, 2, /*have_infinity=*/true,
+                                  /*bias_tweak=*/0, /*nan_as_neg_zero=*/false)
+
+// F8E4M3 type, https://arxiv.org/abs/2209.05433.
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(f8e4m3, uint8_t, 4, 3,
+                                  /*have_infinity=*/false, /*bias_tweak=*/0,
+                                  /*nan_as_neg_zero=*/false)
+
+// F8E5M2FNUZ type, found in some AMD GPUs (MI300), called "BF8" there.
+// Quoting LLVM's APFloat.h:
+//   8-bit floating point number mostly following IEEE-754 conventions
+//   and bit layout S1E5M2 described in https://arxiv.org/abs/2206.02915,
+//   with expanded range and with no infinity or signed zero.
+//   NaN is represented as negative zero. (FN -> Finite, UZ -> unsigned zero).
+//   This format's exponent bias is 16, instead of the 15 (2 ** (5 - 1) - 1)
+//   that IEEE precedent would imply.
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(f8e5m2fnuz, uint8_t, 5, 2,
+                                  /*have_infinity=*/false, /*bias_tweak=*/1,
+                                  /*nan_as_neg_zero=*/true)
+
+// F8E4M3FNUZ type, found in some AMD GPUs (MI300), called "FP8" there.
+//   Quoting LLVM's APFloat.h:
+//   8-bit floating point number mostly following IEEE-754 conventions
+//   and bit layout S1E4M3 described in https://arxiv.org/abs/2206.02915,
+//   with expanded range and with no infinity or signed zero.
+//   NaN is represented as negative zero. (FN -> Finite, UZ -> unsigned zero).
+//   This format's exponent bias is 8, instead of the 7 (2 ** (4 - 1) - 1)
+//   that IEEE precedent would imply.
+IREE_MATH_MAKE_FLOAT_TYPE_HELPERS(f8e4m3fnuz, uint8_t, 4, 3,
+                                  /*have_infinity=*/false, /*bias_tweak=*/1,
+                                  /*nan_as_neg_zero=*/true)
 
 #endif  // IREE_BASE_INTERNAL_MATH_H_

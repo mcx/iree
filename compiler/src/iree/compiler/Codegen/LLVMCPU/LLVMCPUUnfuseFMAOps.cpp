@@ -4,22 +4,23 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_LLVMCPUUNFUSEFMAOPSPASS
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h.inc"
 
 namespace {
 
 // Rewrites llvm.intr.fma as its un-fuse version.
 // TODO(ataei): Upstream this pattern if needed ?
 class UnfusedFMAOpsPassConversion : public OpRewritePattern<LLVM::FMAOp> {
- public:
+public:
   using OpRewritePattern<LLVM::FMAOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(LLVM::FMAOp op,
@@ -33,17 +34,17 @@ class UnfusedFMAOpsPassConversion : public OpRewritePattern<LLVM::FMAOp> {
     return success();
   }
 };
-}  // namespace
+} // namespace
 
 namespace {
 struct LLVMCPUUnfuseFMAOpsPass
-    : LLVMCPUUnfuseFMAOpsBase<LLVMCPUUnfuseFMAOpsPass> {
+    : impl::LLVMCPUUnfuseFMAOpsPassBase<LLVMCPUUnfuseFMAOpsPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<LLVM::LLVMDialect>();
   }
   void runOnOperation() override;
 };
-}  // namespace
+} // namespace
 
 void populateUnfusedFMAOpsPassPatterns(MLIRContext *context,
                                        RewritePatternSet &patterns) {
@@ -55,14 +56,8 @@ void LLVMCPUUnfuseFMAOpsPass::runOnOperation() {
   auto context = funcOp.getContext();
   RewritePatternSet patterns(&getContext());
   populateUnfusedFMAOpsPassPatterns(context, patterns);
-  if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+  if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
     return signalPassFailure();
   }
 }
-
-std::unique_ptr<OperationPass<func::FuncOp>> createLLVMCPUUnfuseFMAOpsPass() {
-  return std::make_unique<LLVMCPUUnfuseFMAOpsPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

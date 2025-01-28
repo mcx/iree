@@ -4,30 +4,27 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_LLVMCPUASSIGNCONSTANTORDINALSPASS
+#include "iree/compiler/Codegen/LLVMCPU/Passes.h.inc"
 
 namespace {
 
 struct LLVMCPUAssignConstantOrdinalsPass
-    : public LLVMCPUAssignConstantOrdinalsBase<
+    : public impl::LLVMCPUAssignConstantOrdinalsPassBase<
           LLVMCPUAssignConstantOrdinalsPass> {
-  LLVMCPUAssignConstantOrdinalsPass() = default;
   void runOnOperation() override {
     auto variantOp = getOperation();
 
-    // Ignore non-LLVMCPU variants.
-    // TODO(benvanik): a way to nest this in the pipeline via dynamic passes.
-    if (variantOp.getTarget().getBackend().getValue() != "llvm-cpu") return;
-
     // Get a constant key -> ordinal mapping.
     auto keyOrdinals = variantOp.gatherConstantOrdinals();
-    if (keyOrdinals.empty()) return;
+    if (keyOrdinals.empty())
+      return;
 
     // Update placeholders to hold the concrete ordinal values.
     // Eventually MLIR or LLVM will inline them.
@@ -36,7 +33,8 @@ struct LLVMCPUAssignConstantOrdinalsPass
          llvm::make_early_inc_range(moduleOp.getOps<LLVM::GlobalOp>())) {
       auto keyAttr = globalOp->getAttr(
           IREE::HAL::ExecutableConstantBlockOp::getKeyAttrName());
-      if (!keyAttr) continue;
+      if (!keyAttr)
+        continue;
       auto it = keyOrdinals.find(keyAttr);
       if (it == keyOrdinals.end()) {
         globalOp.emitOpError()
@@ -51,13 +49,5 @@ struct LLVMCPUAssignConstantOrdinalsPass
     }
   }
 };
-
-}  // namespace
-
-std::unique_ptr<OperationPass<IREE::HAL::ExecutableVariantOp>>
-createLLVMCPUAssignConstantOrdinalsPass() {
-  return std::make_unique<LLVMCPUAssignConstantOrdinalsPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

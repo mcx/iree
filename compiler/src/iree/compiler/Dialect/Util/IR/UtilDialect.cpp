@@ -23,10 +23,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Transforms/InliningUtils.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
 
 // Used for custom printing support.
 struct UtilOpAsmInterface : public OpAsmDialectInterface {
@@ -37,7 +34,7 @@ struct UtilOpAsmInterface : public OpAsmDialectInterface {
   /// end with a numeric digit([0-9]+). Returns success if an alias was
   /// provided, failure otherwise.
   AliasResult getAlias(Attribute attr, raw_ostream &os) const override {
-    if (auto compositeAttr = attr.dyn_cast<CompositeAttr>()) {
+    if (auto compositeAttr = llvm::dyn_cast<CompositeAttr>(attr)) {
       os << "composite_of_" << compositeAttr.getTotalLength() << "b";
       return AliasResult::OverridableAlias;
     }
@@ -51,6 +48,25 @@ struct UtilInlinerInterface : public DialectInlinerInterface {
 
   bool isLegalToInline(Operation *call, Operation *callable,
                        bool wouldBeCloned) const final {
+    // Check the inlining policy specified on the callable first.
+    if (auto inliningPolicy =
+            callable->getAttrOfType<IREE::Util::InliningPolicyAttrInterface>(
+                "inlining_policy")) {
+      if (!inliningPolicy.isLegalToInline(call, callable))
+        return false;
+    }
+
+    // Check any extended inlining policies that may come from dialect
+    // attributes on both the callee and caller.
+    for (auto attr : callable->getDialectAttrs()) {
+      if (auto inliningPolicy =
+              dyn_cast<IREE::Util::InliningPolicyAttrInterface>(
+                  attr.getValue())) {
+        if (!inliningPolicy.isLegalToInline(call, callable))
+          return false;
+      }
+    }
+
     // Sure!
     return true;
   }
@@ -68,25 +84,41 @@ struct UtilInlinerInterface : public DialectInlinerInterface {
   }
 
   void handleTerminator(Operation *op, Block *newDest) const final {
-    auto returnOp = dyn_cast<IREE::Util::InitializerReturnOp>(op);
-    if (!returnOp) return;
-    // util.initialize.return takes no args - just branch to the new block.
+    auto returnOp = dyn_cast<IREE::Util::ReturnOp>(op);
+    if (!returnOp)
+      return;
     OpBuilder builder(op);
-    builder.create<mlir::cf::BranchOp>(op->getLoc(), newDest, ValueRange{});
+    builder.create<mlir::cf::BranchOp>(op->getLoc(), newDest,
+                                       returnOp.getOperands());
     op->erase();
   }
 
-  void handleTerminator(Operation *op,
-                        ArrayRef<Value> valuesToReplace) const final {
-    // util.initialize.return takes no args.
+  void handleTerminator(Operation *op, ValueRange valuesToReplace) const final {
+    auto returnOp = dyn_cast<IREE::Util::ReturnOp>(op);
+    if (!returnOp)
+      return;
+    assert(returnOp.getNumOperands() == valuesToReplace.size());
+    for (const auto &it : llvm::enumerate(returnOp.getOperands())) {
+      valuesToReplace[it.index()].replaceAllUsesWith(it.value());
+    }
+  }
+
+  Operation *materializeCallConversion(OpBuilder &builder, Value input,
+                                       Type resultType,
+                                       Location conversionLoc) const override {
+    return nullptr;
   }
 };
 
 UtilDialect::UtilDialect(MLIRContext *context)
     : Dialect(getDialectNamespace(), context, TypeID::get<UtilDialect>()) {
+  context->loadDialect<arith::ArithDialect>();
+
   addInterfaces<UtilOpAsmInterface, UtilInlinerInterface>();
+
   registerAttributes();
   registerTypes();
+
 #define GET_OP_LIST
   addOperations<
 #include "iree/compiler/Dialect/Util/IR/UtilOps.cpp.inc"
@@ -95,8 +127,10 @@ UtilDialect::UtilDialect(MLIRContext *context)
 
 Operation *UtilDialect::materializeConstant(OpBuilder &builder, Attribute value,
                                             Type type, Location loc) {
-  if (arith::ConstantOp::isBuildableWith(value, type)) {
-    return builder.create<arith::ConstantOp>(loc, value, type);
+  if (isa<IREE::Util::NullAttr>(value)) {
+    return builder.create<IREE::Util::NullOp>(loc, type);
+  } else if (arith::ConstantOp::isBuildableWith(value, type)) {
+    return builder.create<arith::ConstantOp>(loc, type, cast<TypedAttr>(value));
   }
   return nullptr;
 }
@@ -108,7 +142,8 @@ struct FoldDimOp : public OpRewritePattern<DimOp> {
                                 PatternRewriter &rewriter) const override {
     auto shapeAwareOp =
         dyn_cast_or_null<ShapeAwareOpInterface>(op.getSource().getDefiningOp());
-    if (!shapeAwareOp) return failure();
+    if (!shapeAwareOp)
+      return failure();
 
     // We only support static dimension indices today (as in general we only
     // support ranked shapes). If we find dynamic indices sneaking in we will
@@ -121,9 +156,9 @@ struct FoldDimOp : public OpRewritePattern<DimOp> {
     }
 
     // If it's a static dim then just fold to that.
-    auto type = op.getSource().getType().template cast<ShapedType>();
+    auto type = llvm::cast<ShapedType>(op.getSource().getType());
     int64_t staticDim = type.getDimSize(index.getZExtValue());
-    if (staticDim != ShapedType::kDynamic) {
+    if (!ShapedType::isDynamic(staticDim)) {
       rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, staticDim);
       return success();
     }
@@ -145,7 +180,4 @@ void UtilDialect::getCanonicalizationPatterns(
   results.insert<FoldDimOp<tensor::DimOp>>(getContext());
 }
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

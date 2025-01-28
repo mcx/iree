@@ -7,7 +7,6 @@
 #include "iree/modules/hal/loader/module.h"
 
 #include "iree/base/api.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/api.h"
 #include "iree/hal/local/local_executable.h"
 #include "iree/vm/api.h"
@@ -73,6 +72,20 @@ static void IREE_API_PTR iree_hal_loader_module_free_state(
   IREE_TRACE_ZONE_END(z0);
 }
 
+static iree_status_t IREE_API_PTR iree_hal_loader_module_fork_state(
+    void* self, iree_vm_module_state_t* parent_state,
+    iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+
+  // NOTE: parent state contains nothing useful and is unused.
+  // We just realloc new state.
+  iree_status_t status =
+      iree_hal_loader_module_alloc_state(self, allocator, out_child_state);
+
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
 static iree_status_t IREE_API_PTR iree_hal_loader_module_notify(
     void* self, iree_vm_module_state_t* module_state, iree_vm_signal_t signal) {
   switch (signal) {
@@ -92,13 +105,6 @@ static iree_host_size_t iree_hal_cast_host_size(int64_t value) {
   // TODO(benvanik): make this return status and check for overflow if host
   // size is 32-bits.
   return (iree_host_size_t)value;
-}
-
-// Casts a VM value to a HAL device size.
-static iree_device_size_t iree_hal_cast_device_size(int64_t value) {
-  // TODO(benvanik): make this return status and check for overflow if device
-  // size is 32-bits.
-  return (iree_device_size_t)value;
 }
 
 //===----------------------------------------------------------------------===//
@@ -207,8 +213,6 @@ IREE_HAL_ABI_EXPORT(iree_hal_loader_module_executable_load,  //
   executable_params.executable_format = executable_format_str;
   executable_params.executable_data = iree_make_const_byte_span(
       executable_data->data.data, executable_data->data.data_length);
-  executable_params.pipeline_layout_count = 0;
-  executable_params.pipeline_layouts = NULL;
   executable_params.constant_count = constant_count;
   executable_params.constants = constants;
 
@@ -232,8 +236,8 @@ typedef struct {
     };
     iree_vm_abi_riiii_t params;
   };
-  iree_vm_size_t push_constant_count;
-  const uint32_t* push_constants;
+  iree_vm_size_t constant_count;
+  const uint32_t* constants;
   iree_vm_size_t binding_count;
   const iree_vm_abi_rII_t* bindings;
 } iree_hal_loader_dispatch_args_t;
@@ -274,13 +278,13 @@ static iree_status_t iree_hal_loader_module_executable_dispatch(
       .workgroup_size_x = 1,
       .workgroup_size_y = 1,
       .workgroup_size_z = 1,
-      .push_constant_count = args->push_constant_count,
+      .constant_count = args->constant_count,
       .workgroup_count_x = args->workgroup_x,
       .workgroup_count_y = args->workgroup_y,
       .workgroup_count_z = args->workgroup_z,
       .max_concurrency = 1,
       .binding_count = args->binding_count,
-      .push_constants = args->push_constants,
+      .constants = args->constants,
       .binding_ptrs = binding_ptrs,
       .binding_lengths = binding_lengths,
   };
@@ -312,13 +316,12 @@ static iree_status_t iree_vm_shim_dispatch_v(
       .params = *(const iree_vm_abi_riiii_t*)args_storage.data,
   };
   if (args_ok) {
-    const uint8_t* push_constants_ptr = args_storage.data + sizeof(args.params);
-    args.push_constant_count = *(const iree_vm_size_t*)push_constants_ptr;
-    args.push_constants =
-        (const uint32_t*)(push_constants_ptr + sizeof(iree_vm_size_t));
+    const uint8_t* constants_ptr = args_storage.data + sizeof(args.params);
+    args.constant_count = *(const iree_vm_size_t*)constants_ptr;
+    args.constants = (const uint32_t*)(constants_ptr + sizeof(iree_vm_size_t));
     const uint8_t* bindings_ptr =
-        push_constants_ptr + sizeof(iree_vm_size_t) +
-        args.push_constant_count * sizeof(args.push_constants[0]);
+        constants_ptr + sizeof(iree_vm_size_t) +
+        args.constant_count * sizeof(args.constants[0]);
     args.binding_count = *(const iree_vm_size_t*)bindings_ptr;
     args.bindings =
         (const iree_vm_abi_rII_t*)(bindings_ptr + sizeof(iree_vm_size_t));
@@ -403,6 +406,7 @@ IREE_API_EXPORT iree_status_t iree_hal_loader_module_create(
       .destroy = iree_hal_loader_module_destroy,
       .alloc_state = iree_hal_loader_module_alloc_state,
       .free_state = iree_hal_loader_module_free_state,
+      .fork_state = iree_hal_loader_module_fork_state,
       .notify = iree_hal_loader_module_notify,
   };
 

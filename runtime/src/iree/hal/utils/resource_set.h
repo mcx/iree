@@ -15,10 +15,6 @@
 extern "C" {
 #endif  // __cplusplus
 
-// Bit 0 of the next_chunk pointer indicates whether we are inlined into the
-// resource set block - the chunks are always aligned and the bit is unused.
-#define IREE_HAL_RESOURCE_SET_CHUNK_FLAG_INLINE 0x1
-
 // Capacity is limited by how many bits we reserve for the count.
 #define IREE_HAL_RESOURCE_SET_CHUNK_MAX_CAPACITY 0xFFFFu
 
@@ -27,14 +23,7 @@ extern "C" {
 // pool the set was allocated from.
 typedef struct iree_hal_resource_set_chunk_t {
   // Next chunk in the chunk linked list.
-  // Bit 0 indicates whether this was an allocated block; 0 means that the
-  // chunk is stored within the parent resource set and should not be returned
-  // to the block pool. This works only because we know the blocks are allocated
-  // at an alignment >= 16 and we have a few bits to work with.
-  union {
-    struct iree_hal_resource_set_chunk_t* next_chunk;
-    uintptr_t flags;
-  };
+  struct iree_hal_resource_set_chunk_t* next_chunk;
 
   // Retained resources - may be less than the capacity derived from the block
   // pool block size. We keep the counts small here to reduce chunk overhead. We
@@ -47,9 +36,8 @@ typedef struct iree_hal_resource_set_chunk_t {
 } iree_hal_resource_set_chunk_t;
 
 // Returns true if the chunk is stored inline in the parent resource set.
-#define iree_hal_resource_set_chunk_is_stored_inline(chunk)      \
-  (((chunk)->flags & IREE_HAL_RESOURCE_SET_CHUNK_FLAG_INLINE) == \
-   IREE_HAL_RESOURCE_SET_CHUNK_FLAG_INLINE)
+#define iree_hal_resource_set_chunk_is_stored_inline(set, chunk) \
+  ((const void*)(chunk) == (const uint8_t*)set + sizeof(*set))
 
 // Number of elements in the most-recently-used resource list of a set.
 // The larger the number the greater the chance of having a hit but the more
@@ -127,11 +115,39 @@ IREE_API_EXPORT iree_status_t iree_hal_resource_set_allocate(
 // from.
 IREE_API_EXPORT void iree_hal_resource_set_free(iree_hal_resource_set_t* set);
 
+// Freezes the resource set to indicate that it is not expected to change until
+// it is freed. This only impacts debugging/ASAN and doesn't otherwise prevent
+// insertion.
+IREE_API_EXPORT void iree_hal_resource_set_freeze(iree_hal_resource_set_t* set);
+
 // Inserts zero or more resources into the set.
 // Each resource will be retained for at least the lifetime of the set.
+// Entries will be ignored if NULL.
 IREE_API_EXPORT iree_status_t
 iree_hal_resource_set_insert(iree_hal_resource_set_t* set,
                              iree_host_size_t count, const void* resources);
+
+// Inserts zero or more resources into the set from a user-defined data
+// structure. Each resource will be retained for at least the lifetime of the
+// set. Entries will be ignored if NULL.
+//
+// |elements| should point to the first element of the data structure array,
+// |offset| to the iree_hal_resource_t* pointer within it, and |stride| should
+// be the bytes between that and the subsequent data structure entry. For
+// example, a dense list of resource pointers would have an offset of 0 and a
+// stride of sizeof(iree_hal_resource_t*).
+//
+// Example:
+//   struct my_struct_t {
+//     int something;
+//     iree_hal_resource_t* resource;
+//   } structs[5];
+//   iree_hal_resource_set_insert_strided(set, 5, structs,
+//                                        offsetof(my_struct_t, resource),
+//                                        sizeof(my_struct_t));
+IREE_API_EXPORT iree_status_t iree_hal_resource_set_insert_strided(
+    iree_hal_resource_set_t* set, iree_host_size_t count, const void* data,
+    iree_host_size_t offset, iree_host_size_t stride);
 
 #ifdef __cplusplus
 }  // extern "C"

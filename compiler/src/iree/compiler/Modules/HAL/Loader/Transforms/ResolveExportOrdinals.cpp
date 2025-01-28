@@ -6,60 +6,41 @@
 
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderDialect.h"
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderOps.h"
-#include "iree/compiler/Modules/HAL/Loader/Transforms/PassDetail.h"
 #include "iree/compiler/Modules/HAL/Loader/Transforms/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Loader {
+namespace mlir::iree_compiler::IREE::HAL::Loader {
 
-struct ResolveExecutableDispatchSymbolOp
-    : public OpRewritePattern<IREE::HAL::Loader::ExecutableDispatchSymbolOp> {
-  using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::Loader::ExecutableDispatchSymbolOp op,
-      PatternRewriter &rewriter) const override {
-    auto symbol = SymbolTable::lookupNearestSymbolFrom(op, op.getEntryPoint());
-    assert(symbol && "missing ExecutableEntryPoint symbol");
-    auto exportOp = cast<IREE::HAL::ExecutableExportOp>(symbol);
-    rewriter.replaceOpWithNewOp<IREE::HAL::Loader::ExecutableDispatchOp>(
-        op, op.getExecutable(), exportOp.getOrdinalAttr(), op.getWorkgroupX(),
-        op.getWorkgroupY(), op.getWorkgroupZ(), op.getPushConstants(),
-        op.getBindingBuffers(), op.getBindingOffsets(), op.getBindingLengths());
-    return success();
-  }
-};
+#define GEN_PASS_DEF_RESOLVEEXPORTORDINALSPASS
+#include "iree/compiler/Modules/HAL/Loader/Transforms/Passes.h.inc"
 
-class ResolveExportOrdinalsPass
-    : public ResolveExportOrdinalsBase<ResolveExportOrdinalsPass> {
- public:
+namespace {
+
+class ResolveExportOrdinalsPass final
+    : public impl::ResolveExportOrdinalsPassBase<ResolveExportOrdinalsPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<arith::ArithDialect>();
     registry.insert<IREE::HAL::Loader::HALLoaderDialect>();
   }
 
   void runOnOperation() override {
-    MLIRContext *context = &getContext();
-    RewritePatternSet patterns(&getContext());
-    patterns.insert<ResolveExecutableDispatchSymbolOp>(context);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
-      return signalPassFailure();
+    auto moduleOp = getOperation();
+    SymbolTable symbolTable(moduleOp);
+    for (auto funcOp : moduleOp.getOps<FunctionOpInterface>()) {
+      funcOp.walk([&](IREE::HAL::Loader::ExecutableExportOrdinalOp ordinalOp) {
+        auto exportOp =
+            symbolTable.lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
+                ordinalOp, ordinalOp.getEntryPointAttr());
+        Value value = OpBuilder(ordinalOp).create<arith::ConstantIndexOp>(
+            ordinalOp.getLoc(), exportOp.getOrdinalAttr().getInt());
+        ordinalOp.replaceAllUsesWith(value);
+        ordinalOp.erase();
+      });
     }
   }
 };
 
-std::unique_ptr<OperationPass<ModuleOp>> createResolveExportOrdinalsPass() {
-  return std::make_unique<ResolveExportOrdinalsPass>();
-}
-
-static PassRegistration<ResolveExportOrdinalsPass> pass;
-
-}  // namespace Loader
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler::IREE::HAL::Loader

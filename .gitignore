@@ -13,6 +13,7 @@
 *.VC.opendb
 *.suo
 *.user
+*.code-workspace
 
 # macOS files
 .DS_Store
@@ -20,14 +21,24 @@
 # CMake artifacts
 build/
 build-*/
+Testing/
+# Include iree.build package
+!compiler/bindings/python/iree/compiler/build/
 
 # Bazel artifacts
 **/bazel-*
+MODULE.bazel
+MODULE.bazel.lock
+
+# Executables
+*.exe
+*.out
 
 # Local-only config options
 configured.bazelrc
 user.bazelrc
 version_info.json
+version_local.json
 CMakeUserPresets.json
 
 # Dear ImGui Ini files
@@ -43,7 +54,9 @@ imgui.ini
 # Source indexing files
 compile_commands.json
 .cache/clangd
-.clangd/
+
+# Language server configuration files
+.clangd
 
 # Pyenv files
 .python-version
@@ -52,6 +65,7 @@ compile_commands.json
 
 # Python deployment artifacts
 *.whl
+*.egg-info
 
 # Android Studio / Gradle files
 .cxx
@@ -67,10 +81,21 @@ docs/website/site/
 
 # Temporary files
 iree/builtins/**/bin/*.ll
+artifacts/
 
 # Archive files
 *.tar
 *.tar.*
 
+# VS Code DevContainer
+.devcontainer/docker-compose.yml
+
 # Local cache files
 llvm-external-projects/iree-dialects/.cache
+
+# pkgci artifacts
+artifacts/
+
+# Side effects of local patching/merging
+*.orig
+*.rej

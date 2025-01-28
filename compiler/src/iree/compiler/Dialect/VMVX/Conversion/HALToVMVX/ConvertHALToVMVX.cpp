@@ -13,9 +13,8 @@
 #include "iree/compiler/Dialect/VMVX/IR/VMVXDialect.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXOps.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXTypes.h"
-#include "iree/compiler/Utils/IndexSet.h"
+#include "iree/compiler/Utils/IntegerSet.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
@@ -23,10 +22,10 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Ordered indices of arguments to the entry point function.
 // This is what the VM will receive at runtime from the HAL.
@@ -66,20 +65,19 @@ enum EntryArgOrdinals {
 ///       %workgroup_count_y: i32,
 ///       %workgroup_count_z: i32
 ///   )
-LogicalResult updateHALToVMVXEntryFuncOp(func::FuncOp funcOp,
+LogicalResult updateHALToVMVXEntryFuncOp(mlir::FunctionOpInterface funcOp,
                                          TypeConverter &typeConverter) {
-  auto originalType = funcOp.getFunctionType();
-  if (originalType.getNumInputs() != 0 || originalType.getNumResults() != 0) {
+  if (funcOp.getNumArguments() != 0 || funcOp.getNumResults() != 0) {
     return funcOp.emitError() << "exported functions must have no I/O";
   }
 
   auto bufferType = IREE::Util::BufferType::get(funcOp.getContext());
-  auto bindingsType = IREE::Util::ListType::get(bufferType);  // of i8
+  auto bindingsType = IREE::Util::ListType::get(bufferType); // of i8
   auto i32Type = IntegerType::get(funcOp.getContext(), 32);
   auto newType = FunctionType::get(funcOp.getContext(),
                                    {
-                                       /*local_memory=*/bufferType,  // of i8
-                                       /*constants=*/bufferType,     // of i32
+                                       /*local_memory=*/bufferType, // of i8
+                                       /*constants=*/bufferType,    // of i32
                                        /*bindings=*/bindingsType,
                                        /*workgroup_id_x=*/i32Type,
                                        /*workgroup_id_y=*/i32Type,
@@ -107,9 +105,9 @@ namespace {
 struct ConvertHALInterfaceWorkgroupIDOp
     : public OpConversionPattern<IREE::HAL::InterfaceWorkgroupIDOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupIDOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupIDOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     uint64_t dim = op.getDimension().getZExtValue();
     if (dim >= 3) {
       return op.emitOpError() << "out of bounds workgroup ID dimension";
@@ -117,7 +115,7 @@ struct ConvertHALInterfaceWorkgroupIDOp
 
     // Get the argument to the function corresponding to the workgroup dim.
     Value workgroupDimI32 =
-        op->getParentOfType<mlir::func::FuncOp>().getArgument(
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
             kEntryArgWorkgroupX + dim);
     Value workgroupDim = rewriter.create<arith::IndexCastOp>(
         op.getLoc(), rewriter.getIndexType(), workgroupDimI32);
@@ -131,9 +129,9 @@ struct ConvertHALInterfaceWorkgroupIDOp
 struct ConvertHALInterfaceWorkgroupSizeOp
     : public OpConversionPattern<IREE::HAL::InterfaceWorkgroupSizeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupSizeOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupSizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     uint64_t dim = op.getDimension().getZExtValue();
     if (dim >= 3) {
       return op.emitOpError() << "out of bounds workgroup size dimension";
@@ -141,7 +139,7 @@ struct ConvertHALInterfaceWorkgroupSizeOp
 
     // Get the argument to the function corresponding to the workgroup dim.
     Value workgroupDimI32 =
-        op->getParentOfType<mlir::func::FuncOp>().getArgument(
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
             kEntryArgWorkgroupSizeX + dim);
     Value workgroupDim = rewriter.create<arith::IndexCastOp>(
         op.getLoc(), rewriter.getIndexType(), workgroupDimI32);
@@ -155,9 +153,9 @@ struct ConvertHALInterfaceWorkgroupSizeOp
 struct ConvertHALInterfaceWorkgroupCountOp
     : public OpConversionPattern<IREE::HAL::InterfaceWorkgroupCountOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceWorkgroupCountOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceWorkgroupCountOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     uint64_t dim = op.getDimension().getZExtValue();
     if (dim >= 3) {
       return op.emitOpError() << "out of bounds workgroup count dimension";
@@ -165,7 +163,7 @@ struct ConvertHALInterfaceWorkgroupCountOp
 
     // Get the argument to the function corresponding to the workgroup dim.
     Value workgroupDimI32 =
-        op->getParentOfType<mlir::func::FuncOp>().getArgument(
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
             kEntryArgWorkgroupCountX + dim);
     Value workgroupDim = rewriter.create<arith::IndexCastOp>(
         op.getLoc(), rewriter.getIndexType(), workgroupDimI32);
@@ -178,12 +176,13 @@ struct ConvertHALInterfaceWorkgroupCountOp
 struct ConvertHALInterfaceConstantLoadOp
     : public OpConversionPattern<IREE::HAL::InterfaceConstantLoadOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceConstantLoadOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceConstantLoadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     // Find the vmvx.interface argument to the function.
-    auto constantsArg = op->getParentOfType<mlir::func::FuncOp>().getArgument(
-        kEntryArgConstants);
+    auto constantsArg =
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
+            kEntryArgConstants);
     assert(constantsArg && "entry point not conforming to requirements");
     // HACK: we could find the total push constant count and avoid this size op
     // but it'd require walking all the way up to the hal.executable export.
@@ -193,7 +192,7 @@ struct ConvertHALInterfaceConstantLoadOp
 
     // Index -> byte offset.
     auto constantIndex = rewriter.createOrFold<arith::ConstantIndexOp>(
-        op.getLoc(), op.getIndex().getZExtValue());
+        op.getLoc(), op.getOrdinal().getZExtValue());
     auto elementSize =
         rewriter.createOrFold<IREE::Util::SizeOfOp>(op.getLoc(), resultType);
     auto byteOffset = rewriter.createOrFold<arith::MulIOp>(
@@ -207,29 +206,25 @@ struct ConvertHALInterfaceConstantLoadOp
 struct ConvertGetRawInterfaceBindingBufferOp
     : public OpConversionPattern<IREE::VMVX::GetRawInterfaceBindingBufferOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::VMVX::GetRawInterfaceBindingBufferOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::VMVX::GetRawInterfaceBindingBufferOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     // Find the vmvx.interface argument to the function.
-    auto bindingsArg = op->getParentOfType<mlir::func::FuncOp>().getArgument(
-        kEntryArgBindings);
-    assert(bindingsArg && bindingsArg.getType().isa<IREE::Util::ListType>() &&
+    auto bindingsArg =
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
+            kEntryArgBindings);
+    assert(bindingsArg && isa<IREE::Util::ListType>(bindingsArg.getType()) &&
            "entry point not conforming to requirements");
 
-    // TODO(benvanik): compact the indices - the bindings we have on the ABI
-    // interface are dense.
-    if (op.getSet().getZExtValue() != 0) {
-      return op.emitOpError() << "sparse binding sets not yet implemented";
-    }
-
     IndexSet indexSet(op.getLoc(), rewriter);
-    auto bindingType =
-        bindingsArg.getType().cast<IREE::Util::ListType>().getElementType();
+    auto bindingType = llvm::cast<IREE::Util::ListType>(bindingsArg.getType())
+                           .getElementType();
     rewriter
         .replaceOpWithNewOp<IREE::Util::ListGetOp>(
             op, bindingType, bindingsArg,
             rewriter.createOrFold<arith::ConstantIndexOp>(
-                op.getLoc(), op.getBinding().getZExtValue()))
+                op.getLoc(), op.getBinding().getSExtValue()))
         .getResult();
     return success();
   }
@@ -239,30 +234,25 @@ struct ConvertGetRawInterfaceBindingBufferOp
 struct ConvertHALInterfaceBindingSubspanOp
     : public OpConversionPattern<IREE::HAL::InterfaceBindingSubspanOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceBindingSubspanOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     // Find the vmvx.interface argument to the function.
-    auto bindingsArg = op->getParentOfType<mlir::func::FuncOp>().getArgument(
-        kEntryArgBindings);
-    assert(bindingsArg && bindingsArg.getType().isa<IREE::Util::ListType>() &&
+    auto bindingsArg =
+        op->getParentOfType<mlir::FunctionOpInterface>().getArgument(
+            kEntryArgBindings);
+    assert(bindingsArg && isa<IREE::Util::ListType>(bindingsArg.getType()) &&
            "entry point not conforming to requirements");
 
-    // TODO(benvanik): compact the indices - the bindings we have on the ABI
-    // interface are dense.
-    if (op.getSet().getZExtValue() != 0) {
-      return op.emitOpError() << "sparse binding sets not yet implemented";
-    }
-
     IndexSet indexSet(op.getLoc(), rewriter);
-    auto bindingType =
-        bindingsArg.getType().cast<IREE::Util::ListType>().getElementType();
+    auto bindingType = llvm::cast<IREE::Util::ListType>(bindingsArg.getType())
+                           .getElementType();
     auto sourceBuffer =
         rewriter
             .create<IREE::Util::ListGetOp>(
                 op.getLoc(), bindingType, bindingsArg,
                 rewriter.createOrFold<arith::ConstantIndexOp>(
-                    op.getLoc(), op.getBinding().getZExtValue()))
+                    op.getLoc(), op.getBinding().getSExtValue()))
             .getResult();
 
     if (op.getByteOffset() && !matchPattern(op.getByteOffset(), m_Zero())) {
@@ -272,7 +262,7 @@ struct ConvertHALInterfaceBindingSubspanOp
 
       // Compute the dest size by multiplying the element size by all extents
       // (static and dynamic).
-      auto memRefType = op.getResult().getType().cast<MemRefType>();
+      auto memRefType = llvm::cast<MemRefType>(op.getResult().getType());
       Value destSize = rewriter.createOrFold<IREE::Util::SizeOfOp>(
           op.getLoc(), memRefType.getElementType());
       auto dynamicExtentIt = adaptor.getDynamicDims().begin();
@@ -298,7 +288,7 @@ struct ConvertHALInterfaceBindingSubspanOp
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateHALToVMVXPatterns(MLIRContext *context,
                                ConversionTarget &conversionTarget,
@@ -316,5 +306,4 @@ void populateHALToVMVXPatterns(MLIRContext *context,
   patterns.insert<ConvertHALInterfaceBindingSubspanOp>(typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

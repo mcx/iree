@@ -12,31 +12,33 @@
 #include "mlir/IR/Dominance.h"
 
 namespace mlir {
+
 class Operation;
+
 /// A rewriter that keeps track of all tensor::DimOps.
 class TensorDimTrackingRewriter : public IRRewriter, IRRewriter::Listener {
- public:
+public:
   /// Create a new rewriter: Scan the given op for tensor::DimOps.
   TensorDimTrackingRewriter(Operation *op);
   /// Return all tracked tensor::DimOps.
   SmallVector<tensor::DimOp> getTensorDimOps();
 
- protected:
-  void notifyOperationRemoved(Operation *op) override;
-  void notifyOperationInserted(Operation *op) override;
+protected:
+  void notifyOperationErased(Operation *op) override;
+  void notifyOperationInserted(Operation *op, InsertPoint previous) override;
 
- private:
+private:
   SmallPtrSet<Operation *, 16> dimOps;
 };
 
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+} // namespace mlir
+
+namespace mlir::iree_compiler::IREE::Flow {
 
 /// Computes the workload and provides a workload region builder for the given
 /// root op.
-FailureOr<Flow::WorkloadBuilder> getWorkloadBuilder(OpBuilder &builder,
-                                                    Operation *rootOp);
+FailureOr<IREE::Flow::WorkloadBuilder> getWorkloadBuilder(OpBuilder &builder,
+                                                          Operation *rootOp);
 
 /// Simplfy the given tensor::DimOps as much as possible.
 /// * Static dimensions are replaced by constant.
@@ -46,9 +48,7 @@ FailureOr<Flow::WorkloadBuilder> getWorkloadBuilder(OpBuilder &builder,
 ///   value.
 LogicalResult simplifyDimOps(RewriterBase &rewriter,
                              const SmallVector<tensor::DimOp> &dimOps);
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
 
-#endif  // IREE_COMPILER_DIALECT_FLOW_TRANSFORMS_FORMDISPATCHREGIONS_H_
+} // namespace mlir::iree_compiler::IREE::Flow
+
+#endif // IREE_COMPILER_DIALECT_FLOW_TRANSFORMS_FORMDISPATCHREGIONS_H_

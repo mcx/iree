@@ -9,9 +9,8 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Modules/HAL/Inline/IR/HALInlineDialect.h"
-#include "iree/compiler/Modules/HAL/Inline/Transforms/PassDetail.h"
 #include "iree/compiler/Modules/HAL/Inline/Transforms/Passes.h"
-#include "iree/compiler/Utils/IndexSet.h"
+#include "iree/compiler/Utils/IntegerSet.h"
 #include "iree/compiler/Utils/ModuleUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -22,15 +21,16 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Inline {
+namespace mlir::iree_compiler::IREE::HAL::Inline {
 
-class InlineExecutablesPass
-    : public InlineExecutablesBase<InlineExecutablesPass> {
- public:
+#define GEN_PASS_DEF_INLINEEXECUTABLESPASS
+#include "iree/compiler/Modules/HAL/Inline/Transforms/Passes.h.inc"
+
+namespace {
+
+class InlineExecutablesPass final
+    : public impl::InlineExecutablesPassBase<InlineExecutablesPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::Util::UtilDialect, IREE::HAL::HALDialect,
                     IREE::HAL::Inline::HALInlineDialect, arith::ArithDialect,
@@ -71,7 +71,7 @@ class InlineExecutablesPass
           return WalkResult::interrupt();
         }
         auto targetFuncName =
-            exportToFuncMap[entryPointAttrs.front()].cast<StringAttr>();
+            llvm::cast<StringAttr>(exportToFuncMap[entryPointAttrs.front()]);
         assert(targetFuncName && "missing mapping");
         dispatchOp->setAttr("hal_inline.target",
                             FlatSymbolRefAttr::get(targetFuncName));
@@ -100,26 +100,23 @@ class InlineExecutablesPass
     auto indexType = innerModuleBuilder.getIndexType();
     auto i32Type = innerModuleBuilder.getI32Type();
     auto bufferType = innerModuleBuilder.getType<IREE::Util::BufferType>();
-    for (auto exportOp : variantOp.getOps<IREE::HAL::ExecutableExportOp>()) {
+    for (auto exportOp : variantOp.getExportOps()) {
       // Build dispatch function signature that the stream.cmd.dispatch ops will
       // map to.
       auto layoutAttr = exportOp.getLayout();
-      size_t totalBindingCount = 0;
-      for (auto setLayout : layoutAttr.getSetLayouts()) {
-        totalBindingCount += setLayout.getBindings().size();
-      }
+      size_t bindingCount = layoutAttr.getBindings().size();
       SmallVector<Type> inputTypes;
       inputTypes.append(exportOp.getWorkgroupCountBody()->getNumArguments() - 1,
-                        indexType);  // workload
-      inputTypes.append(layoutAttr.getPushConstants(), i32Type);
-      inputTypes.append(totalBindingCount, bufferType);  // buffers
-      inputTypes.append(totalBindingCount, indexType);   // offsets
-      inputTypes.append(totalBindingCount, indexType);   // lengths
+                        indexType); // workload
+      inputTypes.append(layoutAttr.getConstants(), i32Type);
+      inputTypes.append(bindingCount, bufferType); // buffers
+      inputTypes.append(bindingCount, indexType);  // offsets
+      inputTypes.append(bindingCount, indexType);  // lengths
       auto dispatchFuncType =
           innerModuleBuilder.getFunctionType(inputTypes, {});
 
       // Create the function and insert into the module.
-      auto dispatchFuncOp = func::FuncOp::create(
+      auto dispatchFuncOp = IREE::Util::FuncOp::create(
           exportOp.getLoc(),
           ("__dispatch_" + executableOp.getName() + "_" + exportOp.getName())
               .str(),
@@ -131,21 +128,27 @@ class InlineExecutablesPass
 
       // Build the dispatch function by calling the target function in a loop.
       auto bodyFuncOp =
-          innerSymbolTable.lookup<func::FuncOp>(exportOp.getName());
+          innerSymbolTable.lookup<FunctionOpInterface>(exportOp.getName());
+      if (!bodyFuncOp) {
+        return exportOp.emitOpError("missing body function");
+      }
       if (bodyFuncOp.isPublic()) {
-        if (failed(rewriteWorkgroupSignature(layoutAttr, totalBindingCount,
+        if (failed(rewriteWorkgroupSignature(layoutAttr, bindingCount,
                                              bodyFuncOp))) {
           return failure();
         }
-        bodyFuncOp.setPrivate();  // so we only do it once
+        bodyFuncOp.setPrivate(); // so we only do it once
       }
-      buildDispatchFunc(exportOp, layoutAttr, totalBindingCount, bodyFuncOp,
+      buildDispatchFunc(exportOp, layoutAttr, bindingCount, bodyFuncOp,
                         dispatchFuncOp);
 
       // Map from what the stream.cmd.dispatch ops is using to the new function.
-      auto exportTargetAttr =
-          SymbolRefAttr::get(executableOp.getNameAttr(),
-                             {SymbolRefAttr::get(exportOp.getNameAttr())});
+      auto exportTargetAttr = SymbolRefAttr::get(
+          executableOp.getNameAttr(),
+          {
+              FlatSymbolRefAttr::get(variantOp.getNameAttr()),
+              FlatSymbolRefAttr::get(exportOp.getNameAttr()),
+          });
       exportToFuncMap[exportTargetAttr] = dispatchFuncOp.getNameAttr();
     }
 
@@ -177,9 +180,10 @@ class InlineExecutablesPass
   // Whenever better IPO and util.list optimizations are added we could back
   // this out to keep things vanilla and have fewer places making assumptions
   // about the function signatures.
-  LogicalResult rewriteWorkgroupSignature(
-      IREE::HAL::PipelineLayoutAttr layoutAttr, size_t totalBindingCount,
-      func::FuncOp bodyFuncOp) {
+  LogicalResult
+  rewriteWorkgroupSignature(IREE::HAL::PipelineLayoutAttr layoutAttr,
+                            size_t bindingCount,
+                            FunctionOpInterface bodyFuncOp) {
     auto *entryBlock = &bodyFuncOp.front();
     auto builder = OpBuilder::atBlockBegin(entryBlock);
     auto indexType = builder.getIndexType();
@@ -202,10 +206,10 @@ class InlineExecutablesPass
 
     // Expand push constants by replacing buffer accesses with the flattened
     // args.
-    newArgTypes.append(layoutAttr.getPushConstants(), i32Type);
+    newArgTypes.append(layoutAttr.getConstants(), i32Type);
     auto constantBuffer = entryBlock->getArgument(argOffset++);
     SmallVector<Value> constantArgs;
-    for (unsigned i = 0; i < layoutAttr.getPushConstants(); ++i) {
+    for (unsigned i = 0; i < layoutAttr.getConstants(); ++i) {
       constantArgs.push_back(
           entryBlock->addArgument(i32Type, constantBuffer.getLoc()));
     }
@@ -214,10 +218,10 @@ class InlineExecutablesPass
     }
 
     // Expand buffer list by replacing list accesses with the flattened args.
-    newArgTypes.append(totalBindingCount, bufferType);
+    newArgTypes.append(bindingCount, bufferType);
     auto bindingList = entryBlock->getArgument(argOffset++);
     SmallVector<Value> bindingArgs;
-    for (unsigned i = 0; i < totalBindingCount; ++i) {
+    for (unsigned i = 0; i < bindingCount; ++i) {
       bindingArgs.push_back(
           entryBlock->addArgument(bufferType, bindingList.getLoc()));
     }
@@ -322,7 +326,7 @@ class InlineExecutablesPass
   // Builds a function that calls a workgroup body and marshals arguments.
   //
   // Incoming:
-  //   (workload..., push_constants...,
+  //   (workload..., constants...,
   //    binding_buffers..., binding_offsets..., binding_lengths...)
   // Body (as translated):
   //   (local_memory, [constants], [bindings],
@@ -331,8 +335,8 @@ class InlineExecutablesPass
   //    workgroup_count_x, workgroup_count_y, workgroup_count_z)
   void buildDispatchFunc(IREE::HAL::ExecutableExportOp exportOp,
                          IREE::HAL::PipelineLayoutAttr layoutAttr,
-                         size_t totalBindingCount, func::FuncOp bodyFuncOp,
-                         func::FuncOp dispatchFuncOp) {
+                         size_t bindingCount, FunctionOpInterface bodyFuncOp,
+                         FunctionOpInterface dispatchFuncOp) {
     auto loc = exportOp.getLoc();
     auto builder = OpBuilder::atBlockBegin(dispatchFuncOp.addEntryBlock());
     IndexSet indexSet(loc, builder);
@@ -353,7 +357,7 @@ class InlineExecutablesPass
     }
     Value device = builder.create<IREE::Util::NullOp>(
         loc, builder.getType<IREE::HAL::DeviceType>());
-    auto workgroupCount =
+    std::array<Value, 3> workgroupCount =
         exportOp.calculateWorkgroupCount(loc, device, workload, builder);
 
     // For now we don't handle local memory.
@@ -361,18 +365,18 @@ class InlineExecutablesPass
     workgroupArgs.push_back(localMemory);
 
     // Pass all constants through.
-    for (int64_t i = 0; i < layoutAttr.getPushConstants(); ++i) {
+    for (int64_t i = 0; i < layoutAttr.getConstants(); ++i) {
       workgroupArgs.push_back(dispatchFuncOp.getArgument(argOffset++));
     }
 
     // Pass all buffers through as subspans with the binding offset and length
     // factored in. IPO can propagate the subspans (hopefully).
-    for (size_t i = 0; i < totalBindingCount; ++i) {
+    for (size_t i = 0; i < bindingCount; ++i) {
       auto bindingBuffer = dispatchFuncOp.getArgument(argOffset + i);
       auto bindingOffset =
-          dispatchFuncOp.getArgument(argOffset + totalBindingCount + i);
-      auto bindingLength = dispatchFuncOp.getArgument(
-          argOffset + totalBindingCount + totalBindingCount + i);
+          dispatchFuncOp.getArgument(argOffset + bindingCount + i);
+      auto bindingLength = dispatchFuncOp.getArgument(argOffset + bindingCount +
+                                                      bindingCount + i);
       Value bufferSize =
           builder.create<IREE::Util::BufferSizeOp>(loc, bindingBuffer);
       Value bindingView = builder.create<IREE::Util::BufferSubspanOp>(
@@ -381,13 +385,9 @@ class InlineExecutablesPass
     }
 
     int workgroupXYZOffset = workgroupArgs.size();
-    workgroupArgs.push_back(nullptr);            // workgroup_x, set below
-    workgroupArgs.push_back(nullptr);            // workgroup_y, set below
-    workgroupArgs.push_back(nullptr);            // workgroup_z, set below
-    workgroupArgs.append(3, indexSet.get(1));    // workgroup_size_xyz
-    workgroupArgs.push_back(workgroupCount[0]);  // workgroup_count_x
-    workgroupArgs.push_back(workgroupCount[1]);  // workgroup_count_y
-    workgroupArgs.push_back(workgroupCount[2]);  // workgroup_count_z
+    workgroupArgs.append(3, nullptr);         // workgroup_xyz, set below
+    workgroupArgs.append(3, indexSet.get(1)); // workgroup_size_xyz
+    llvm::append_range(workgroupArgs, workgroupCount); // workgroup_count_xyz
 
     // Z -> Y -> Z loop nest.
     builder.create<scf::ForOp>(
@@ -406,8 +406,9 @@ class InlineExecutablesPass
                     [&](OpBuilder &forXBuilder, Location loc, Value ix,
                         ValueRange iters) {
                       workgroupArgs[workgroupXYZOffset + 0] = ix;
-                      forXBuilder.create<func::CallOp>(loc, bodyFuncOp,
-                                                       workgroupArgs);
+                      forXBuilder.create<func::CallOp>(
+                          loc, bodyFuncOp.getNameAttr(),
+                          bodyFuncOp.getResultTypes(), workgroupArgs);
                       forXBuilder.create<scf::YieldOp>(loc);
                     });
                 forYBuilder.create<scf::YieldOp>(loc);
@@ -415,16 +416,9 @@ class InlineExecutablesPass
           forZBuilder.create<scf::YieldOp>(loc);
         });
 
-    builder.create<func::ReturnOp>(loc);
+    builder.create<IREE::Util::ReturnOp>(loc);
   }
 };
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createInlineExecutablesPass() {
-  return std::make_unique<InlineExecutablesPass>();
-}
-
-}  // namespace Inline
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler::IREE::HAL::Inline

@@ -9,34 +9,28 @@
 #
 # Prerequisites:
 #   * Environment must be configured for Emscripten
-#   * Host tools must be built (default at IREE_SOURCE_DIR/build-host/install).
-#     The build_tools/cmake/build_host_tools.sh script can do this for you.
+#   * Host tools must be available at the $1 arg
 #
-# Usage:
-#   build_sample.sh (optional install path) && serve_sample.sh
+# Sample usage:
+#   python -m venv .venv
+#   source .venv/bin/activate
+#   python -m pip install iree-base-compiler iree-base-runtime
+#   build_sample.sh .venv/bin && serve_sample.sh
 #
-# The desired host install directory can be passed as the first argument.
-# Otherwise, it looks for an install directory under path set in the environment
-# variable IREE_HOST_BUILD_DIR (default build-host). The build directory for the
-# emscripten build is taken from the environment variable
-# IREE_EMPSCRIPTEN_BUILD_DIR, defaulting to "build-emscripten". Designed for
-# CI, but can be run manually. It reuses the build directory if it already
-# exists.
-#
-# NOTE: This is different from most of build scripts we use for CI because it is
-# intended to also be runnable by humans with minimal configuration.
+# The build directory for the emscripten build is taken from the environment
+# variable IREE_EMPSCRIPTEN_BUILD_DIR, defaulting to "build-emscripten".
+# Designed for CI, but can be run manually. It reuses the build directory if it
+# already exists.
 
 set -euo pipefail
 
 ROOT_DIR=$(git rev-parse --show-toplevel)
 
-HOST_BUILD_DIR="${IREE_HOST_BUILD_DIR:-${ROOT_DIR}/build-host}"
+HOST_TOOLS_BINARY_DIR="$1"
 BUILD_DIR="${IREE_EMPSCRIPTEN_BUILD_DIR:-build-emscripten}"
-INSTALL_ROOT="$(realpath ${1:-${HOST_BUILD_DIR}/install})"
-SOURCE_DIR=${ROOT_DIR}/experimental/web/sample_dynamic
-BINARY_DIR=${BUILD_DIR}/experimental/web/sample_dynamic
+SOURCE_DIR="${ROOT_DIR}/experimental/web/sample_dynamic"
+BINARY_DIR="${BUILD_DIR}/experimental/web/sample_dynamic"
 IREE_PYTHON3_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE:-$(which python3)}"
-
 
 ###############################################################################
 # Setup and checking for dependencies                                         #
@@ -56,12 +50,10 @@ mkdir -p ${BINARY_DIR}
 # Compile from .mlir input to portable .vmfb file using host tools            #
 ###############################################################################
 
-COMPILE_TOOL="${INSTALL_ROOT}/bin/iree-compile"
-
 compile_sample() {
   echo "  Compiling '$1' sample..."
-  "${COMPILE_TOOL}" "$2" \
-    --iree-input-type=mhlo \
+  "${HOST_TOOLS_BINARY_DIR}/iree-compile" "$2" \
+    --iree-input-type=stablehlo \
     --iree-hal-target-backends=llvm-cpu \
     --iree-llvmcpu-target-triple=wasm32-unknown-emscripten \
     --iree-llvmcpu-target-cpu-features=+atomics,+bulk-memory,+simd128 \
@@ -70,8 +62,8 @@ compile_sample() {
 
 echo "=== Compiling sample MLIR files to VM FlatBuffer outputs (.vmfb) ==="
 compile_sample "simple_abs"     "${ROOT_DIR}/samples/models/simple_abs.mlir"
-compile_sample "fullyconnected" "${ROOT_DIR}/tests/e2e/models/fullyconnected.mlir"
-compile_sample "collatz"        "${ROOT_DIR}/tests/e2e/models/collatz.mlir"
+compile_sample "fullyconnected" "${ROOT_DIR}/tests/e2e/stablehlo_models/fullyconnected.mlir"
+compile_sample "collatz"        "${ROOT_DIR}/tests/e2e/stablehlo_models/collatz.mlir"
 
 ###############################################################################
 # Build the web artifacts using Emscripten                                    #
@@ -87,10 +79,11 @@ emcmake "${CMAKE_BIN}" \
   -DPython3_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE}" \
   -DPYTHON_EXECUTABLE="${IREE_PYTHON3_EXECUTABLE}" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DIREE_HOST_BIN_DIR="${INSTALL_ROOT}/bin" \
+  -DIREE_HOST_BIN_DIR="${HOST_TOOLS_BINARY_DIR}" \
   -DIREE_BUILD_EXPERIMENTAL_WEB_SAMPLES=ON \
   -DIREE_HAL_DRIVER_DEFAULTS=OFF \
   -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
+  -UIREE_EXTERNAL_HAL_DRIVERS \
   -DIREE_BUILD_COMPILER=OFF \
   -DIREE_BUILD_TESTS=OFF \
   .
@@ -102,6 +95,6 @@ echo "=== Copying static files (.html, .js) to the build directory ==="
 
 cp "${SOURCE_DIR}/index.html" "${BINARY_DIR}"
 cp "${SOURCE_DIR}/benchmarks.html" "${BINARY_DIR}"
-cp "${ROOT_DIR}/docs/website/overrides/.icons/iree/ghost.svg" "${BINARY_DIR}"
+cp "${ROOT_DIR}/docs/website/docs/assets/images/IREE_Logo_Icon_Color.svg" "${BINARY_DIR}"
 cp "${SOURCE_DIR}/iree_api.js" "${BINARY_DIR}"
 cp "${SOURCE_DIR}/iree_worker.js" "${BINARY_DIR}"

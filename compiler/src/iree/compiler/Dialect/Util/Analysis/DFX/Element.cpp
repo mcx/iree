@@ -11,13 +11,12 @@
 
 #define DEBUG_TYPE "iree-util-dfx"
 
-namespace mlir {
-namespace iree_compiler {
-namespace DFX {
+namespace mlir::iree_compiler::DFX {
 
 ChangeStatus AbstractElement::update(Solver &solver) {
   ChangeStatus changeStatus = ChangeStatus::UNCHANGED;
-  if (getState().isAtFixpoint()) return changeStatus;
+  if (getState().isAtFixpoint())
+    return changeStatus;
 
   LLVM_DEBUG({
     llvm::dbgs() << "[Solver] updating: ";
@@ -75,6 +74,4 @@ void AbstractElement::dump(AsmState &asmState) const {
   print(llvm::dbgs(), asmState);
 }
 
-}  // namespace DFX
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::DFX

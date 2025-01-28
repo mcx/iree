@@ -88,6 +88,7 @@ class NativeModule {
     // TODO(benvanik): get_function_attr
     interface_.alloc_state = NativeModule::ModuleAllocState;
     interface_.free_state = NativeModule::ModuleFreeState;
+    interface_.fork_state = NativeModule::ModuleForkState;
     interface_.resolve_import = NativeModule::ModuleResolveImport;
     interface_.notify = NativeModule::ModuleNotify;
     interface_.begin_call = NativeModule::ModuleBeginCall;
@@ -95,6 +96,8 @@ class NativeModule {
   }
 
   virtual ~NativeModule() { iree_vm_instance_release(instance_); }
+
+  iree_vm_instance_t* instance() const { return instance_; }
 
   // C API module interface bound to this NativeModule instance.
   iree_vm_module_t* interface() { return &interface_; }
@@ -109,6 +112,12 @@ class NativeModule {
   // Creates a new per-context module State holder.
   virtual StatusOr<std::unique_ptr<State>> CreateState(
       iree_allocator_t allocator) = 0;
+
+  // Forks a parent state into a new per-context module State holder.
+  // Anything that should be shared between the states should be retained by
+  // reference.
+  virtual StatusOr<std::unique_ptr<State>> ForkState(
+      State* parent_state, iree_allocator_t allocator) = 0;
 
   // Notifies the module a signal has been raised.
   virtual Status Notify(State* state, iree_vm_signal_t signal) {
@@ -170,8 +179,9 @@ class NativeModule {
     auto* module = FromModulePointer(self);
     if (IREE_UNLIKELY(ordinal > module->dispatch_table_.size())) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "function out of bounds: 0 < %zu < %zu", ordinal,
-                              module->dispatch_table_.size());
+                              "function out of bounds: 0 < %" PRIhsz
+                              " < %" PRIhsz,
+                              ordinal, module->dispatch_table_.size());
     }
     const auto& dispatch_function = module->dispatch_table_[ordinal];
     if (out_function) {
@@ -188,10 +198,10 @@ class NativeModule {
     return iree_ok_status();
   }
 
-  static iree_status_t ModuleLookupFunction(void* self,
-                                            iree_vm_function_linkage_t linkage,
-                                            iree_string_view_t name,
-                                            iree_vm_function_t* out_function) {
+  static iree_status_t ModuleLookupFunction(
+      void* self, iree_vm_function_linkage_t linkage, iree_string_view_t name,
+      const iree_vm_function_signature_t* expected_signature,
+      iree_vm_function_t* out_function) {
     IREE_ASSERT_ARGUMENT(out_function);
     std::memset(out_function, 0, sizeof(*out_function));
     if (IREE_UNLIKELY(!name.data || !name.size)) {
@@ -208,6 +218,7 @@ class NativeModule {
         return iree_ok_status();
       }
     }
+
     return iree_make_status(IREE_STATUS_NOT_FOUND, "function %.*s not exported",
                             (int)name.size, name.data);
   }
@@ -231,6 +242,27 @@ class NativeModule {
     if (module_state) delete FromStatePointer(module_state);
   }
 
+  static iree_status_t ModuleForkState(
+      void* self, iree_vm_module_state_t* parent_state,
+      iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+    IREE_ASSERT_ARGUMENT(out_child_state);
+    *out_child_state = nullptr;
+
+    // Ignore cases where there is no state required.
+    if (!parent_state) {
+      return iree_ok_status();
+    }
+
+    auto* module = FromModulePointer(self);
+    IREE_ASSIGN_OR_RETURN(
+        auto child_state,
+        module->ForkState(reinterpret_cast<State*>(parent_state), allocator));
+
+    *out_child_state =
+        reinterpret_cast<iree_vm_module_state_t*>(child_state.release());
+    return iree_ok_status();
+  }
+
   static iree_status_t ModuleResolveImport(
       void* self, iree_vm_module_state_t* module_state,
       iree_host_size_t ordinal, const iree_vm_function_t* function,
@@ -251,10 +283,10 @@ class NativeModule {
     auto* module = FromModulePointer(self);
     if (IREE_UNLIKELY(call.function.ordinal >=
                       module->dispatch_table_.size())) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "function ordinal out of bounds: 0 < %u < %zu",
-                              call.function.ordinal,
-                              module->dispatch_table_.size());
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "function ordinal out of bounds: 0 < %u < %" PRIhsz,
+          call.function.ordinal, module->dispatch_table_.size());
     }
     const auto& info = module->dispatch_table_[call.function.ordinal];
 

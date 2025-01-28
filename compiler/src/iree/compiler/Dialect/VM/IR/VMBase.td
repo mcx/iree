@@ -115,7 +115,7 @@ class VM_EncType<string expr> : VM_EncEncodeExpr<
 class VM_EncTypeOf<string name> : VM_EncEncodeExpr<
     "e.encodeType({0}())", [name]>;
 class VM_EncPrimitiveAttr<string name, int thisBitwidth> : VM_EncEncodeExpr<
-    "e.encodePrimitiveAttr(getOperation()->getAttrOfType<Attribute>(\"" # name # "\"))"> {
+    "e.encodePrimitiveAttr(getOperation()->getAttrOfType<TypedAttr>(\"" # name # "\"))"> {
   int bitwidth = thisBitwidth;
 }
 class VM_EncPrimitiveArrayAttr<string name, int thisBitwidth> : VM_EncEncodeExpr<
@@ -126,6 +126,8 @@ class VM_EncStrAttr<string name> : VM_EncEncodeExpr<
     "e.encodeStrAttr(getOperation()->getAttrOfType<StringAttr>(\"" # name # "\"))">;
 class VM_EncBranch<string blockName, string operandsName, int successorIndex> : VM_EncEncodeExpr<
     "e.encodeBranch({0}(), " # operandsName # "(), " # successorIndex # ")", [blockName]>;
+class VM_EncBranchTable<string caseBlockNames, string caseOperandsName, int baseSuccessorIndex> : VM_EncEncodeExpr<
+    "e.encodeBranchTable(" # caseBlockNames # "(), " # caseOperandsName # "(), " # baseSuccessorIndex # ")">;
 class VM_EncOperand<string name, int ordinal> : VM_EncEncodeExpr<
     "e.encodeOperand({0}(), " # ordinal # ")", [name]>;
 class VM_EncVariadicOperands<string name> : VM_EncEncodeExpr<
@@ -209,6 +211,13 @@ class VM_Op<string mnemonic, list<Trait> traits = []> :
 // prior to serialization. There are no runtime equivalents of the op.
 def VM_PseudoOp : NativeOpTrait<"IREE::VM::PseudoOp">;
 
+// Operations with this trait are assignment ops that are not serialized into
+// bytecode but do survive to keep valid MLIR typing up until serialization.
+// Ops must take and return the same number of operands/results but their types
+// may differ. During serialization all operand registers will be directly
+// reused for all result registers.
+def VM_AssignmentOp : NativeOpTrait<"IREE::VM::AssignmentOp">;
+
 // Operations with this trait will be stripped in builds where
 // debugging-related operations are not needed (such as release builds).
 def VM_DebugOnly : NativeOpTrait<"IREE::VM::DebugOnly">;
@@ -237,7 +246,7 @@ def VM_AnyRefObject : DialectType<
 
 def VM_AnyRef : DialectType<
     Util_Dialect,
-    CPred<"$_self.isa<IREE::VM::RefType>()">,
+    CPred<"isa<IREE::VM::RefType>($_self)">,
     "ref"> {
   let description = [{
     An iree_vm_ref_t/iree::vm::ref<T> of some type.
@@ -246,8 +255,8 @@ def VM_AnyRef : DialectType<
 
 class VM_RefOf<Type type> :
     Type<And<[
-      CPred<"$_self.isa<IREE::VM::RefType>()">,
-      SubstLeaves<"$_self", "$_self.cast<IREE::VM::RefType>().getObjectType()",
+      CPred<"isa<IREE::VM::RefType>($_self)">,
+      SubstLeaves<"$_self", "cast<IREE::VM::RefType>($_self).getObjectType()",
                   type.predicate>
     ]>, "ref<" # type.summary # ">"> {
   // Set the builder call if the base type has a builder call.
@@ -261,7 +270,7 @@ class VM_RefOf<Type type> :
 
 def VM_BufferType : DialectType<
     Util_Dialect,
-    CPred<"$_self.isa<IREE::VM::BufferType>()">,
+    CPred<"isa<IREE::VM::BufferType>($_self)">,
     "buffer"> {
   let description = [{
     A byte buffer.
@@ -276,8 +285,8 @@ def VM_BufferType : DialectType<
 def VM_AnyList : DialectType<
     Util_Dialect,
     And<[
-      CPred<"$_self.isa<IREE::VM::RefType>()">,
-      CPred<"$_self.cast<IREE::VM::RefType>().getObjectType().isa<IREE::VM::ListType>()">,
+      CPred<"isa<IREE::VM::RefType>($_self)">,
+      CPred<"isa<IREE::VM::ListType>(cast<IREE::VM::RefType>($_self).getObjectType())">,
     ]>,
     "list"> {
   let description = [{
@@ -287,11 +296,11 @@ def VM_AnyList : DialectType<
 
 class VM_ListOf<Type type> :
     Type<And<[
-      CPred<"$_self.cast<IREE::VM::RefType>().getObjectType().isa<IREE::VM::ListType>()">,
+      CPred<"isa<IREE::VM::ListType>(cast<IREE::VM::RefType>($_self).getObjectType())">,
       Or<[
-        CPred<"$_self.cast<IREE::VM::RefType>().getObjectType().cast<IREE::VM::ListType>().getElementType().isa<IREE::VM::OpaqueType>()">,
+        CPred<"isa<IREE::VM::OpaqueType>(cast<IREE::VM::ListType>(cast<IREE::VM::RefType>($_self).getObjectType()).getElementType())">,
         SubstLeaves<"$_self",
-                    "$_self.cast<IREE::VM::RefType>().getObjectType().cast<IREE::VM::ListType>().getElementType()",
+                    "cast<IREE::VM::ListType>(cast<IREE::VM::RefType>($_self).getObjectType()).getElementType()",
                     type.predicate>
       ]>,
     ]>, "list<" # type.summary # ">"> {
@@ -335,6 +344,8 @@ def VM_AnyType : AnyTypeOf<[
   VM_CondValue,
   VM_AnyRef,
 ]>;
+
+def VM_AnyIntegerType : AnyIntOfWidths<[32, 64]>;
 
 def VM_PrimitiveType : AnyTypeOf<[
   AnyIntOfWidths<[8, 16, 32, 64]>,

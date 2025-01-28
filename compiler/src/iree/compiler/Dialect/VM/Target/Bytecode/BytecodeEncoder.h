@@ -12,10 +12,7 @@
 #include "iree/compiler/Dialect/VM/Target/Bytecode/DebugDatabaseBuilder.h"
 #include "mlir/IR/SymbolTable.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 struct EncodedBytecodeFunction {
   // Encoded bytecode data for the function body including padding.
@@ -35,7 +32,7 @@ struct EncodedBytecodeFunction {
 
 // Abstract encoder used for function bytecode encoding.
 class BytecodeEncoder : public VMFuncEncoder {
- public:
+public:
   // Matches IREE_VM_BYTECODE_VERSION_MAJOR.
   static constexpr uint32_t kVersionMajor = 15;
   // Matches IREE_VM_BYTECODE_VERSION_MINOR.
@@ -44,17 +41,14 @@ class BytecodeEncoder : public VMFuncEncoder {
 
   // Encodes a vm.func to bytecode and returns the result.
   // Returns None on failure.
-  static Optional<EncodedBytecodeFunction> encodeFunction(
-      IREE::VM::FuncOp funcOp, llvm::DenseMap<Type, int> &typeTable,
-      SymbolTable &symbolTable, DebugDatabaseBuilder &debugDatabase);
+  static std::optional<EncodedBytecodeFunction>
+  encodeFunction(IREE::VM::FuncOp funcOp, llvm::DenseMap<Type, int> &typeTable,
+                 SymbolTable &symbolTable, DebugDatabaseBuilder &debugDatabase);
 
   BytecodeEncoder() = default;
   ~BytecodeEncoder() = default;
 };
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
-#endif  // IREE_COMPILER_DIALECT_VM_TARGET_BYTECODE_BYTECODEENCODER_H_
+#endif // IREE_COMPILER_DIALECT_VM_TARGET_BYTECODE_BYTECODEENCODER_H_

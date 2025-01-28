@@ -6,8 +6,6 @@
 
 #include "iree/hal/utils/debug_allocator.h"
 
-#include "iree/base/tracing.h"
-
 //===----------------------------------------------------------------------===//
 // iree_hal_debug_allocator_t
 //===----------------------------------------------------------------------===//
@@ -129,7 +127,7 @@ static iree_status_t iree_hal_debug_allocator_fill_on_host(
     iree_hal_buffer_t* buffer, uint8_t fill_pattern) {
   IREE_TRACE_ZONE_BEGIN(z0);
   iree_status_t status = iree_hal_buffer_map_fill(
-      buffer, 0, IREE_WHOLE_BUFFER, &fill_pattern, sizeof(fill_pattern));
+      buffer, 0, IREE_HAL_WHOLE_BUFFER, &fill_pattern, sizeof(fill_pattern));
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -160,7 +158,8 @@ static iree_status_t iree_hal_debug_allocator_fill_on_device(
               IREE_HAL_QUEUE_AFFINITY_ANY, 1, &command, &command_buffer));
 
   iree_hal_semaphore_t* semaphore = NULL;
-  iree_status_t status = iree_hal_semaphore_create(device, 0ull, &semaphore);
+  iree_status_t status = iree_hal_semaphore_create(
+      device, 0ull, IREE_HAL_SEMAPHORE_FLAG_NONE, &semaphore);
 
   uint64_t signal_value = 1ull;
   if (iree_status_is_ok(status)) {
@@ -169,9 +168,9 @@ static iree_status_t iree_hal_debug_allocator_fill_on_device(
         .semaphores = &semaphore,
         .payload_values = &signal_value,
     };
-    status = iree_hal_device_queue_execute(device, IREE_HAL_QUEUE_AFFINITY_ANY,
-                                           iree_hal_semaphore_list_empty(),
-                                           signal_list, 1, &command_buffer);
+    status = iree_hal_device_queue_execute(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        signal_list, command_buffer, iree_hal_buffer_binding_table_empty());
   }
 
   if (iree_status_is_ok(status)) {
@@ -189,7 +188,7 @@ static iree_status_t iree_hal_debug_allocator_fill_on_device(
 static iree_status_t iree_hal_debug_allocator_allocate_buffer(
     iree_hal_allocator_t* IREE_RESTRICT base_allocator,
     const iree_hal_buffer_params_t* IREE_RESTRICT params,
-    iree_device_size_t allocation_size, iree_const_byte_span_t initial_data,
+    iree_device_size_t allocation_size,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   iree_hal_debug_allocator_t* allocator =
       iree_hal_debug_allocator_cast(base_allocator);
@@ -198,17 +197,9 @@ static iree_status_t iree_hal_debug_allocator_allocate_buffer(
   // undefined contents (including those from prior allocations which may appear
   // correct).
   IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
-      allocator->device_allocator, *params, allocation_size, initial_data,
-      out_buffer));
+      allocator->device_allocator, *params, allocation_size, out_buffer));
 
-  // If the buffer is read-only we can't fill it even if we wanted to. This
-  // usually happens with initial data.
   iree_hal_buffer_t* base_buffer = *out_buffer;
-  if (initial_data.data_length > 0 ||
-      !iree_all_bits_set(iree_hal_buffer_allowed_access(base_buffer),
-                         IREE_HAL_MEMORY_ACCESS_WRITE)) {
-    return iree_ok_status();
-  }
 
   // We could rotate this here if we wanted to have it vary over time (per
   // allocation, per trim, etc).

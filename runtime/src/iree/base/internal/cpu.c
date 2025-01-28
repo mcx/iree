@@ -9,8 +9,7 @@
 
 #include "iree/base/internal/cpu.h"
 
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
+#include "iree/schemas/cpu_data.h"
 
 //===----------------------------------------------------------------------===//
 // Platform-specific processor data queries
@@ -33,17 +32,70 @@
 // NOTE: not all kernel versions have all of the cap bits we need defined so as
 // a practice we always define the feature bits we need locally.
 // https://docs.kernel.org/arm64/elf_hwcaps.html
-#define IREE_HWCAP_ASIMDDP (1u << 20)
-#define IREE_HWCAP2_I8MM (1u << 13)
+#define IREE_HWCAP_FP (1 << 0)
+#define IREE_HWCAP_ATOMICS (1 << 8)
+#define IREE_HWCAP_ASIMDHP (1 << 10)
+#define IREE_HWCAP_ASIMDDP (1 << 20)
+#define IREE_HWCAP_SVE (1 << 22)
+#define IREE_HWCAP_ASIMDFHM (1 << 23)
+#define IREE_HWCAP2_SVE2 (1 << 1)
+#define IREE_HWCAP2_SVEBITPERM (1 << 4)
+#define IREE_HWCAP2_SVEF32MM (1 << 10)
+#define IREE_HWCAP2_SVEF64MM (1 << 11)
+#define IREE_HWCAP2_I8MM (1 << 13)
+#define IREE_HWCAP2_BF16 (1 << 14)
+#define IREE_HWCAP2_SME (1 << 23)
+#define IREE_HWCAP2_SME_I16I64 (1 << 24)
+#define IREE_HWCAP2_SME_F64F64 (1 << 25)
+#define IREE_HWCAP2_SVE2P1 (1UL << 36)
+#define IREE_HWCAP2_SME2 (1UL << 37)
+#define IREE_HWCAP2_SME2P1 (1UL << 38)
+#define IREE_HWCAP2_SME_F16F16 (1UL << 42)
 
 static void iree_cpu_initialize_from_platform_arm_64(uint64_t* out_fields) {
-  uint32_t hwcap = getauxval(AT_HWCAP);
-  uint32_t hwcap2 = getauxval(AT_HWCAP2);
-  uint64_t out0 = 0;
-  IREE_COPY_BITS(out0, IREE_CPU_DATA0_ARM_64_DOTPROD, hwcap,
+  unsigned long hwcap = getauxval(AT_HWCAP);
+  unsigned long hwcap2 = getauxval(AT_HWCAP2);
+
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_FP_ARMV8, hwcap,
+                 IREE_HWCAP_FP);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_LSE, hwcap,
+                 IREE_HWCAP_ATOMICS);
+  // LSE2/lse128 does not seem to be exposed in hwcaps.
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_FULLFP16, hwcap,
+                 IREE_HWCAP_ASIMDHP);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_FP16FML, hwcap,
+                 IREE_HWCAP_ASIMDFHM);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_DOTPROD, hwcap,
                  IREE_HWCAP_ASIMDDP);
-  IREE_COPY_BITS(out0, IREE_CPU_DATA0_ARM_64_I8MM, hwcap2, IREE_HWCAP2_I8MM);
-  out_fields[0] = out0;
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_I8MM, hwcap2,
+                 IREE_HWCAP2_I8MM);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_BF16, hwcap2,
+                 IREE_HWCAP2_BF16);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SVE, hwcap,
+                 IREE_HWCAP_SVE);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SVE2, hwcap2,
+                 IREE_HWCAP2_SVE2);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SVE2P1, hwcap2,
+                 IREE_HWCAP2_SVE2P1);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SVE2_BITPERM, hwcap2,
+                 IREE_HWCAP2_SVEBITPERM);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_F32MM, hwcap2,
+                 IREE_HWCAP2_SVEF32MM);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_F64MM, hwcap2,
+                 IREE_HWCAP2_SVEF64MM);
+
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME, hwcap2,
+                 IREE_HWCAP2_SME);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME2, hwcap2,
+                 IREE_HWCAP2_SME2);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME2P1, hwcap2,
+                 IREE_HWCAP2_SME2P1);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME_F16F16, hwcap2,
+                 IREE_HWCAP2_SME_F16F16);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME_F64F64, hwcap2,
+                 IREE_HWCAP2_SME_F64F64);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_ARM_64_SME_I16I64, hwcap2,
+                 IREE_HWCAP2_SME_I16I64);
 }
 
 #elif defined(IREE_PLATFORM_MACOS) || defined(IREE_PLATFORM_IOS)
@@ -51,20 +103,62 @@ static void iree_cpu_initialize_from_platform_arm_64(uint64_t* out_fields) {
 #include <sys/sysctl.h>
 #include <sys/types.h>
 
-#define IREE_QUERY_SYSCTL(key, field_value, field_bit)            \
-  do {                                                            \
-    int64_t result = 0;                                           \
-    size_t result_size = sizeof result;                           \
-    if (0 == sysctlbyname(key, &result, &result_size, NULL, 0)) { \
-      if (result) field_value |= field_bit;                       \
-    }                                                             \
-  } while (0)
-
 static void iree_cpu_initialize_from_platform_arm_64(uint64_t* out_fields) {
-  IREE_QUERY_SYSCTL("hw.optional.arm.FEAT_DotProd", out_fields[0],
-                    IREE_CPU_DATA0_ARM_64_DOTPROD);
-  IREE_QUERY_SYSCTL("hw.optional.arm.FEAT_I8MM", out_fields[0],
-                    IREE_CPU_DATA0_ARM_64_I8MM);
+  typedef struct {
+    const char* sysctl_key;
+    int out_field_index;
+    uint64_t out_field_bits;
+  } feature_t;
+  const feature_t features[] = {
+      {
+          .sysctl_key = "hw.optional.floatingpoint",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_FP_ARMV8,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_LSE",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_LSE,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_LSE2",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_LSE128,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_FP16",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_FULLFP16,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_FHM",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_FP16FML,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_DotProd",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_DOTPROD,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_I8MM",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_I8MM,
+      },
+      {
+          .sysctl_key = "hw.optional.arm.FEAT_BF16",
+          .out_field_index = 0,
+          .out_field_bits = IREE_CPU_DATA0_ARM_64_BF16,
+      },
+  };
+  for (int i = 0; i < IREE_ARRAYSIZE(features); ++i) {
+    const feature_t* f = &features[i];
+    int64_t result = 0;
+    size_t result_size = sizeof result;
+    if (0 == sysctlbyname(f->sysctl_key, &result, &result_size, NULL, 0)) {
+      if (result) out_fields[f->out_field_index] |= f->out_field_bits;
+    }
+  }
 }
 
 #else
@@ -90,29 +184,38 @@ typedef struct iree_cpuid_regs_t {
   uint32_t edx;
 } iree_cpuid_regs_t;
 
-static inline iree_cpuid_regs_t iree_cpuid_raw(uint32_t eax, uint32_t ecx) {
-  iree_cpuid_regs_t regs;
 #if defined(__GNUC__)
+static iree_cpuid_regs_t iree_cpuid_raw(uint32_t eax, uint32_t ecx) {
+  iree_cpuid_regs_t regs;
   __cpuid_count(eax, ecx, regs.eax, regs.ebx, regs.ecx, regs.edx);
-#elif defined(_MSC_VER)
-  int regs_array[4];
-  __cpuidex(regs_array, (int)eax, (int)ecx);
-  regs.eax = regs_array[0];
-  regs.ebx = regs_array[1];
-  regs.ecx = regs_array[2];
-  regs.edx = regs_array[3];
-#else
-#error What's the __cpuidex built-in for this compiler?
-#endif
   return regs;
 }
+#elif defined(_MSC_VER)
+// The noinline is a tentative work-around for what might be a MSVC miscompile.
+// The symptom is that MSVC builds incorrectly report some CPU features as
+// supported. This only happens for CPU feature bits in the EDX output register.
+__declspec(noinline) static iree_cpuid_regs_t iree_cpuid_raw(uint32_t eax,
+                                                             uint32_t ecx) {
+  int eax_int;
+  int ecx_int;
+  memcpy(&eax_int, &eax, sizeof eax);
+  memcpy(&ecx_int, &ecx, sizeof ecx);
+  int regs_array[4];
+  __cpuidex(regs_array, eax_int, ecx_int);
+  iree_cpuid_regs_t regs;
+  memcpy(&regs, regs_array, sizeof regs);
+  return regs;
+}
+#else
+#error What is the __cpuidex built-in for this compiler?
+#endif
 
 typedef struct iree_cpuid_bounds_t {
   uint32_t max_base_eax;
   uint32_t max_extended_eax;
 } iree_cpuid_bounds_t;
 
-static inline iree_cpuid_bounds_t iree_cpuid_query_bounds() {
+static iree_cpuid_bounds_t iree_cpuid_query_bounds() {
   iree_cpuid_bounds_t bounds;
   bounds.max_base_eax = iree_cpuid_raw(0, 0).eax;
   bounds.max_extended_eax = iree_cpuid_raw(0x80000000u, 0).eax;
@@ -120,8 +223,8 @@ static inline iree_cpuid_bounds_t iree_cpuid_query_bounds() {
   return bounds;
 }
 
-static inline bool iree_cpuid_is_in_range(uint32_t eax, uint32_t ecx,
-                                          iree_cpuid_bounds_t bounds) {
+static bool iree_cpuid_is_in_range(uint32_t eax, uint32_t ecx,
+                                   iree_cpuid_bounds_t bounds) {
   if (eax < 0x80000000u) {
     // EAX is a base function id.
     if (eax > bounds.max_base_eax) return false;
@@ -137,8 +240,8 @@ static inline bool iree_cpuid_is_in_range(uint32_t eax, uint32_t ecx,
   return true;
 }
 
-static inline iree_cpuid_regs_t iree_cpuid_or_zero(uint32_t eax, uint32_t ecx,
-                                                   iree_cpuid_bounds_t bounds) {
+static iree_cpuid_regs_t iree_cpuid_or_zero(uint32_t eax, uint32_t ecx,
+                                            iree_cpuid_bounds_t bounds) {
   if (!iree_cpuid_is_in_range(eax, ecx, bounds)) {
     return (iree_cpuid_regs_t){0, 0, 0, 0};
   }
@@ -167,7 +270,7 @@ static void iree_cpu_initialize_from_platform_x86_64(uint64_t* out_fields) {
   // Features that depend on YMM registers being enabled by the OS.
   if (iree_all_bits_set(leafD.eax, 0x7)) {
     IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_AVX, leaf1.ecx, 1 << 28);
-    IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_FMA3, leaf1.ecx, 1 << 12);
+    IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_FMA, leaf1.ecx, 1 << 12);
     IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_FMA4, leafExt1.ecx, 1 << 16);
     IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_XOP, leafExt1.ecx, 1 << 11);
     IREE_COPY_BITS(out0, IREE_CPU_DATA0_X86_64_F16C, leaf1.ecx, 1 << 29);
@@ -207,6 +310,29 @@ static void iree_cpu_initialize_from_platform_x86_64(uint64_t* out_fields) {
   out_fields[0] = out0;
 }
 
+#elif defined(IREE_ARCH_RISCV_64)
+#if defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX)
+
+// For now as we only need ISA feature bits and no CPU identification beyond
+// that, and as we are OK with requiring a sufficiently recent linux kernel to
+// expose the features that we need, we can just rely on the basic HWCAP way.
+#include <sys/auxv.h>
+
+#define IREE_HWCAP_ISA_V (1 << ('V' - 'A'))
+
+static void iree_cpu_initialize_from_platform_riscv_64(uint64_t* out_fields) {
+  unsigned long hwcap = getauxval(AT_HWCAP);
+  IREE_COPY_BITS(out_fields[0], IREE_CPU_DATA0_RISCV_64_RVV, hwcap,
+                 IREE_HWCAP_ISA_V);
+}
+
+#else
+
+static void iree_cpu_initialize_from_platform_riscv_64(uint64_t* out_fields) {
+  // No implementation available. CPU data will be all zeros.
+}
+
+#endif  // IREE_PLATFORM_*
 #endif  // defined(IREE_ARCH_ARM_64)
 
 static void iree_cpu_initialize_from_platform(iree_allocator_t temp_allocator,
@@ -215,6 +341,8 @@ static void iree_cpu_initialize_from_platform(iree_allocator_t temp_allocator,
   iree_cpu_initialize_from_platform_arm_64(out_fields);
 #elif defined(IREE_ARCH_X86_64)
   iree_cpu_initialize_from_platform_x86_64(out_fields);
+#elif defined(IREE_ARCH_RISCV_64)
+  iree_cpu_initialize_from_platform_riscv_64(out_fields);
 #else
   // No implementation available. CPU data will be all zeros.
 #endif  // defined(IREE_ARCH_ARM_64)
@@ -262,24 +390,19 @@ void iree_cpu_read_data(iree_host_size_t field_count, uint64_t* out_fields) {
 
 iree_status_t iree_cpu_lookup_data_by_key(iree_string_view_t key,
                                           int64_t* IREE_RESTRICT out_value) {
-#define IREE_CPU_FEATURE_BIT(arch, field_index, bit_pos, bit_name, llvm_name)  \
-  if (IREE_ARCH_ENUM == IREE_ARCH_ENUM_##arch) {                               \
-    if (iree_string_view_equal(key, IREE_SV(llvm_name))) {                     \
-      *out_value = iree_all_bits_set(                                          \
-                       (iree_cpu_data_cache_[field_index]),                    \
-                       IREE_CPU_FEATURE_BIT_NAME(arch, field_index, bit_name)) \
-                       ? 1                                                     \
-                       : 0;                                                    \
-      return iree_ok_status();                                                 \
-    }                                                                          \
+#define IREE_CPU_FEATURE_BIT(arch, field_index, bit_pos, bit_name, llvm_name) \
+  if (IREE_ARCH_ENUM == IREE_ARCH_ENUM_##arch) {                              \
+    if (iree_string_view_equal(key, IREE_SV(llvm_name))) {                    \
+      *out_value = (iree_cpu_data_cache_[field_index] >> bit_pos) & 1;        \
+      return iree_ok_status();                                                \
+    }                                                                         \
   }
 #include "iree/schemas/cpu_feature_bits.inl"
 #undef IREE_CPU_FEATURE_BIT
 
-  return iree_make_status(
-      IREE_STATUS_NOT_FOUND,
-      "CPU feature '%.*s' unknown on this architecture (%s)", (int)key.size,
-      key.data, IREE_ARCH);
+  return iree_make_status(IREE_STATUS_NOT_FOUND,
+                          "CPU feature '%.*s' unknown on %s", (int)key.size,
+                          key.data, IREE_ARCH);
 }
 
 //===----------------------------------------------------------------------===//

@@ -13,10 +13,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Location.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 struct BytecodeLocation {
   int32_t bytecodeOffset;
@@ -29,7 +26,7 @@ struct FunctionSourceMap {
 };
 
 class DebugDatabaseBuilder {
- public:
+public:
   // Appends a function source map entry to the debug database.
   void addFunctionSourceMap(IREE::VM::FuncOp funcOp,
                             FunctionSourceMap sourceMap);
@@ -37,14 +34,11 @@ class DebugDatabaseBuilder {
   // Finishes construction of the debug database and emits it to the FlatBuffer.
   iree_vm_DebugDatabaseDef_ref_t build(FlatbufferBuilder &fbb);
 
- private:
+private:
   // Function source maps ordered by function ordinal.
   SmallVector<FunctionSourceMap> functionSourceMaps;
 };
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
-#endif  // IREE_COMPILER_DIALECT_VM_TARGET_BYTECODE_DEBUGDATABASEBUILDER_H_
+#endif // IREE_COMPILER_DIALECT_VM_TARGET_BYTECODE_DEBUGDATABASEBUILDER_H_

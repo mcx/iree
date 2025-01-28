@@ -7,21 +7,21 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTraits.h"
-#include "iree/compiler/Dialect/Util/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
+
+#define GEN_PASS_DEF_STRIPDEBUGOPSPASS
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h.inc"
 
 namespace {
 
-class StripDebugOpsPass : public StripDebugOpsBase<StripDebugOpsPass> {
- public:
+class StripDebugOpsPass
+    : public impl::StripDebugOpsPassBase<StripDebugOpsPass> {
+public:
   void runOnOperation() override {
     getOperation()->walk([](Operation *op) {
       if (isa<mlir::cf::AssertOp>(op) ||
@@ -32,13 +32,6 @@ class StripDebugOpsPass : public StripDebugOpsBase<StripDebugOpsPass> {
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<void>> createStripDebugOpsPass() {
-  return std::make_unique<StripDebugOpsPass>();
-}
-
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

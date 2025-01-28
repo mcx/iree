@@ -9,10 +9,16 @@
 
 include "mlir/Pass/PassBase.td"
 
-def JitGlobals :
+def JitGlobalsPass :
   Pass<"iree-consteval-jit-globals", "ModuleOp"> {
   let summary = "Jits global initializers and evaluates them into concrete values";
-  let constructor = "mlir::iree_compiler::ConstEval::createJitGlobalsPass()";
+  let options = [
+    Option<
+      "targetRegistry", "target-registry",
+      "llvm::cl::TargetRegistryRef", "",
+      "Target backend registry containing the list of available backends."
+    >,
+  ];
 }
 
 #endif // IREE_COMPILER_JITEVAL_PASSES

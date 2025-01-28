@@ -8,11 +8,9 @@
 #define IREE_COMPILER_DIALECT_UTIL_IR_UTILTRAITS_H_
 
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/IR/SymbolTable.h"
 
-namespace mlir {
-namespace OpTrait {
-namespace IREE {
-namespace Util {
+namespace mlir::OpTrait::IREE::Util {
 
 template <typename ConcreteType>
 struct YieldPoint : public OpTrait::TraitBase<ConcreteType, YieldPoint> {
@@ -37,9 +35,24 @@ struct DebugOnly : public OpTrait::TraitBase<ConcreteType, DebugOnly> {
   static LogicalResult verifyTrait(Operation *op) { return success(); }
 };
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace OpTrait
-}  // namespace mlir
+template <typename ConcreteType>
+struct ImplicitlyCaptured
+    : public OpTrait::TraitBase<ConcreteType, ImplicitlyCaptured> {
+  static LogicalResult verifyTrait(Operation *op) { return success(); }
+};
 
-#endif  // IREE_COMPILER_DIALECT_UTIL_IR_UTILTRAITS_H_
+template <typename ConcreteType>
+struct ObjectLike : public OpTrait::TraitBase<ConcreteType, ObjectLike> {
+  static LogicalResult verifyTrait(Operation *op) {
+    if (!op->hasTrait<OpTrait::SymbolTable>() ||
+        !op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+      return op->emitOpError() << "is not a valid object-like op; must have a "
+                                  "symbol table and be isolated from above";
+    }
+    return success();
+  }
+};
+
+} // namespace mlir::OpTrait::IREE::Util
+
+#endif // IREE_COMPILER_DIALECT_UTIL_IR_UTILTRAITS_H_

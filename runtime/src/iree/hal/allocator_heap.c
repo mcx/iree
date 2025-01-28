@@ -7,7 +7,6 @@
 #include <stddef.h>
 
 #include "iree/base/api.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/allocator.h"
 #include "iree/hal/buffer.h"
 #include "iree/hal/buffer_heap_impl.h"
@@ -32,8 +31,8 @@ IREE_API_EXPORT iree_status_t iree_hal_allocator_create_heap(
     iree_string_view_t identifier, iree_allocator_t data_allocator,
     iree_allocator_t host_allocator, iree_hal_allocator_t** out_allocator) {
   IREE_ASSERT_ARGUMENT(out_allocator);
-  IREE_TRACE_ZONE_BEGIN(z0);
   *out_allocator = NULL;
+  IREE_TRACE_ZONE_BEGIN(z0);
 
   iree_hal_heap_allocator_t* allocator = NULL;
   iree_host_size_t total_size =
@@ -168,8 +167,10 @@ iree_hal_heap_allocator_query_buffer_compatibility(
   // Host currently uses mapping to copy buffers, which is done a lot.
   // We could probably remove this mutation by preventing copies in those cases.
   // TODO(benvanik): check if transfer is still required for DMA copy source.
-  params->usage |=
-      IREE_HAL_BUFFER_USAGE_MAPPING | IREE_HAL_BUFFER_USAGE_TRANSFER;
+  params->usage |= IREE_HAL_BUFFER_USAGE_MAPPING_SCOPED |
+                   IREE_HAL_BUFFER_USAGE_MAPPING_PERSISTENT |
+                   IREE_HAL_BUFFER_USAGE_MAPPING_ACCESS_RANDOM |
+                   IREE_HAL_BUFFER_USAGE_TRANSFER;
 
   return compatibility;
 }
@@ -177,7 +178,7 @@ iree_hal_heap_allocator_query_buffer_compatibility(
 static iree_status_t iree_hal_heap_allocator_allocate_buffer(
     iree_hal_allocator_t* IREE_RESTRICT base_allocator,
     const iree_hal_buffer_params_t* IREE_RESTRICT params,
-    iree_device_size_t allocation_size, iree_const_byte_span_t initial_data,
+    iree_device_size_t allocation_size,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   iree_hal_heap_allocator_t* allocator =
       iree_hal_heap_allocator_cast(base_allocator);
@@ -197,8 +198,8 @@ static iree_status_t iree_hal_heap_allocator_allocate_buffer(
   IREE_STATISTICS(statistics = &allocator->statistics);
   iree_hal_buffer_t* buffer = NULL;
   IREE_RETURN_IF_ERROR(iree_hal_heap_buffer_create(
-      base_allocator, statistics, &compat_params, allocation_size, initial_data,
-      allocator->data_allocator, allocator->host_allocator, &buffer));
+      statistics, &compat_params, allocation_size, allocator->data_allocator,
+      allocator->host_allocator, &buffer));
 
   *out_buffer = buffer;
   return iree_ok_status();
@@ -218,10 +219,8 @@ static iree_status_t iree_hal_heap_allocator_import_buffer(
     iree_hal_external_buffer_t* IREE_RESTRICT external_buffer,
     iree_hal_buffer_release_callback_t release_callback,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
-  if (external_buffer->type != IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION) {
-    return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                            "external buffer type not supported");
-  }
+  iree_hal_heap_allocator_t* allocator =
+      iree_hal_heap_allocator_cast(base_allocator);
 
   // Coerce options into those required for use by heap-based devices.
   iree_hal_buffer_params_t compat_params = *params;
@@ -234,12 +233,30 @@ static iree_status_t iree_hal_heap_allocator_import_buffer(
         "allocator cannot import a buffer with the given parameters");
   }
 
+  void* ptr = NULL;
+  switch (external_buffer->type) {
+    case IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION:
+      ptr = external_buffer->handle.host_allocation.ptr;
+      break;
+    case IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION:
+      ptr = (void*)((intptr_t)external_buffer->handle.device_allocation.ptr);
+      break;
+    default:
+      return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                              "external buffer type not supported");
+  }
+
+  const iree_hal_buffer_placement_t placement = {
+      .device = NULL,
+      .queue_affinity = compat_params.queue_affinity
+                            ? compat_params.queue_affinity
+                            : IREE_HAL_QUEUE_AFFINITY_ANY,
+      .flags = IREE_HAL_BUFFER_PLACEMENT_FLAG_NONE,
+  };
   return iree_hal_heap_buffer_wrap(
-      base_allocator, compat_params.type, compat_params.access,
-      compat_params.usage, external_buffer->size,
-      iree_make_byte_span(external_buffer->handle.host_allocation.ptr,
-                          external_buffer->size),
-      release_callback, out_buffer);
+      placement, compat_params.type, compat_params.access, compat_params.usage,
+      external_buffer->size, iree_make_byte_span(ptr, external_buffer->size),
+      release_callback, allocator->host_allocator, out_buffer);
 }
 
 static iree_status_t iree_hal_heap_allocator_export_buffer(
@@ -248,22 +265,34 @@ static iree_status_t iree_hal_heap_allocator_export_buffer(
     iree_hal_external_buffer_type_t requested_type,
     iree_hal_external_buffer_flags_t requested_flags,
     iree_hal_external_buffer_t* IREE_RESTRICT out_external_buffer) {
-  if (requested_type != IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION) {
+  // For the heap allocator on CPUs, we can directly export requests for
+  // both a host allocation and a device allocation as they are one and the
+  // same. We switch below to store the pointer in the right part of the
+  // union.
+  if (requested_type != IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION &&
+      requested_type != IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION) {
     return iree_make_status(IREE_STATUS_UNAVAILABLE,
                             "external buffer type not supported");
   }
 
   // Map the entire buffer persistently, if possible.
   iree_hal_buffer_mapping_t mapping;
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-      buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-      iree_hal_buffer_allowed_access(buffer), 0, IREE_WHOLE_BUFFER, &mapping));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_buffer_map_range(buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
+                                iree_hal_buffer_allowed_access(buffer), 0,
+                                IREE_HAL_WHOLE_BUFFER, &mapping));
 
   // Note that the returned pointer is unowned.
   out_external_buffer->type = requested_type;
   out_external_buffer->flags = requested_flags;
   out_external_buffer->size = mapping.contents.data_length;
-  out_external_buffer->handle.host_allocation.ptr = mapping.contents.data;
+  if (requested_type == IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION) {
+    out_external_buffer->handle.host_allocation.ptr = mapping.contents.data;
+  } else if (requested_type ==
+             IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION) {
+    out_external_buffer->handle.device_allocation.ptr =
+        (uint64_t)(uintptr_t)mapping.contents.data;
+  }
   return iree_ok_status();
 }
 

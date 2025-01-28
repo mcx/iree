@@ -7,52 +7,46 @@
 #include <utility>
 
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
-#include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+namespace mlir::iree_compiler::IREE::Flow {
 
-static SmallVector<Value, 4> filterTensorValues(ValueRange&& range) {
-  SmallVector<Value, 4> result;
+#define GEN_PASS_DEF_INJECTDISPATCHTRACINGPASS
+#include "iree/compiler/Dialect/Flow/Transforms/Passes.h.inc"
+
+static SmallVector<Value> filterTensorValues(ValueRange &&range) {
+  SmallVector<Value> result;
   for (auto value : range) {
-    if (value.getType().isa<TensorType>()) result.push_back(value);
+    if (llvm::isa<TensorType>(value.getType()))
+      result.push_back(value);
   }
   return result;
 }
 
-class InjectDispatchTracingPass
-    : public InjectDispatchTracingBase<InjectDispatchTracingPass> {
- public:
-  InjectDispatchTracingPass() = default;
+namespace {
 
+struct InjectDispatchTracingPass
+    : public IREE::Flow::impl::InjectDispatchTracingPassBase<
+          InjectDispatchTracingPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
     for (auto dispatchOp : funcOp.getFunctionBody().getOps<DispatchOp>()) {
-      std::string entryPointName =
-          dispatchOp.getEntryPoint().getRootReference().getValue().str();
-      for (FlatSymbolRefAttr nestedRef :
-           dispatchOp.getEntryPoint().getNestedReferences()) {
-        entryPointName = (entryPointName + "::" + nestedRef.getValue()).str();
-      }
+      std::string entryPointName = dispatchOp.getEntryPointName();
 
       // Input tensors:
       OpBuilder builder(dispatchOp);
-      builder.create<TensorTraceOp>(
+      builder.create<IREE::Flow::TensorTraceOp>(
           dispatchOp.getLoc(),
           builder.getStringAttr(entryPointName + " inputs"),
           filterTensorValues(dispatchOp.getArguments()));
 
       // Output tensors:
       builder.setInsertionPointAfter(dispatchOp);
-      builder.create<TensorTraceOp>(
+      builder.create<IREE::Flow::TensorTraceOp>(
           dispatchOp.getLoc(),
           builder.getStringAttr(entryPointName + " outputs"),
           filterTensorValues(dispatchOp.getResults()));
@@ -60,12 +54,6 @@ class InjectDispatchTracingPass
   }
 };
 
-std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createInjectDispatchTracingPass() {
-  return std::make_unique<InjectDispatchTracingPass>();
-}
+} // namespace
 
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Flow

@@ -7,13 +7,11 @@
 #ifndef IREE_COMPILER_CODEGEN_LLVMGPU_KERNELCONFIG_H_
 #define IREE_COMPILER_CODEGEN_LLVMGPU_KERNELCONFIG_H_
 
-#include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
-LogicalResult initGPULaunchConfig(ModuleOp moduleOp);
+LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp);
 
-}  // namespace iree_compiler
-}  // namespace mlir
-#endif  // IREE_COMPILER_CODEGEN_LLVMGPU_KERNELCONFIG_H_
+} // namespace mlir::iree_compiler
+#endif // IREE_COMPILER_CODEGEN_LLVMGPU_KERNELCONFIG_H_

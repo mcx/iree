@@ -4,23 +4,16 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef IREE_COMPILER_CODEGEN_LLVMGPU_COMMON_H_
-#define IREE_COMPILER_CODEGEN_LLVMGPU_COMMON_H_
+#ifndef IREE_COMPILER_CODEGEN_LLVMGPU_CONVERTTOLLVM_H_
+#define IREE_COMPILER_CODEGEN_LLVMGPU_CONVERTTOLLVM_H_
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 
-namespace mlir {
-namespace gpu {
+namespace mlir::gpu {
 enum class AddressSpace : uint32_t;
-}
-namespace iree_compiler {
+} // namespace mlir::gpu
 
-/// Verifies compatibility of the module for application of the LLVM
-/// conversion patterns. If not compatible, an error is issued and the
-/// pass should be failed.
-/// This is primarily used to eagerly reject modules with features not
-/// (yet) supported by the NVVM conversions.
-LogicalResult verifyLLVMConversionCompatibility(ModuleOp moduleOp);
+namespace mlir::iree_compiler {
 
 void populateLLVMConversionPatterns(MLIRContext *context,
                                     RewritePatternSet &patterns,
@@ -41,7 +34,6 @@ using MemorySpaceMapping =
 void populateGpuMemorySpaceAttributeConversions(
     TypeConverter &typeConverter, const MemorySpaceMapping &mapping);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_CODEGEN_LLVMGPU_COMMON_H_
+#endif // IREE_COMPILER_CODEGEN_LLVMGPU_CONVERTTOLLVM_H_

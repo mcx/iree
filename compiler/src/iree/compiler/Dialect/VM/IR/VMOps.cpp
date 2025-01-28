@@ -13,20 +13,17 @@
 #include "llvm/ADT/StringExtras.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/FunctionImplementation.h"
-#include "mlir/IR/FunctionInterfaces.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 namespace {
 
@@ -34,7 +31,7 @@ template <typename NameTy>
 void setResultName(OpAsmSetValueNameFn &setNameFn, Value result, NameTy name) {
   SmallString<32> osBuffer;
   llvm::raw_svector_ostream os(osBuffer);
-  if (result.getType().isa<VectorType>()) {
+  if (llvm::isa<VectorType>(result.getType())) {
     os << "v";
   }
   os << name;
@@ -45,7 +42,7 @@ void setResultIntegerName(OpAsmSetValueNameFn &setNameFn, Value result,
                           IntegerAttr value) {
   SmallString<32> osBuffer;
   llvm::raw_svector_ostream os(osBuffer);
-  if (result.getType().isa<VectorType>()) {
+  if (llvm::isa<VectorType>(result.getType())) {
     os << "v";
   }
   if (!value) {
@@ -58,7 +55,7 @@ void setResultIntegerName(OpAsmSetValueNameFn &setNameFn, Value result,
   setNameFn(result, os.str());
 }
 
-}  // namespace
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // Structural ops
@@ -89,8 +86,7 @@ SmallVector<ModuleOp::Dependency> ModuleOp::getDependencies() {
       dependency.isOptional = false;
     }
   }
-  return llvm::to_vector(
-      llvm::map_range(dependencies, [](auto it) { return it.second; }));
+  return llvm::map_to_vector(dependencies, [](auto it) { return it.second; });
 }
 
 ParseResult FuncOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -141,7 +137,7 @@ Block *FuncOp::addEntryBlock() {
 
 LogicalResult FuncOp::verifyType() {
   auto type = getFunctionTypeAttr().getValue();
-  if (!type.isa<FunctionType>())
+  if (!llvm::isa<FunctionType>(type))
     return emitOpError("requires '" + getFunctionTypeAttrName().getValue() +
                        "' attribute of function type");
   return success();
@@ -151,19 +147,21 @@ void FuncOp::setReflectionAttr(StringRef name, Attribute value) {
   // TODO(benvanik): remove reflection attrs as a concept and use something more
   // MLIRish like an attribute interface/dialect interface.
   // DictionaryAttr is not very friendly for modification :/
-  auto existingAttr =
-      getOperation()->getAttrOfType<DictionaryAttr>("iree.reflection");
-  SmallVector<NamedAttribute> attrs(existingAttr.begin(), existingAttr.end());
+  SmallVector<NamedAttribute> attrs;
+  if (auto existingAttr =
+          getOperation()->getAttrOfType<DictionaryAttr>("iree.reflection")) {
+    llvm::append_range(attrs, existingAttr);
+  }
   bool didFind = false;
-  for (size_t i = 0; i < attrs.size(); ++i) {
-    if (attrs[i].getName() == name) {
-      attrs[i].setValue(value);
+  for (NamedAttribute &attr : attrs) {
+    if (attr.getName() == name) {
+      attr.setValue(value);
       didFind = true;
       break;
     }
   }
   if (!didFind) {
-    attrs.push_back(NamedAttribute(StringAttr::get(getContext(), name), value));
+    attrs.emplace_back(name, value);
     DictionaryAttr::sortInPlace(attrs);
   }
   getOperation()->setAttr("iree.reflection",
@@ -263,7 +261,7 @@ ParseResult ImportOp::parse(OpAsmParser &parser, OperationState &result) {
       if (failed(parser.parseColonType(operandType))) {
         return parser.emitError(operandLoc) << "invalid operand";
       }
-      operandName = operand.name.substr(1);  // consume `%`
+      operandName = operand.name.substr(1); // consume `%`
     } else {
       if (failed(parser.parseType(operandType))) {
         return parser.emitError(operandLoc) << "invalid operand";
@@ -371,7 +369,7 @@ void ImportOp::build(OpBuilder &builder, OperationState &result, StringRef name,
 
 LogicalResult ImportOp::verifyType() {
   auto type = getFunctionTypeAttr().getValue();
-  if (!type.isa<FunctionType>())
+  if (!llvm::isa<FunctionType>(type))
     return emitOpError("requires '" + getFunctionTypeAttrName().getValue() +
                        "' attribute of function type");
   return success();
@@ -422,6 +420,60 @@ Block *InitializerOp::addBlock() {
 //===----------------------------------------------------------------------===//
 // Globals
 //===----------------------------------------------------------------------===//
+
+IREE::Util::GlobalLoadOpInterface
+GlobalI32Op::createLoadOp(Location loc, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalLoadI32Op>(loc, builder.getI32Type(),
+                                                   getGlobalName());
+}
+IREE::Util::GlobalStoreOpInterface
+GlobalI32Op::createStoreOp(Location loc, Value value, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalStoreI32Op>(loc, value,
+                                                    getGlobalName());
+}
+
+IREE::Util::GlobalLoadOpInterface
+GlobalI64Op::createLoadOp(Location loc, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalLoadI64Op>(loc, builder.getI64Type(),
+                                                   getGlobalName());
+}
+IREE::Util::GlobalStoreOpInterface
+GlobalI64Op::createStoreOp(Location loc, Value value, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalStoreI64Op>(loc, value,
+                                                    getGlobalName());
+}
+
+IREE::Util::GlobalLoadOpInterface
+GlobalF32Op::createLoadOp(Location loc, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalLoadF32Op>(loc, builder.getF32Type(),
+                                                   getGlobalName());
+}
+IREE::Util::GlobalStoreOpInterface
+GlobalF32Op::createStoreOp(Location loc, Value value, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalStoreF32Op>(loc, value,
+                                                    getGlobalName());
+}
+
+IREE::Util::GlobalLoadOpInterface
+GlobalF64Op::createLoadOp(Location loc, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalLoadF64Op>(loc, builder.getF64Type(),
+                                                   getGlobalName());
+}
+IREE::Util::GlobalStoreOpInterface
+GlobalF64Op::createStoreOp(Location loc, Value value, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalStoreF64Op>(loc, value,
+                                                    getGlobalName());
+}
+
+IREE::Util::GlobalLoadOpInterface
+GlobalRefOp::createLoadOp(Location loc, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalLoadRefOp>(loc, getType(),
+                                                   getSymName());
+}
+IREE::Util::GlobalStoreOpInterface
+GlobalRefOp::createStoreOp(Location loc, Value value, OpBuilder &builder) {
+  return builder.create<IREE::VM::GlobalStoreRefOp>(loc, value, getSymName());
+}
 
 template <typename T>
 static void addMemoryEffectsForGlobal(
@@ -489,19 +541,19 @@ void GlobalLoadRefOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 template <int SZ>
 static bool isConstIntegerBuildableWith(TypedAttr value, Type type) {
   // FlatSymbolRefAttr can only be used with a function type.
-  if (value.isa<FlatSymbolRefAttr>()) {
+  if (llvm::isa<FlatSymbolRefAttr>(value)) {
     return false;
   }
   // Otherwise, the attribute must have the same type as 'type'.
   if (value.getType() != type) {
     return false;
   }
-  if (value.isa<UnitAttr>()) {
-    return SZ == 32;  // Conditions/bools are always i32
-  } else if (auto intAttr = value.dyn_cast<IntegerAttr>()) {
+  if (llvm::isa<UnitAttr>(value)) {
+    return SZ == 32; // Conditions/bools are always i32
+  } else if (auto intAttr = llvm::dyn_cast<IntegerAttr>(value)) {
     return intAttr.getType().isInteger(SZ);
-  } else if (auto elementsAttr = value.dyn_cast<ElementsAttr>()) {
-    return elementsAttr.getType().getElementType().isInteger(SZ);
+  } else if (auto elementsAttr = llvm::dyn_cast<ElementsAttr>(value)) {
+    return elementsAttr.getShapedType().getElementType().isInteger(SZ);
   }
   return false;
 }
@@ -509,7 +561,7 @@ static bool isConstIntegerBuildableWith(TypedAttr value, Type type) {
 template <int SZ>
 static bool isConstFloatBuildableWith(TypedAttr value, Type type) {
   // FlatSymbolRefAttr can only be used with a function type.
-  if (value.isa<FlatSymbolRefAttr>()) {
+  if (llvm::isa<FlatSymbolRefAttr>(value)) {
     return false;
   }
   // Otherwise, the attribute must have the same type as 'type'.
@@ -517,79 +569,80 @@ static bool isConstFloatBuildableWith(TypedAttr value, Type type) {
     return false;
   }
   Type elementType;
-  if (auto floatAttr = value.dyn_cast<FloatAttr>()) {
+  if (auto floatAttr = llvm::dyn_cast<FloatAttr>(value)) {
     elementType = floatAttr.getType();
-  } else if (auto elementsAttr = value.dyn_cast<ElementsAttr>()) {
-    elementType = elementsAttr.getType().getElementType();
+  } else if (auto elementsAttr = llvm::dyn_cast<ElementsAttr>(value)) {
+    elementType = elementsAttr.getShapedType().getElementType();
   }
-  if (!elementType) return false;
+  if (!elementType)
+    return false;
   return elementType.getIntOrFloatBitWidth() == SZ;
 }
 
 template <int SZ>
-static Attribute convertConstIntegerValue(TypedAttr value) {
+static TypedAttr convertConstIntegerValue(TypedAttr value) {
   assert(isConstIntegerBuildableWith<SZ>(value, value.getType()));
   Builder builder(value.getContext());
   auto integerType = builder.getIntegerType(SZ);
   int32_t dims = 1;
-  if (value.isa<UnitAttr>()) {
+  if (llvm::isa<UnitAttr>(value)) {
     return IntegerAttr::get(integerType, APInt(SZ, 1));
-  } else if (auto v = value.dyn_cast<BoolAttr>()) {
+  } else if (auto v = llvm::dyn_cast<BoolAttr>(value)) {
     return IntegerAttr::get(integerType,
                             APInt(SZ, v.getValue() ? 1 : 0, false));
-  } else if (auto v = value.dyn_cast<IntegerAttr>()) {
+  } else if (auto v = llvm::dyn_cast<IntegerAttr>(value)) {
     return IntegerAttr::get(integerType,
                             APInt(SZ, v.getValue().getLimitedValue()));
-  } else if (auto v = value.dyn_cast<ElementsAttr>()) {
+  } else if (auto v = llvm::dyn_cast<ElementsAttr>(value)) {
     dims = v.getNumElements();
     ShapedType adjustedType = VectorType::get({dims}, integerType);
-    if (auto elements = v.dyn_cast<SplatElementsAttr>()) {
+    if (auto elements = llvm::dyn_cast<SplatElementsAttr>(v)) {
       return SplatElementsAttr::get(adjustedType,
                                     elements.getSplatValue<Attribute>());
     } else {
-      return DenseElementsAttr::get(
-          adjustedType, llvm::to_vector<4>(v.getValues<Attribute>()));
+      return DenseElementsAttr::get(adjustedType,
+                                    llvm::to_vector(v.getValues<Attribute>()));
     }
   }
   assert(false && "unexpected attribute type");
-  return Attribute();
+  return TypedAttr();
 }
 
 static FloatType getFloatType(int bitwidth, MLIRContext *context) {
   switch (bitwidth) {
-    case 16:
-      return FloatType::getF16(context);
-    case 32:
-      return FloatType::getF32(context);
-    case 64:
-      return FloatType::getF64(context);
-    default:
-      assert(false && "unhandled floating point type");
-      return {};
+  case 16:
+    return Float16Type::get(context);
+  case 32:
+    return Float32Type::get(context);
+  case 64:
+    return Float64Type::get(context);
+  default:
+    assert(false && "unhandled floating point type");
+    return {};
   }
 }
 
 template <int SZ>
-static Attribute convertConstFloatValue(TypedAttr value) {
+static TypedAttr convertConstFloatValue(TypedAttr value) {
   assert(isConstFloatBuildableWith<SZ>(value, value.getType()));
   Builder builder(value.getContext());
   auto floatType = getFloatType(SZ, value.getContext());
   int32_t dims = 1;
-  if (auto v = value.dyn_cast<FloatAttr>()) {
+  if (auto v = llvm::dyn_cast<FloatAttr>(value)) {
     return FloatAttr::get(floatType, v.getValue());
-  } else if (auto v = value.dyn_cast<ElementsAttr>()) {
+  } else if (auto v = llvm::dyn_cast<ElementsAttr>(value)) {
     dims = v.getNumElements();
     ShapedType adjustedType = VectorType::get({dims}, floatType);
-    if (auto elements = v.dyn_cast<SplatElementsAttr>()) {
+    if (auto elements = llvm::dyn_cast<SplatElementsAttr>(v)) {
       return SplatElementsAttr::get(adjustedType,
                                     elements.getSplatValue<Attribute>());
     } else {
-      return DenseElementsAttr::get(
-          adjustedType, llvm::to_vector<4>(v.getValues<Attribute>()));
+      return DenseElementsAttr::get(adjustedType,
+                                    llvm::to_vector(v.getValues<Attribute>()));
     }
   }
   assert(false && "unexpected attribute type");
-  return Attribute();
+  return TypedAttr();
 }
 
 // static
@@ -611,7 +664,7 @@ void ConstI32Op::build(OpBuilder &builder, OperationState &result,
 
 void ConstI32Op::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
   setResultIntegerName(setNameFn, getResult(),
-                       getValue().dyn_cast<IntegerAttr>());
+                       llvm::dyn_cast<IntegerAttr>(getValue()));
 }
 
 void ConstI32Op::build(OpBuilder &builder, OperationState &result,
@@ -643,7 +696,7 @@ void ConstI64Op::build(OpBuilder &builder, OperationState &result,
 
 void ConstI64Op::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
   setResultIntegerName(setNameFn, getResult(),
-                       getValue().dyn_cast<IntegerAttr>());
+                       llvm::dyn_cast<IntegerAttr>(getValue()));
 }
 
 // static
@@ -738,12 +791,12 @@ void RodataOp::build(OpBuilder &builder, OperationState &result, StringRef name,
   result.addAttributes(attrs);
 }
 
-LogicalResult ConstRefRodataOp::verify() {
+LogicalResult
+ConstRefRodataOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   Operation *op = getOperation();
-  auto *rodataOp =
-      op->getParentOfType<VM::ModuleOp>().lookupSymbol(getRodata());
-  if (!rodataOp) {
-    return op->emitOpError() << "Undefined rodata section: " << getRodata();
+  if (!symbolTable.lookupNearestSymbolFrom(op, getRodataAttr())) {
+    return op->emitError() << "undefined rodata section: '" << getRodata()
+                           << "'";
   }
   return success();
 }
@@ -781,7 +834,8 @@ static std::string makeSafeIdentifier(StringRef unsafeIdentifier) {
   llvm::raw_string_ostream os(result);
   bool lastUnderscore = true;
   for (char c : unsafeIdentifier) {
-    if (!llvm::isPrint(c)) continue;
+    if (!llvm::isPrint(c))
+      continue;
     if (llvm::isAlnum(c)) {
       os << llvm::toLower(c);
       lastUnderscore = false;
@@ -791,7 +845,7 @@ static std::string makeSafeIdentifier(StringRef unsafeIdentifier) {
     }
   }
   std::string prefix = os.str().substr(0, 32);
-  if (!StringRef(prefix).endswith("_")) {
+  if (!StringRef(prefix).ends_with("_")) {
     prefix += "_";
   }
   return prefix + llvm::utohexstr(static_cast<uint64_t>(
@@ -810,28 +864,53 @@ void RodataInlineOp::build(OpBuilder &builder, OperationState &result,
         /*mimeType=*/nullptr);
 }
 
+void RodataTableInlineOp::build(OpBuilder &builder, OperationState &result,
+                                StringAttr name, IntegerType tableType,
+                                ArrayAttr value) {
+  // Make an identifier-friendly version of the string so that the value is
+  // more readable in IR (so "I'm some string" becomes "im_some_string", etc).
+  auto safeIdentifier = makeSafeIdentifier(name.getValue());
+  // Make names for the table and data based on the safe identifier.
+  std::string tableName = safeIdentifier + "_table";
+  std::string dataName = safeIdentifier + "_data";
+  auto refType =
+      IREE::VM::RefType::get(IREE::VM::BufferType::get(builder.getContext()));
+  build(builder, result, TypeRange{refType, refType},
+        /*tableName=*/builder.getStringAttr(tableName),
+        /*dataName=*/builder.getStringAttr(dataName), /*tableType=*/tableType,
+        /*dataArray=*/value,
+        /*alignment=*/nullptr, /*dataAlignment=*/nullptr, /*mimeType=*/nullptr);
+}
+
+void RodataTableInlineOp::build(OpBuilder &builder, OperationState &result,
+                                IntegerType tableType, ArrayAttr value) {
+  auto refType =
+      IREE::VM::RefType::get(IREE::VM::BufferType::get(builder.getContext()));
+  build(builder, result, TypeRange{refType, refType},
+        /*tableName=*/nullptr, /*dataName=*/nullptr, /*tableType=*/tableType,
+        /*dataArray=*/value, /*alignment=*/nullptr, /*dataAlignment=*/nullptr,
+        /*mimeType=*/nullptr);
+}
+
 //===----------------------------------------------------------------------===//
 // Lists
 //===----------------------------------------------------------------------===//
 
 LogicalResult ListGetRefOp::verify() {
   Operation *op = getOperation();
-  auto listType = getList()
-                      .getType()
-                      .cast<IREE::VM::RefType>()
-                      .getObjectType()
-                      .cast<IREE::VM::ListType>();
+  auto listType = llvm::cast<IREE::VM::ListType>(
+      cast<IREE::VM::RefType>(getList().getType()).getObjectType());
   auto elementType = listType.getElementType();
   auto resultType = getResult().getType();
-  if (!elementType.isa<IREE::VM::OpaqueType>()) {
-    if (elementType.isa<IREE::VM::RefType>() !=
-        resultType.isa<IREE::VM::RefType>()) {
+  if (!llvm::isa<IREE::VM::OpaqueType>(elementType)) {
+    if (llvm::isa<IREE::VM::RefType>(elementType) !=
+        llvm::isa<IREE::VM::RefType>(resultType)) {
       // Attempting to go between a primitive type and ref type.
       return op->emitError()
              << "cannot convert between list type " << elementType
              << " and result type " << resultType;
-    } else if (auto refType = elementType.dyn_cast<IREE::VM::RefType>()) {
-      if (!refType.getObjectType().isa<IREE::VM::OpaqueType>() &&
+    } else if (auto refType = llvm::dyn_cast<IREE::VM::RefType>(elementType)) {
+      if (!llvm::isa<IREE::VM::OpaqueType>(refType.getObjectType()) &&
           elementType != resultType) {
         // List has a concrete type, verify it matches.
         return op->emitError() << "list contains " << elementType
@@ -844,21 +923,18 @@ LogicalResult ListGetRefOp::verify() {
 
 LogicalResult ListSetRefOp::verify() {
   Operation *op = getOperation();
-  auto listType = getList()
-                      .getType()
-                      .cast<IREE::VM::RefType>()
-                      .getObjectType()
-                      .cast<IREE::VM::ListType>();
+  auto listType = llvm::cast<IREE::VM::ListType>(
+      cast<IREE::VM::RefType>(getList().getType()).getObjectType());
   auto elementType = listType.getElementType();
   auto valueType = getValue().getType();
-  if (!elementType.isa<IREE::VM::OpaqueType>()) {
-    if (elementType.isa<IREE::VM::RefType>() !=
-        valueType.isa<IREE::VM::RefType>()) {
+  if (!llvm::isa<IREE::VM::OpaqueType>(elementType)) {
+    if (llvm::isa<IREE::VM::RefType>(elementType) !=
+        llvm::isa<IREE::VM::RefType>(valueType)) {
       // Attempting to go between a primitive type and ref type.
       return op->emitError() << "cannot convert between list type "
                              << elementType << " and value type " << valueType;
-    } else if (auto refType = elementType.dyn_cast<IREE::VM::RefType>()) {
-      if (!refType.getObjectType().isa<IREE::VM::OpaqueType>() &&
+    } else if (auto refType = llvm::dyn_cast<IREE::VM::RefType>(elementType)) {
+      if (!llvm::isa<IREE::VM::OpaqueType>(refType.getObjectType()) &&
           elementType != valueType) {
         // List has a concrete type, verify it matches.
         return op->emitError() << "list contains " << elementType
@@ -874,7 +950,7 @@ LogicalResult ListSetRefOp::verify() {
 //===----------------------------------------------------------------------===//
 
 static ParseResult parseSwitchOp(OpAsmParser &parser, OperationState &result) {
-  SmallVector<OpAsmParser::UnresolvedOperand, 4> values;
+  SmallVector<OpAsmParser::UnresolvedOperand> values;
   OpAsmParser::UnresolvedOperand index;
   OpAsmParser::UnresolvedOperand defaultValue;
   Type type;
@@ -1066,12 +1142,12 @@ ParseResult CallVariadicOp::parse(OpAsmParser &parser, OperationState &result) {
   // We'll instead parse each segment as a flat list so `[(%a, %b), (%c, %d)]`
   // parses as `[%a, %b, %c, %d]` and then do the accounting below when parsing
   // types.
-  SmallVector<OpAsmParser::UnresolvedOperand, 4> flatOperands;
-  SmallVector<int16_t, 4> flatSegmentSizes;
+  SmallVector<OpAsmParser::UnresolvedOperand> flatOperands;
+  SmallVector<int16_t> flatSegmentSizes;
   while (failed(parser.parseOptionalRParen())) {
     if (succeeded(parser.parseOptionalLSquare())) {
       // Variadic list.
-      SmallVector<OpAsmParser::UnresolvedOperand, 4> flatSegmentOperands;
+      SmallVector<OpAsmParser::UnresolvedOperand> flatSegmentOperands;
       while (failed(parser.parseOptionalRSquare())) {
         if (succeeded(parser.parseOptionalLParen())) {
           // List contains tuples, so track the () and parse inside of it.
@@ -1134,9 +1210,9 @@ ParseResult CallVariadicOp::parse(OpAsmParser &parser, OperationState &result) {
     return parser.emitError(parser.getCurrentLocation())
            << "malformed optional attributes list";
   }
-  SmallVector<Type, 4> flatOperandTypes;
-  SmallVector<Type, 4> segmentTypes;
-  SmallVector<int16_t, 4> segmentSizes;
+  SmallVector<Type> flatOperandTypes;
+  SmallVector<Type> segmentTypes;
+  SmallVector<int16_t> segmentSizes;
   int segmentIndex = 0;
   while (failed(parser.parseOptionalRParen())) {
     Type operandType;
@@ -1147,7 +1223,7 @@ ParseResult CallVariadicOp::parse(OpAsmParser &parser, OperationState &result) {
     bool isVariadic = succeeded(parser.parseOptionalEllipsis());
     if (isVariadic) {
       int flatSegmentSize = flatSegmentSizes[segmentIndex];
-      if (auto tupleType = operandType.dyn_cast<TupleType>()) {
+      if (auto tupleType = llvm::dyn_cast<TupleType>(operandType)) {
         for (int i = 0; i < flatSegmentSize / tupleType.size(); ++i) {
           for (auto type : tupleType) {
             flatOperandTypes.push_back(type);
@@ -1187,10 +1263,10 @@ ParseResult CallVariadicOp::parse(OpAsmParser &parser, OperationState &result) {
                           parser.getBuilder().getIntegerType(16)),
           segmentSizes));
   result.addAttribute("segment_types",
-                      parser.getBuilder().getArrayAttr(llvm::to_vector<4>(
-                          llvm::map_range(segmentTypes, [&](Type type) {
-                            return TypeAttr::get(type).cast<Attribute>();
-                          }))));
+                      parser.getBuilder().getArrayAttr(
+                          llvm::map_to_vector(segmentTypes, [&](Type type) {
+                            return llvm::cast<Attribute>(TypeAttr::get(type));
+                          })));
 
   if (failed(parser.parseOptionalArrowTypeList(result.types))) {
     return parser.emitError(parser.getCurrentLocation())
@@ -1209,24 +1285,25 @@ void CallVariadicOp::print(OpAsmPrinter &p) {
       [&](std::tuple<APInt, Attribute> segmentSizeType) {
         int segmentSize = std::get<0>(segmentSizeType).getSExtValue();
         Type segmentType =
-            std::get<1>(segmentSizeType).cast<TypeAttr>().getValue();
+            llvm::cast<TypeAttr>(std::get<1>(segmentSizeType)).getValue();
         if (segmentSize == -1) {
           p.printOperand(getOperand(operand++));
         } else {
           p << '[';
-          if (auto tupleType = segmentType.dyn_cast<TupleType>()) {
+          if (auto tupleType = llvm::dyn_cast<TupleType>(segmentType)) {
             for (size_t i = 0; i < segmentSize; ++i) {
               p << '(';
-              SmallVector<Value, 4> tupleOperands;
+              SmallVector<Value> tupleOperands;
               for (size_t j = 0; j < tupleType.size(); ++j) {
                 tupleOperands.push_back(getOperand(operand++));
               }
               p << tupleOperands;
               p << ')';
-              if (i < segmentSize - 1) p << ", ";
+              if (i < segmentSize - 1)
+                p << ", ";
             }
           } else {
-            SmallVector<Value, 4> segmentOperands;
+            SmallVector<Value> segmentOperands;
             for (int i = 0; i < segmentSize; ++i) {
               segmentOperands.push_back(getOperand(operand++));
             }
@@ -1247,7 +1324,7 @@ void CallVariadicOp::print(OpAsmPrinter &p) {
       [&](std::tuple<APInt, Attribute> segmentSizeType) {
         int segmentSize = std::get<0>(segmentSizeType).getSExtValue();
         Type segmentType =
-            std::get<1>(segmentSizeType).cast<TypeAttr>().getValue();
+            llvm::cast<TypeAttr>(std::get<1>(segmentSizeType)).getValue();
         if (segmentSize == -1) {
           p.printType(segmentType);
         } else {
@@ -1267,6 +1344,87 @@ SuccessorOperands CondBranchOp::getSuccessorOperands(unsigned index) {
   assert(index < getNumSuccessors() && "invalid successor index");
   return index == trueIndex ? SuccessorOperands(getTrueDestOperandsMutable())
                             : SuccessorOperands(getFalseDestOperandsMutable());
+}
+
+static ParseResult parseBranchTableCases(
+    OpAsmParser &parser, Block *&defaultDestination,
+    SmallVectorImpl<OpAsmParser::UnresolvedOperand> &defaultOperands,
+    SmallVectorImpl<Type> &defaultOperandTypes,
+    SmallVectorImpl<Block *> &caseDestinations,
+    SmallVectorImpl<SmallVector<OpAsmParser::UnresolvedOperand>> &caseOperands,
+    SmallVectorImpl<SmallVector<Type>> &caseOperandTypes) {
+  if (parser.parseKeyword("default") || parser.parseColon() ||
+      parser.parseSuccessor(defaultDestination))
+    return failure();
+  if (succeeded(parser.parseOptionalLParen())) {
+    if (parser.parseOperandList(defaultOperands, OpAsmParser::Delimiter::None,
+                                /*allowResultNumber=*/false) ||
+        parser.parseColonTypeList(defaultOperandTypes) || parser.parseRParen())
+      return failure();
+  }
+  while (succeeded(parser.parseOptionalComma())) {
+    int64_t index = 0;
+    if (failed(parser.parseInteger(index)))
+      return failure();
+    if (index != caseDestinations.size())
+      return failure();
+    Block *destination;
+    SmallVector<OpAsmParser::UnresolvedOperand> operands;
+    SmallVector<Type> operandTypes;
+    if (failed(parser.parseColon()) ||
+        failed(parser.parseSuccessor(destination)))
+      return failure();
+    if (succeeded(parser.parseOptionalLParen())) {
+      if (failed(parser.parseOperandList(operands, OpAsmParser::Delimiter::None,
+                                         /*allowResultNumber=*/false)) ||
+          failed(parser.parseColonTypeList(operandTypes)) ||
+          failed(parser.parseRParen()))
+        return failure();
+    }
+    caseDestinations.push_back(destination);
+    caseOperands.emplace_back(operands);
+    caseOperandTypes.emplace_back(operandTypes);
+  }
+  return success();
+}
+
+static void printBranchTableCases(OpAsmPrinter &p, Operation *op,
+                                  Block *defaultDestination,
+                                  OperandRange defaultOperands,
+                                  TypeRange defaultOperandTypes,
+                                  SuccessorRange caseDestinations,
+                                  OperandRangeRange caseOperands,
+                                  const TypeRangeRange &caseOperandTypes) {
+  p.increaseIndent();
+  p << "  default: ";
+  p.printSuccessorAndUseList(defaultDestination, defaultOperands);
+  int index = 0;
+  for (auto [caseDestination, caseOperands, caseOperandTypes] :
+       llvm::zip_equal(caseDestinations, caseOperands, caseOperandTypes)) {
+    p << ',';
+    p.printNewline();
+    p << (index++) << ": ";
+    p.printSuccessorAndUseList(caseDestination, caseOperands);
+  }
+  p.decreaseIndent();
+  p.printNewline();
+}
+
+SuccessorOperands BranchTableOp::getSuccessorOperands(unsigned index) {
+  assert(index < getNumSuccessors() && "invalid successor index");
+  return SuccessorOperands(index == 0 ? getDefaultOperandsMutable()
+                                      : getCaseOperandsMutable(index - 1));
+}
+
+Block *BranchTableOp::getSuccessorForOperands(ArrayRef<Attribute> operands) {
+  SuccessorRange caseDestinations = getCaseDestinations();
+  if (auto valueAttr = llvm::dyn_cast_or_null<IntegerAttr>(operands.front())) {
+    int64_t value = valueAttr.getValue().getSExtValue();
+    if (value < 0 || value >= caseDestinations.size())
+      return getDefaultDestination();
+    return caseDestinations[value];
+  }
+  return nullptr;
 }
 
 LogicalResult verifyFailOp(Operation *op, Value statusVal) {
@@ -1376,15 +1534,12 @@ SuccessorOperands CondBreakOp::getSuccessorOperands(unsigned index) {
   return SuccessorOperands(getDestOperandsMutable());
 }
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
 //===----------------------------------------------------------------------===//
 // TableGen definitions (intentionally last)
 //===----------------------------------------------------------------------===//
 
-#include "iree/compiler/Dialect/VM/IR/VMOpEncoder.cpp.inc"  // IWYU pragma: keep
+#include "iree/compiler/Dialect/VM/IR/VMOpEncoder.cpp.inc" // IWYU pragma: keep
 #define GET_OP_CLASSES
-#include "iree/compiler/Dialect/VM/IR/VMOps.cpp.inc"  // IWYU pragma: keep
+#include "iree/compiler/Dialect/VM/IR/VMOps.cpp.inc" // IWYU pragma: keep

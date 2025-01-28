@@ -4,6 +4,10 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// Needed to access dladdr on Linux. On MacOS, does nothing (available by
+// default).
+#define _GNU_SOURCE
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,8 +16,6 @@
 #include "iree/base/internal/call_once.h"
 #include "iree/base/internal/dynamic_library.h"
 #include "iree/base/internal/path.h"
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
 
 #if defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_APPLE) || \
     defined(IREE_PLATFORM_LINUX) || defined(IREE_PLATFORM_EMSCRIPTEN)
@@ -97,10 +99,10 @@ static iree_status_t iree_dynamic_library_write_temp_file(
   if (iree_status_is_ok(status)) {
     if (fwrite((char*)source_data.data, source_data.data_length, 1,
                file_handle) != 1) {
-      status =
-          iree_make_status(iree_status_code_from_errno(errno),
-                           "unable to write file span of %zu bytes to '%s'",
-                           source_data.data_length, *out_file_path);
+      status = iree_make_status(iree_status_code_from_errno(errno),
+                                "unable to write file span of %" PRIhsz
+                                " bytes to '%s'",
+                                source_data.data_length, *out_file_path);
     }
   }
 
@@ -327,6 +329,15 @@ iree_status_t iree_dynamic_library_attach_symbols_from_file(
 iree_status_t iree_dynamic_library_attach_symbols_from_memory(
     iree_dynamic_library_t* library, iree_const_byte_span_t buffer) {
   return iree_ok_status();
+}
+
+iree_status_t iree_dynamic_library_append_symbol_path_to_builder(
+    void* symbol, iree_string_builder_t* builder) {
+  Dl_info dl_info;
+  if (dladdr((void*)symbol, &dl_info) == 0) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND);
+  }
+  return iree_string_builder_append_cstring(builder, dl_info.dli_fname);
 }
 
 #endif  // IREE_PLATFORM_*

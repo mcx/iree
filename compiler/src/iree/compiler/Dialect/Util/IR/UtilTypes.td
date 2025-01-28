@@ -83,9 +83,9 @@ def Util_AnyListType : TypeAlias<Util_ListType>;
 
 class Util_ListOf<Type type> :
     Type<And<[
-      CPred<"$_self.isa<IREE::Util::ListType>()">,
+      CPred<"isa<IREE::Util::ListType>($_self)">,
       SubstLeaves<"$_self",
-                  "$_self.cast<IREE::Util::ListType>().getElementType()",
+                  "cast<IREE::Util::ListType>($_self).getElementType()",
                   type.predicate>
     ]>, "list<" # type.summary # ">"> {
   string builderCall = !if(!empty(type.builderCall),
@@ -131,8 +131,8 @@ def Util_AnyPtrType : TypeAlias<Util_PtrType>;
 
 class Util_PtrOf<Type type> :
     Type<And<[
-      CPred<"$_self.isa<IREE::Util::PtrType>()">,
-      SubstLeaves<"$_self", "$_self.cast<IREE::Util::PtrType>().getTargetType()",
+      CPred<"isa<IREE::Util::PtrType>($_self)">,
+      SubstLeaves<"$_self", "cast<IREE::Util::PtrType>($_self).getTargetType()",
                   type.predicate>
     ]>, "ptr<" # type.summary # ">"> {
   string builderCall = !if(!empty(type.builderCall),
@@ -141,11 +141,11 @@ class Util_PtrOf<Type type> :
 
 class Util_AnyPtrOf<list<Type> types> :
     Type<And<[
-      CPred<"$_self.isa<IREE::Util::PtrType>()">,
+      CPred<"isa<IREE::Util::PtrType>($_self)">,
       Or<!foreach(type, types,
           SubstLeaves<
               "$_self",
-              "$_self.cast<IREE::Util::PtrType>().getTargetType()",
+              "cast<IREE::Util::PtrType>($_self).getTargetType()",
               type.predicate>)>,
     ]>, !interleave(!foreach(type, types, type.summary), " or ")> {
   string builderCall = "";
@@ -159,6 +159,51 @@ class Util_GlobalPtrOf<list<Type> types> : TypeAlias<Util_AnyPtrType> {
 }
 
 //===----------------------------------------------------------------------===//
+// !util.object
+//===----------------------------------------------------------------------===//
+
+def Util_ObjectType : TypeDef<Util_Dialect, "Object"> {
+  let mnemonic = "object";
+
+  let summary = [{a placeholder for an unspecified object type}];
+  let description = [{
+    Describes a runtime object type. These may be reference counted or garbage
+    collected at runtime.
+  }];
+
+  let builders = [
+    TypeBuilder<(ins), [{
+      return $_get($_ctxt);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Returns true if the given type is object-like.
+    static bool isCompatible(Type type);
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// !util.unused
+//===----------------------------------------------------------------------===//
+
+def Util_UnusedType : TypeDef<Util_Dialect, "Unused"> {
+  let mnemonic = "unused";
+
+  let summary = [{a placeholder for unused types}];
+  let description = [{
+    An unused type placeholder used to satisfy verifiers that may require a
+    type even if unused.
+  }];
+
+  let builders = [
+    TypeBuilder<(ins), [{
+      return $_get($_ctxt);
+    }]>
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // !util.variant
 //===----------------------------------------------------------------------===//
 
@@ -167,7 +212,8 @@ def Util_VariantType : TypeDef<Util_Dialect, "Variant"> {
 
   let summary = [{a placeholder for a variant type (`?`)}];
   let description = [{
-    Describes a runtime variant type.
+    Describes a runtime variant type. These may be primitives (i32, f32, etc) or
+    object types.
   }];
 
   let builders = [

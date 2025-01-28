@@ -52,6 +52,24 @@ def Util_ClosureOpInterface : OpInterface<"ClosureOpInterface"> {
     >,
     InterfaceMethod<
       /*desc=*/[{
+        Returns the value captured by the closure operands or the provided value
+        if it was not captured.
+      }],
+      /*retTy=*/"Value",
+      /*methodName=*/"getClosureCapturedValue",
+      /*args=*/(ins "Value":$closureValue),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (auto arg = dyn_cast<BlockArgument>(closureValue)) {
+          if (arg.getParentRegion() == &$_op.getClosureBodyRegion()) {
+            return $_op.getClosureOperands()[arg.getArgNumber()];
+          }
+        }
+        return closureValue;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Returns true if the given operation can exist in the closure.
         Not all operations that a closure can contain are guaranteed to be folded
         into the closure, such as when the operation may have side-effects.
@@ -91,6 +109,32 @@ def Util_ClosureOpInterface : OpInterface<"ClosureOpInterface"> {
       /*methodName=*/"getResultAccess",
       /*args=*/(ins "unsigned":$resultIndex)
     >,
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// IREE::Util::InferIntDivisibilityOpInterface
+//===----------------------------------------------------------------------===//
+
+def InferIntDivisibilityOpInterface :
+    OpInterface<"InferIntDivisibilityOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Allows operations to participate in integer divisibility analysis.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+    /*desc=*/[{
+
+    }],
+    /*retTy=*/"void",
+    /*methodName=*/"inferResultDivisibility",
+    /*args=*/(ins
+        "::llvm::ArrayRef<::mlir::iree_compiler::IREE::Util::IntegerDivisibility>":$argDivs,
+        "::mlir::iree_compiler::IREE::Util::SetIntDivisibilityFn":$setResultDivs)
+    >
   ];
 }
 
@@ -150,7 +194,8 @@ def Util_GlobalOpInterface : OpInterface<"GlobalOpInterface"> {
         // Assumed by accessors:
         TypeAttr:$type,
         UnitAttr:$is_mutable,
-        OptionalAttr<AnyAttr>:$initial_value
+        OptionalAttr<AnyAttr>:$initial_value,
+        OptionalAttr<Util_InliningPolicyAttrInterface>:$inlining_policy
       );
     ```
   }];
@@ -267,6 +312,50 @@ def Util_GlobalOpInterface : OpInterface<"GlobalOpInterface"> {
         }
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns an optional inlining policy for the global.
+      }],
+      /*retTy=*/"IREE::Util::InliningPolicyAttrInterface",
+      /*methodName=*/"getGlobalInliningPolicy",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getInliningPolicyAttr();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Sets (or clears) the inlining policy of the global.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"setGlobalInliningPolicy",
+      /*args=*/(ins "IREE::Util::InliningPolicyAttrInterface":$value),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (value) {
+          $_op.setInliningPolicyAttr(value);
+        } else {
+          $_op.removeInliningPolicyAttr();
+        }
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Creates an operation loading the value of the global.
+      }],
+      /*retTy=*/"IREE::Util::GlobalLoadOpInterface",
+      /*methodName=*/"createLoadOp",
+      /*args=*/(ins "Location":$loc, "OpBuilder &":$builder)
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Creates an operation storing the value of the global.
+      }],
+      /*retTy=*/"IREE::Util::GlobalStoreOpInterface",
+      /*methodName=*/"createStoreOp",
+      /*args=*/(ins "Location":$loc, "Value":$value, "OpBuilder &":$builder)
+    >,
   ];
 
   let verify = [{
@@ -320,6 +409,35 @@ def Util_GlobalAddressOpInterface : Util_GlobalAccessorOpInterface<"GlobalAddres
         return $_op->getResult(0);
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if the global whose address is taken is immutable outside
+        of initializers.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isGlobalImmutable",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getIsImmutable();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Sets whether the global is immutable outside of initializers.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"setGlobalImmutable",
+      /*args=*/(ins "bool":$value),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (value) {
+          $_op.setIsImmutableAttr(UnitAttr::get($_op.getContext()));
+        } else {
+          $_op.removeIsImmutableAttr();
+        }
+      }]
+    >,
   ];
 }
 
@@ -357,6 +475,34 @@ def Util_GlobalLoadOpInterface : Util_GlobalAccessorOpInterface<"GlobalLoadOpInt
         return $_op->getResult(0);
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if the global loaded is immutable outside of initializers.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isGlobalImmutable",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getIsImmutable();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Sets whether the global is immutable outside of initializers.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"setGlobalImmutable",
+      /*args=*/(ins "bool":$value),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (value) {
+          $_op.setIsImmutableAttr(UnitAttr::get($_op.getContext()));
+        } else {
+          $_op.removeIsImmutableAttr();
+        }
+      }]
+    >,
   ];
 }
 
@@ -386,12 +532,24 @@ def Util_GlobalStoreOpInterface : Util_GlobalAccessorOpInterface<"GlobalStoreOpI
       /*desc=*/[{
         Returns the value stored by the operation.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getStoredGlobalValue",
       /*args=*/(ins),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         return $_op.getValue();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Sets the value stored by the operation.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"setStoredGlobalValue",
+      /*args=*/(ins "Value":$value),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getValueMutable().assign(value);
       }]
     >,
   ];
@@ -411,7 +569,7 @@ def Util_GlobalLoadIndirectOpInterface : Util_GlobalIndirectAccessorOpInterface<
       /*desc=*/[{
         Returns the global symbol accessed by the op.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getGlobal",
       /*args=*/(ins)
     >,
@@ -440,7 +598,7 @@ def Util_GlobalStoreIndirectOpInterface : Util_GlobalIndirectAccessorOpInterface
       /*desc=*/[{
         Returns the global symbol accessed by the op.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getGlobal",
       /*args=*/(ins)
     >,
@@ -448,12 +606,24 @@ def Util_GlobalStoreIndirectOpInterface : Util_GlobalIndirectAccessorOpInterface
       /*desc=*/[{
         Returns the value stored by the operation.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getStoredGlobalValue",
       /*args=*/(ins),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         return $_op.getValue();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Sets the value stored by the operation.
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"setStoredGlobalValue",
+      /*args=*/(ins "Value":$value),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_op.getValueMutable().assign(value);
       }]
     >,
   ];
@@ -486,7 +656,7 @@ def Util_NumericCastOpInterface : OpInterface<"NumericCastOpInterface"> {
       /*desc=*/[{
         Gets the input value.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getInput",
       /*args=*/(ins),
       /*methodBody=*/[{}],
@@ -512,7 +682,7 @@ def Util_NumericCastOpInterface : OpInterface<"NumericCastOpInterface"> {
       /*desc=*/[{
         Gets the result casted value.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getCasted",
       /*args=*/(ins),
       /*methodBody=*/[{}],
@@ -597,6 +767,17 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
   let methods = [
     InterfaceMethod<
       /*desc=*/[{
+      }],
+      /*retTy=*/"void",
+      /*methodName=*/"getAllTiedOperands",
+      /*args=*/(ins "SmallVectorImpl<int64_t> &":$indices),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        IREE::Util::detail::getAllTiedOperands($_op, indices);
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Returns the set of operands that results may be tied to as an
         (index, length) pair ala getODSOperandIndexAndLength.
 
@@ -607,8 +788,9 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         of successor operands.
       }],
       /*retTy=*/"std::pair<unsigned, unsigned>",
-      /*methodName=*/"getTiedOperandsIndexAndLength", (ins),
-      /*args=*/[{}],
+      /*methodName=*/"getTiedOperandsIndexAndLength",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         return {0, $_op->getNumOperands()};
       }]
@@ -623,8 +805,9 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         ones it will tie.
       }],
       /*retTy=*/"std::pair<unsigned, unsigned>",
-      /*methodName=*/"getTiedResultsIndexAndLength", (ins),
-      /*args=*/[{}],
+      /*methodName=*/"getTiedResultsIndexAndLength",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         return {0, $_op->getNumResults()};
       }]
@@ -640,7 +823,7 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         defining op, and the search will not continue past branches.
         If the result is untied then the result itself is returned.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getTiedResult",
       /*args=*/(ins "unsigned":$resultIndex),
       /*methodBody=*/[{}],
@@ -653,12 +836,12 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         Returns the operand tied to the given result of the op or nullptr if
         none.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getTiedResultOperand",
       /*args=*/(ins "Value":$result),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
-        auto resultIndex = result.cast<mlir::OpResult>().getResultNumber();
+        auto resultIndex = cast<mlir::OpResult>(result).getResultNumber();
         auto operandIndex = cast<TiedOpInterface>($_op.getOperation())
             .getTiedResultOperandIndex(resultIndex);
         return operandIndex.has_value() ?
@@ -673,7 +856,7 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         Note that the index returned is into the full range of all operands of
         the current op.
       }],
-      /*retTy=*/"::llvm::Optional<unsigned>",
+      /*retTy=*/"::std::optional<unsigned>",
       /*methodName=*/"getTiedResultOperandIndex",
       /*args=*/(ins "unsigned":$resultIndex),
       /*methodBody=*/[{}],
@@ -691,7 +874,7 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
       /*retTy=*/"void",
       /*methodName=*/"setTiedResultOperandIndex",
       /*args=*/(ins "unsigned":$resultIndex,
-                    "::llvm::Optional<unsigned>":$operandIndex),
+                    "::std::optional<unsigned>":$operandIndex),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         return IREE::Util::detail::setTiedResultOperandIndex($_op, resultIndex, operandIndex);
@@ -705,7 +888,7 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
         Note that the index returned is into the full range of all operands of
         the current op.
       }],
-      /*retTy=*/"SmallVector<int64_t, 4>",
+      /*retTy=*/"SmallVector<int64_t>",
       /*methodName=*/"getTiedResultOperandIndices",
       /*args=*/(ins),
       /*methodBody=*/[{}],
@@ -756,7 +939,7 @@ def Util_TiedOpInterface : OpInterface<"TiedOpInterface"> {
   }];
 
   let verify = [{
-    return IREE::Util::detail::verifyTiedOp($_op);
+    return IREE::Util::detail::verifyTiedOp(cast<TiedOpInterface>($_op));
   }];
 }
 
@@ -792,15 +975,15 @@ def Util_ShapeAwareOp : OpInterface<"ShapeAwareOpInterface"> {
   let methods = [
     InterfaceMethod<
       [{Returns dynamic dimensions for the given shaped operand index.}],
-      "ValueRange", "getOperandDynamicDims", (ins "unsigned":$idx)
+      "mlir::ValueRange", "getOperandDynamicDims", (ins "unsigned":$idx)
     >,
     InterfaceMethod<
       [{Returns dynamic dimensions for the given shaped result index.}],
-      "ValueRange", "getResultDynamicDims", (ins "unsigned":$idx)
+      "mlir::ValueRange", "getResultDynamicDims", (ins "unsigned":$idx)
     >,
     InterfaceMethod<
       [{Returns dynamic dimensions for the given shaped result value.}],
-      "ValueRange", "getResultDynamicDimsFromValue", (ins "Value":$value),
+      "mlir::ValueRange", "getResultDynamicDimsFromValue", (ins "Value":$value),
       /*defaultImplementation=*/[{
         for (unsigned i = 0; i < $_self->getNumResults(); ++i) {
           if ($_self->getResult(i) == value) {
@@ -836,7 +1019,7 @@ def Util_ShapeAwareOp : OpInterface<"ShapeAwareOpInterface"> {
       /*methodBody=*/[{
         auto shapeAwareOp = dyn_cast<IREE::Util::ShapeAwareOpInterface>(result.getDefiningOp());
         return shapeAwareOp.buildResultShape(
-            result.cast<mlir::OpResult>().getResultNumber(), builder);
+            cast<mlir::OpResult>(result).getResultNumber(), builder);
       }]
     >,
   ];
@@ -915,6 +1098,28 @@ def Util_SizeAwareOp : OpInterface<"SizeAwareOpInterface"> {
   ];
 }
 
+def Util_SizedStorageAttr : AttrInterface<"SizedStorageAttr"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Interface used to query storage requirements for an attribute that is backed
+    by physical storage (memory, disk, or external API).
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the storage size in bytes required by the attribute value.
+        If the value is sub-byte aligned the storage size will be rounded up to
+        the next whole byte.
+      }],
+      /*retTy=*/"int64_t",
+      /*methodName=*/"getStorageSize",
+      /*args=*/(ins)
+    >,
+  ];
+}
+
 //===----------------------------------------------------------------------===//
 // IREE::Util::ReferenceTypeInterface
 //===----------------------------------------------------------------------===//
@@ -954,11 +1159,207 @@ def Util_GlobalType : TypeInterface<"GlobalTypeInterface"> {
       /*defaultImplementation=*/[{
         // If one is a shaped type, then they both must be and have compatible
         // shapes.
-        if ($_type.template isa<ShapedType>() || accessType.isa<ShapedType>()) {
+        if (isa<ShapedType>($_type) || isa<ShapedType>(accessType)) {
           return succeeded(mlir::verifyCompatibleShape($_type, accessType));
         }
         // Otherwise, the types must be the same.
         return $_type == accessType;
+      }]
+    >,
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// IREE::Util::Hoistable*Interface
+//===----------------------------------------------------------------------===//
+
+def Util_HoistableAttrInterface : AttrInterface<"HoistableAttrInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Interface used to control hoisting of dialect attributes associated with
+    ops that are hoisted. Attributes implementing this interface can opt into
+    being replicated onto the global and initializer produced during hoisting.
+
+    Hoisting will walk up ancestors of hoisted ops to see if any contain
+    attributes with this interface to allow context-scoped behavior such as
+    target execution environment for a function.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if dialect attributes of this type are replicated to the
+        global and initializer created during hoisting.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"shouldAttachToHoistedOps",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+  ];
+
+  let extraClassDeclaration = [{
+    // Walks |fromOp| and up to gather all dialect attributes that want to be
+    // hoisted along with it. If the same named attribute is present on multiple
+    // ancestors only the most narrowly scoped value will be used.
+    static void gatherHoistableAttrs(Operation *fromOp,
+                                     NamedAttrList &dialectAttrs);
+
+    // Copies any hoistable attributes from the source op to the target op.
+    static void gatherHoistableAttrs(Operation *fromOp, Operation *toOp);
+  }];
+}
+
+def Util_HoistableOpInterface : OpInterface<"HoistableOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Interface used to control hoisting of ops into globals.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this op is valid to hoist as a transient value in the
+        global initializer.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isHoistableOp",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this op is valid to hoist as a leaf value in the
+        global initializer.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isHoistableLeafOp",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this op is should be treated as atomic from the
+        perspective of the hoisting analysis. This causes all nested ops to
+        share hoistability with this op.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isAtomicallyHoistableOp",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return false;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if the operand for this op is hoistable.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isOperandHoistable",
+      /*args=*/(ins "OpOperand *":$operand),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+  ];
+}
+
+def Util_HoistableType : TypeInterface<"HoistableTypeInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Interface used to control hoisting of variables into globals. It can be
+    used to insert IR immediately before storing a global and after loading it
+    to control the type/layout of the stored global.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this type is valid to hoist as a transient value in the
+        global initializer.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isHoistableType",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if this type is valid to hoist as a leaf value in the
+        global initializer.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isHoistableLeafType",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the preferred type to use for the global the value of this type
+        is being hoisted into.
+      }],
+      /*retTy=*/"mlir::Type",
+      /*methodName=*/"getPreferredStorageType",
+      /*args=*/(ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_type;
+      }]
+    >,
+    StaticInterfaceMethod<
+      /*desc=*/[{
+        Materializes the cast from the original type to the preferred type,
+        inside the initializer and immediately before storing the global.
+      }],
+      /*retTy=*/"mlir::Value",
+      /*methodName=*/"encodeStorageType",
+      /*args=*/(ins
+        "OpBuilder &":$builder,
+        "Location":$loc,
+        "Type":$storageType,
+        "Value":$init
+      ),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return init;
+      }]
+    >,
+    StaticInterfaceMethod<
+      /*desc=*/[{
+        Materializes the cast from the preferred storage type after loading
+        the global back to the original type.
+      }],
+      /*retTy=*/"mlir::Value",
+      /*methodName=*/"decodeStorageType",
+      /*args=*/(ins
+        "OpBuilder &":$builder,
+        "Location":$loc,
+        "Type":$originalType,
+        "Value":$loadedGlobal
+      ),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return loadedGlobal;
       }]
     >,
   ];
@@ -981,7 +1382,7 @@ def Util_SubrangeType : TypeInterface<"SubrangeTypeInterface"> {
       /*desc=*/[{
         Creates an op returning an (offset, length) subrange of a resource.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"createSubrangeOp",
       /*args=*/(ins
         "Location":$loc,
@@ -1008,7 +1409,7 @@ def Util_SubrangeOp : OpInterface<"SubrangeOpInterface"> {
       /*desc=*/[{
         Returns the size-aware source resource the subrange is taken from.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getSubrangeResource",
       /*args=*/(ins),
       /*methodBody=*/[{}]
@@ -1017,7 +1418,7 @@ def Util_SubrangeOp : OpInterface<"SubrangeOpInterface"> {
       /*desc=*/[{
         Returns the total size of the source resource.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getSubrangeResourceSize",
       /*args=*/(ins),
       /*methodBody=*/[{}]
@@ -1026,7 +1427,7 @@ def Util_SubrangeOp : OpInterface<"SubrangeOpInterface"> {
       /*desc=*/[{
         Returns the offset of the taken subrange into the resource.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getSubrangeOffset",
       /*args=*/(ins),
       /*methodBody=*/[{}]
@@ -1035,7 +1436,7 @@ def Util_SubrangeOp : OpInterface<"SubrangeOpInterface"> {
       /*desc=*/[{
         Returns the length of the taken subrange.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getSubrangeLength",
       /*args=*/(ins),
       /*methodBody=*/[{}]
@@ -1045,7 +1446,7 @@ def Util_SubrangeOp : OpInterface<"SubrangeOpInterface"> {
         Returns the resulting subrange value if the op produces one.
         Will be nullptr if the op is only consuming a subrange.
       }],
-      /*retTy=*/"Value",
+      /*retTy=*/"mlir::Value",
       /*methodName=*/"getSubrangeResult",
       /*args=*/(ins),
       /*methodBody=*/[{}]
@@ -1066,7 +1467,7 @@ def Util_SubrangeOperandOpInterface : OpInterface<"SubrangeOperandOpInterface"> 
       /*desc=*/[{
         Returns the subrange operand values for the given flat operand index.
       }],
-      /*retTy=*/"SubrangeOperand",
+      /*retTy=*/"IREE::Util::SubrangeOperand",
       /*methodName=*/"getSubrangeOperand",
       /*args=*/(ins "unsigned":$operandIndex)
     >,
@@ -1076,7 +1477,39 @@ def Util_SubrangeOperandOpInterface : OpInterface<"SubrangeOperandOpInterface"> 
       }],
       /*retTy=*/"void",
       /*methodName=*/"setSubrangeOperand",
-      /*args=*/(ins "unsigned":$operandIndex, "SubrangeOperand":$operand)
+      /*args=*/(ins
+        "unsigned":$operandIndex,
+        "IREE::Util::SubrangeOperand":$operand
+      )
+    >,
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// IREE::Util::InliningPolicyAttrInterface
+//===----------------------------------------------------------------------===//
+
+def Util_InliningPolicyAttrInterface : AttrInterface<"InliningPolicyAttrInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Util";
+
+  let description = [{
+    Interface allowing attributes to control the inlining behavior of functions
+    and globals they are associated with.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if the inlinable operation (function, global, etc) is
+        allowed to be inlined into the inline site (caller, accessor, etc).
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"isLegalToInline",
+      /*args=*/(ins
+        "Operation *":$inlineSite,
+        "Operation *":$inlinable
+      ),
+      /*methodBody=*/[{}]
     >,
   ];
 }
@@ -1085,7 +1518,10 @@ def Util_SubrangeOperandOpInterface : OpInterface<"SubrangeOperandOpInterface"> 
 // IREE::Util::SerializableAttrInterface
 //===----------------------------------------------------------------------===//
 
-def Util_SerializableAttrInterface : AttrInterface<"SerializableAttrInterface"> {
+def Util_SerializableAttrInterface :
+  AttrInterface<"SerializableAttrInterface", [
+    Util_SizedStorageAttr,
+  ]> {
   let cppNamespace = "::mlir::iree_compiler::IREE::Util";
 
   let description = [{
@@ -1099,29 +1535,20 @@ def Util_SerializableAttrInterface : AttrInterface<"SerializableAttrInterface"> 
   let methods = [
     InterfaceMethod<
       /*desc=*/[{
-        Returns the total storage size required by the serialized value.
-        Any of the serialization methods will write precisely this number of
-        bytes.
-      }],
-      /*retTy=*/"int64_t",
-      /*methodName=*/"getStorageSize",
-      /*args=*/(ins)
-    >,
-    InterfaceMethod<
-      /*desc=*/[{
         Serializes the attribute to the given byte vector. The vector will be
         resized to the total storage size upon return.
       }],
       /*retTy=*/"LogicalResult",
       /*methodName=*/"serializeToVector",
       /*args=*/(ins
-        "llvm::support::endianness":$endian,
+        "Location":$loc,
+        "llvm::endianness":$endian,
         "SmallVectorImpl<char> &":$buffer
       ),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         buffer.resize($_attr.getStorageSize());
-        return $_attr.serializeToBuffer(endian, buffer);
+        return $_attr.serializeToBuffer(loc, endian, buffer);
       }]
     >,
     InterfaceMethod<
@@ -1132,7 +1559,8 @@ def Util_SerializableAttrInterface : AttrInterface<"SerializableAttrInterface"> 
       /*retTy=*/"LogicalResult",
       /*methodName=*/"serializeToBuffer",
       /*args=*/(ins
-        "llvm::support::endianness":$endian,
+        "Location":$loc,
+        "llvm::endianness":$endian,
         "ArrayRef<char>":$buffer
       )
     >,
@@ -1144,13 +1572,14 @@ def Util_SerializableAttrInterface : AttrInterface<"SerializableAttrInterface"> 
       /*retTy=*/"LogicalResult",
       /*methodName=*/"serializeToStream",
       /*args=*/(ins
-        "llvm::support::endianness":$endian,
+        "Location":$loc,
+        "llvm::endianness":$endian,
         "llvm::raw_ostream &":$os
       ),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{
         SmallVector<char> buffer;
-        if (failed($_attr.serializeToVector(endian, buffer))) {
+        if (failed($_attr.serializeToVector(loc, endian, buffer))) {
           return failure();
         }
         os.write(reinterpret_cast<const char *>(buffer.data()), buffer.size());
@@ -1158,6 +1587,13 @@ def Util_SerializableAttrInterface : AttrInterface<"SerializableAttrInterface"> 
       }]
     >,
   ];
+
+  let extraClassDeclaration = [{
+    // Serializes |count| copies of |elementAttr| to |os|.
+    static LogicalResult serializeSplatValue(
+        Location loc, Attribute elementAttr, int64_t count,
+        llvm::endianness endian, llvm::raw_ostream &os);
+  }];
 }
 
 #endif  // IREE_DIALECT_UTIL_IR_UTIL_INTERFACES

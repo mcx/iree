@@ -9,28 +9,38 @@
 
 #include <functional>
 
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
+namespace mlir::iree_compiler::Preprocessing {
 
-// Creates a pass to convert linalg convolution ops into linalg.matmul ops
-// using im2col tranformation.
-std::unique_ptr<Pass> createConvertConv2DToImg2ColPass();
+// Enum to represent target op types to be padded.
+enum class PadTargetType {
+  // Convolution Ops.
+  ConvOp = 0,
+  // Contraction-like Ops.
+  ContractionOp = 1,
+  // All ops (both convolution and contraction ops).
+  All = 2,
+};
 
-// A pass to pad linalg ops to the next integer multiple of `paddingSize`.
-std::unique_ptr<Pass> createPadLinalgOpsToIntegerMultiplePass();
+enum class TransposeMatmulInput {
+  // Transpose LHS input matrix.
+  Lhs,
+  // Transpose RHS input matrix.
+  Rhs
+};
 
 //===----------------------------------------------------------------------===//
 // Register all Passes
 //===----------------------------------------------------------------------===//
 
+#define GEN_PASS_DECL
+#include "iree/compiler/Preprocessing/Common/Passes.h.inc" // IWYU pragma: keep
+
 void registerCommonPreprocessingPasses();
 
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::Preprocessing
 
-#endif  // IREE_COMPILER_PREPROCESSING_COMMON_PASSES_H_W_TRANSFORMS_PASSES_H_
+#endif // IREE_COMPILER_PREPROCESSING_COMMON_PASSES_H_

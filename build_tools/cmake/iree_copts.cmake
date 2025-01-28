@@ -68,11 +68,21 @@ set(IREE_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(IREE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(IREE_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
-# Key compilation options
+# By default we apply visibility control explicitly. However, this is available
+# as an option for users who need to control this explicitly (i.e. if
+# re-exporting, etc). Defaulting this to on with explicit API control macros
+# makes Linux and Windows behave similarly with respect to shared libraries
+# and DLLs.
+if(IREE_VISIBILITY_HIDDEN)
 iree_select_compiler_opts(IREE_DEFAULT_COPTS
   CLANG_OR_GCC
     "-fvisibility=hidden"
+)
+endif()
 
+# Key compilation options
+iree_select_compiler_opts(IREE_DEFAULT_COPTS
+  CLANG_OR_GCC
     # NOTE: The RTTI setting must match what LLVM was compiled with (defaults
     # to RTTI disabled).
     "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>"
@@ -115,6 +125,13 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
     # https://docs.microsoft.com/en-us/cpp/c-runtime-library/secure-template-overloads
     "/D_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES"
 
+    # MLIR defines std::complex<APFloat>, which is invalid per the C++ spec
+    # stating that std::complex must only be used with builtin compiler types.
+    # Until MLIR cleans this up we silence it so that we don't end up with
+    # a warning per file that includes mlir/IR/BuiltinAttributes.h.
+    # Tracking issue: https://github.com/llvm/llvm-project/issues/65255
+    "/D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING"
+
     # Configure RTTI generation.
     # - /GR - Enable generation of RTTI (default)
     # - /GR- - Disables generation of RTTI
@@ -128,11 +145,12 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
     # https://docs.microsoft.com/en-us/cpp/build/reference/bigobj-increase-number-of-sections-in-dot-obj-file
     "/bigobj"
 
-    # Use the modern C preprocessor to more closely match standards/clang/gcc behavior.
-    "/Zc:preprocessor"
-
     # Enable C11 standards conforming mode.
     "$<$<COMPILE_LANGUAGE:C>:/std:c11>"
+
+  MSVC
+    # Use the modern C preprocessor to more closely match standards/clang/gcc behavior.
+    "/Zc:preprocessor"
 )
 
 # Compiler diagnostics.
@@ -144,8 +162,10 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
   # internally is very useful when importing. If you feel that some of these
   # should be different (especially more strict), please raise an issue!
   CLANG
-    "-Werror"
+    "$<$<BOOL:${IREE_ENABLE_WERROR_FLAG}>:-Werror>"
     "-Wall"
+
+    "-Wno-error=deprecated-declarations"  # Want to see them but defaults to error.
 
     # Disable warnings we don't care about or that generally have a low
     # signal/noise ratio.
@@ -174,10 +194,14 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
     "-Wno-unused-local-typedef"
     "-Wno-unused-private-field"
     "-Wno-user-defined-warnings"
+    "-Wno-missing-braces"  # Inconsistently triggers between C++/C headers.
 
     # Explicitly enable some additional warnings.
     # Some of these aren't on by default, or under -Wall, or are subsets of
     # warnings turned off above.
+    #
+    # TODO(#16946): reenable -Wc++20-extensions.
+    # "-Wc++20-extensions"  # Enable until we use C++20 across all compilers
     "-Wctad-maybe-unsupported"
     "-Wfloat-overflow-conversion"
     "-Wfloat-zero-conversion"
@@ -198,20 +222,36 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
     "-Wunused-comparison"
     "-Wvla"
 
+  CLANG_GTE_12
     # Clang is lax by default on SIMD vector typing. GCC is strict by default.
+    # Some Clang's circa version 10 had incorrect return types for some
+    # intrinsics (#14168).
     "-fno-lax-vector-conversions"
 
-  # TODO(#6959): Enable -Werror once we have a presubmit CI.
   GCC
     "-Wall"
+    "$<$<BOOL:${IREE_ENABLE_WERROR_FLAG}>:-Werror>"
+    "-Wno-error=deprecated-declarations"  # Want to see them but defaults to error.
+
+    "-Wno-address"  # https://github.com/iree-org/iree/issues/16016
     "-Wno-address-of-packed-member"
     "-Wno-comment"
     "-Wno-format-zero-length"
+    "-Wno-uninitialized"
+    # gcc complains more than clang, see #15631 and #15638
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-overloaded-virtual>
     # Technically UB but needed for intrusive ptrs
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-invalid-offsetof>
     $<$<COMPILE_LANGUAGE:C>:-Wno-pointer-sign>
     "-Wno-sign-compare"
     "-Wno-unused-function"
+    "-Wno-unknown-pragmas"
+    "-Wno-unused-but-set-variable"
+    "-Wno-misleading-indentation"
+
+  GCC_GTE_13
+    # False positives? Not useful? https://stackoverflow.com/a/78760067
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-dangling-reference>
 
   MSVC_OR_CLANG_CL
     # Default warning level (severe + significant + production quality).
@@ -266,6 +306,7 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
     "/wd4065"  # allow: switch statement contains 'default' but no 'case' labels
     "/wd4141"  # allow: inline used more than once
     "/wd4624"  # allow: destructor was implicitly defined as deleted
+    "/wd4576"  # allow: a parenthesized type followed by an initializer list is a non-standard explicit type conversion syntax
 
     # TODO(benvanik): confirm these are all still required and document:
     "/wd4146"  # operator applied to unsigned type, result still unsigned
@@ -281,6 +322,24 @@ if(IREE_DEV_MODE)
     CLANG_OR_GCC
       "-Wno-error=unused-parameter"
       "-Wno-error=unused-variable"
+  )
+endif()
+
+#-------------------------------------------------------------------------------
+# Enable frame pointers in IREE_DEV_MODE and in RelWithDebInfo build type ---
+# these are conditions under which the instrumentation/debugging/profiling
+# benefits of frame pointers outweigh the cost.
+#
+# `perf record -g` defaults to relying on frame pointers. There is a non-default
+# option `perf record --call-graph=dwarf`, to rely on debug info instead. It
+# produces inferior results and has a discoverability issue anyway.
+#-------------------------------------------------------------------------------
+
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _UPPERCASE_CMAKE_BUILD_TYPE)
+if (IREE_DEV_MODE OR (_UPPERCASE_CMAKE_BUILD_TYPE STREQUAL "RELWITHDEBINFO"))
+  iree_select_compiler_opts(IREE_DEFAULT_COPTS
+    CLANG_OR_GCC
+      "-fno-omit-frame-pointer"
   )
 endif()
 
@@ -309,21 +368,23 @@ iree_select_compiler_opts(IREE_DEFAULT_COPTS
 # compatible solution.
 #
 # See also:
-#   https://github.com/openxla/iree/issues/4665.
+#   https://github.com/iree-org/iree/issues/4665.
 #   https://discourse.cmake.org/t/how-to-fix-build-warning-d9025-overriding-gr-with-gr/878
 #   https://gitlab.kitware.com/cmake/cmake/-/issues/20610
 if(CMAKE_CXX_FLAGS AND "${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   string(REPLACE "/GR" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
+# Find and add threads as dependency.
 if(NOT ANDROID AND IREE_ENABLE_THREADING)
-  iree_select_compiler_opts(_IREE_PTHREADS_LINKOPTS
-    CLANG_OR_GCC
-      "-lpthread"
-  )
+  set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+  set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+  find_package(Threads)
+  set(IREE_THREADS_DEPS Threads::Threads)
 else()
   # Android provides its own pthreads support with no linking required.
 endif()
+
 
 # Emscripten needs -pthread specified in link _and_ compile options when using
 # atomics, shared memory, or pthreads. If we bring our own threading impl and
@@ -352,65 +413,129 @@ iree_select_compiler_opts(IREE_DEFAULT_LINKOPTS
   CLANG_OR_GCC
     # Required by all modern software, effectively:
     "-lm"
-    ${_IREE_PTHREADS_LINKOPTS}
     ${_IREE_LOGGING_LINKOPTS}
   MSVC
     "-natvis:${IREE_ROOT_DIR}/runtime/iree.natvis"
 )
 
-# Our Emscripten library code uses dynCall, which needs these link flags.
-# TODO(scotttodd): Find a way to refactor this, this is nasty to always set :(
-if(EMSCRIPTEN)
+if(EMSCRIPTEN AND IREE_EXTERNAL_WEBGPU_HAL_DRIVER_FOUND)
   iree_select_compiler_opts(IREE_DEFAULT_LINKOPTS
     ALL
-      "-sDYNCALLS=1"
-      "-sEXPORTED_RUNTIME_METHODS=['dynCall']"
+      # TODO(scotttodd): Only add when using WebGPU in a library/binary?
+      "-sUSE_WEBGPU"
+      # Hack: Used to create sync versions of requestAdapter and requestDevice
+      # TODO(scotttodd): Only set for test binaries, avoid sync code in apps
+      #   this doesn't _break_ apps that don't use the sync functions, but it
+      #   does bloat their binary size (and each Emscripten flag comes with
+      #   some risk of breaking compatibility with other features)
+      "-sASYNCIFY"
   )
 endif()
 
 #-------------------------------------------------------------------------------
-# Size-optimized build flags
+# Flag sets used different optimization profiles.
 #-------------------------------------------------------------------------------
 
-# TODO(#898): add a dedicated size-constrained configuration.
-if(IREE_SIZE_OPTIMIZED)
-  iree_select_compiler_opts(IREE_SIZE_OPTIMIZED_DEFAULT_COPTS
-    MSVC_OR_CLANG_CL
-      "/GS-"
-      "/GL"
-      "/Gw"
-      "/Gy"
-      "/DNDEBUG"
-      "/Os"
-      "/Oy"
-      "/Zi"
-      "/c"
+iree_select_compiler_opts(IREE_LTO_COPTS
+  CLANG
+    "-flto=${IREE_LTO_MODE}"
+  GCC
+    "-flto"
+    "-fuse-linker-plugin"
+  MSVC_OR_CLANG_CL
+    "/GL"
+)
+
+iree_select_compiler_opts(IREE_LTO_LINKOPTS
+  CLANG
+    "-flto=${IREE_LTO_MODE}"
+  GCC
+    "-flto"
+  MSVC_OR_CLANG_CL
+    "-LTCG"
+)
+
+iree_select_compiler_opts(IREE_SIZE_OPTIMIZED_DEFAULT_COPTS
+  MSVC_OR_CLANG_CL
+    "/GS-"
+    "/Gw"
+    "/Gy"
+    "/DNDEBUG"
+    "/Os"
+    "/Oy"
+    "/Zi"
+    "/c"
+)
+iree_select_compiler_opts(IREE_SIZE_OPTIMIZED_DEFAULT_LINKOPTS
+  MSVC_OR_CLANG_CL
+    "-DEBUG:FULL"
+    "-opt:ref,icf"
+)
+
+# Function which enables various optimization options for a sub-tree by
+# modifying the IREE_DEFAULT_COPTS and IREE_DEFAULT_LINKOPTS that targets
+# created after this point use.
+#
+# Available profiles:
+#   "lto": Applies options to enable link time code generation.
+#   "size": Applies a variety of options to minimize the size of the runtime,
+#     generally at the expense of features but not performance. This implies
+#     LTO.
+#
+# Parameters:
+# PROFILE_NAME: Name of a supported profile or falsey for none.
+# SIZE_INTERFACE_COPTS: Additional IREE_INTERFACE_COPTS to add for the
+#   "size" profile.
+function(iree_enable_optimization_options)
+  cmake_parse_arguments(
+    _RULE
+    ""
+    "PROFILE_NAME"
+    "SIZE_INTERFACE_COPTS"
+    ${ARGN}
   )
-  iree_select_compiler_opts(IREE_SIZE_OPTIMIZED_DEFAULT_LINKOPTS
-    MSVC_OR_CLANG_CL
-      "-DEBUG:FULL"
-      "-LTCG"
-      "-opt:ref,icf"
+
+  if(NOT _RULE_PROFILE_NAME)
+    # Do nothing.
+    return()
+  endif()
+
+  set(_ADDL_COPTS)
+  set(_ADDL_INTERFACE_COPTS)
+  set(_ADDL_LINKOPTS)
+
+  if(_RULE_PROFILE_NAME STREQUAL "lto")
+    set(_ADDL_COPTS ${IREE_LTO_COPTS})
+    set(_ADDL_LINKOPTS ${IREE_LTO_LINKOPTS})
+  elseif(_RULE_PROFILE_NAME STREQUAL "size")
+    # Size optimized assumes LTO.
+    # Size optimized often also elides logging and various status reporting,
+    # which can result in unused-but-set-variable style warnings. Disable those.
+    iree_select_compiler_opts(_ADDL_COPTS
+      ALL
+        ${IREE_LTO_COPTS}
+        ${IREE_SIZE_OPTIMIZED_DEFAULT_COPTS}
+      CLANG_OR_GCC
+        -Wno-unused-but-set-variable
+    )
+    set(_ADDL_INTERFACE_COPTS "${_RULE_SIZE_INTERFACE_COPTS}")
+    set(_ADDL_LINKOPTS
+      ${IREE_LTO_LINKOPTS}
+      ${IREE_SIZE_OPTIMIZED_DEFAULT_LINKOPTS}
+    )
+  else()
+    message(FATAL_ERROR "Unrecognized size optimization profile name '${_RULE_PROFILE_NAME}'. Expected one of 'lto', 'size'")
+  endif()
+
+  message(STATUS "Enabled optimization profile '${_RULE_PROFILE_NAME}' for targets under ${CMAKE_CURRENT_SOURCE_DIR}: \n"
+    "      COPTS: ${_ADDL_COPTS}\n"
+    "      INTERFACE COPTS: ${_ADDL_INTERFACE_COPTS}\n"
+    "      LINKOPTS: ${_ADDL_LINKOPTS}"
   )
-  # TODO(#898): make this only impact the runtime (IREE_RUNTIME_DEFAULT_...).
-  # These flags come from iree/base/config.h:
-  set(IREE_DEFAULT_COPTS
-      "${IREE_DEFAULT_COPTS}"
-      "${IREE_SIZE_OPTIMIZED_DEFAULT_COPTS}"
-      "-DIREE_STATUS_MODE=0"
-      "-DIREE_STATISTICS_ENABLE=0"
-      "-DIREE_HAL_MODULE_STRING_UTIL_ENABLE=0"
-      "-DIREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE=0"
-      "-DIREE_VM_BACKTRACE_ENABLE=0"
-      "-DIREE_VM_BYTECODE_VERIFICATION_ENABLE=0"
-      "-DIREE_VM_EXT_F32_ENABLE=0"
-      "-DIREE_VM_EXT_F64_ENABLE=0"
-  )
-  set(IREE_DEFAULT_LINKOPTS
-      "${IREE_DEFAULT_LINKOPTS}"
-      "${IREE_SIZE_OPTIMIZED_DEFAULT_LINKOPTS}"
-  )
-endif()
+  set(IREE_DEFAULT_COPTS "${IREE_DEFAULT_COPTS};${_ADDL_COPTS}" PARENT_SCOPE)
+  set(IREE_INTERFACE_COPTS "${IREE_INTERFACE_COPTS};${_ADDL_INTERFACE_COPTS}" PARENT_SCOPE)
+  set(IREE_DEFAULT_LINKOPTS "${IREE_DEFAULT_LINKOPTS};${_ADDL_LINKOPTS}" PARENT_SCOPE)
+endfunction()
 
 #-------------------------------------------------------------------------------
 # Compiler: Clang/LLVM

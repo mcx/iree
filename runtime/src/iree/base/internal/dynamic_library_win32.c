@@ -12,8 +12,6 @@
 #include "iree/base/internal/call_once.h"
 #include "iree/base/internal/dynamic_library.h"
 #include "iree/base/internal/path.h"
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
 
 #if defined(IREE_PLATFORM_WINDOWS)
 
@@ -24,7 +22,6 @@
 #define IREE_HAVE_DYNAMIC_LIBRARY_PDB_SUPPORT 1
 #pragma warning(disable : 4091)
 #include <dbghelp.h>
-
 void IREEDbgHelpLock(void);
 void IREEDbgHelpUnlock(void);
 #endif  // TRACY_ENABLE
@@ -66,13 +63,13 @@ static void iree_dynamic_library_init_temp_paths(void) {
   // See:
   // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppatha
   char temp_path[MAX_PATH];
-  DWORD temp_path_length = GetTempPathA(IREE_ARRAYSIZE(temp_path), temp_path);
+  GetTempPathA(IREE_ARRAYSIZE(temp_path), temp_path);
 
   // Append the process ID to the path; this is like what _mktemp does but
   // without all the hoops.
   snprintf(iree_dynamic_library_temp_path_base_,
            sizeof(iree_dynamic_library_temp_path_base_), "%s\\iree_dylib_%08X",
-           temp_path, GetCurrentProcessId());
+           temp_path, (uint32_t)GetCurrentProcessId());
 
   // Canonicalize away any double path separators.
   iree_file_path_canonicalize(iree_dynamic_library_temp_path_base_,
@@ -94,7 +91,7 @@ static iree_status_t iree_dynamic_library_make_temp_file_path(
   static iree_atomic_int32_t next_unique_id = IREE_ATOMIC_VAR_INIT(0);
   // relaxed because we only care about uniqueness, we don't care about ordering
   // of accesses to unique_id w.r.t. other memory operations.
-  uint32_t unique_id = (uint32_t)iree_atomic_fetch_add_int32(
+  uint32_t unique_id = (uint32_t)iree_atomic_fetch_add(
       &next_unique_id, 1, iree_memory_order_relaxed);
 
   // Allocate storage for the full file path and format it in.
@@ -143,10 +140,10 @@ static iree_status_t iree_dynamic_library_write_temp_file(
   if (iree_status_is_ok(status)) {
     if (WriteFile(file_handle, source_data.data, (DWORD)source_data.data_length,
                   NULL, NULL) == FALSE) {
-      status =
-          iree_make_status(iree_status_code_from_win32_error(GetLastError()),
-                           "unable to write file span of %zu bytes to '%s'",
-                           source_data.data_length, *out_file_path);
+      status = iree_make_status(
+          iree_status_code_from_win32_error(GetLastError()),
+          "unable to write file span of %" PRIhsz " bytes to '%s'",
+          source_data.data_length, *out_file_path);
     }
   }
 
@@ -319,6 +316,37 @@ iree_status_t iree_dynamic_library_lookup_symbol(
                             "symbol '%s' not found in library", symbol_name);
   }
   *out_fn = fn;
+  return iree_ok_status();
+}
+
+iree_status_t iree_dynamic_library_append_symbol_path_to_builder(
+    void* symbol, iree_string_builder_t* builder) {
+  HMODULE hm = NULL;
+  if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        (LPCSTR)symbol, &hm) == 0) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND);
+  }
+
+  char* path_buffer = NULL;
+  iree_host_size_t path_capacity = 0;
+  iree_host_size_t path_size = 0;
+  IREE_RETURN_IF_ERROR(iree_string_builder_reserve_for_append(
+      builder, 64, &path_buffer, &path_capacity));
+  while (1) {
+    path_size = GetModuleFileNameA(hm, path_buffer, path_capacity);
+    if (path_size == 0) {
+      return iree_make_status(IREE_STATUS_NOT_FOUND);
+    }
+    if (path_size == path_capacity ||
+        GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+      IREE_RETURN_IF_ERROR(iree_string_builder_reserve_for_append(
+          builder, path_capacity + MAX_PATH, &path_buffer, &path_capacity));
+      continue;
+    }
+    break;
+  }
+  iree_string_builder_commit_append(builder, path_size);
   return iree_ok_status();
 }
 

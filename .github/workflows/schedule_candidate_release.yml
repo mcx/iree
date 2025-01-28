@@ -1,18 +1,25 @@
 name: Schedule candidate release
 
 on:
+  # Scheduled for 10:00 PM PST
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "0 5 * * *"
 
   workflow_dispatch:
+    inputs:
+      release-commit:
+        description: "Explicit commit to release at (overrides green commit check)"
+        required: false
+        default: ""
 
 jobs:
   tag_release:
+    if: ${{ github.repository_owner == 'iree-org' || github.event_name != 'schedule' }}
     name: "Tag candidate release"
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checking out repository
-        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v3.3.0
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           token: ${{ secrets.WRITE_ACCESS_TOKEN }}
           fetch-depth: 0
@@ -22,16 +29,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          latest_green="$(./build_tools/scripts/get_latest_green.sh)"
-          git checkout "${latest_green}"
-          echo "latest-green=${latest_green}" >> "${GITHUB_OUTPUT}"
+          if [ -z "${{ github.event.inputs.release-commit }}" ]; then
+            release_commit="$(./build_tools/scripts/get_latest_green.sh)"
+          else
+            release_commit="${{ github.event.inputs.release-commit }}"
+          fi
+          git checkout "${release_commit}"
+          echo "release-commit=${release_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Compute version
         run: |
-          package_version="$(printf '%(%Y%m%d)T.${{ github.run_number }}')"
-          tag_name="candidate-${package_version}"
+          # common version + tag
+          package_version="$(python3 build_tools/python_deploy/compute_common_version.py -rc)"
+          tag_name="iree-${package_version}"
           echo "package_version=${package_version}" >> $GITHUB_ENV
           echo "tag_name=${tag_name}" >> $GITHUB_ENV
+
+          # legacy package version (for iree-tools-{tf,tflite})
+          legacy_package_version="$(printf '%(%Y%m%d)T.${{ github.run_number }}')"
+          echo "legacy_package_version=${legacy_package_version}" >> $GITHUB_ENV
+
+          # iree-base-compiler version
+          compiler_package_version="$(python3 build_tools/python_deploy/compute_local_version.py compiler -rc)"
+          echo "compiler_package_version=${compiler_package_version}" >> $GITHUB_ENV
+
+          # iree-base-runtime version
+          runtime_package_version="$(python3 build_tools/python_deploy/compute_local_version.py runtime -rc)"
+          echo "runtime_package_version=${runtime_package_version}" >> $GITHUB_ENV
 
       - name: Updating candidate tag
         run: |
@@ -42,28 +66,30 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e # v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.WRITE_ACCESS_TOKEN }}
+        uses: ncipollo/release-action@cdcc88a9acf3ca41c16c37bb7d21b9ad48560d87 # v1.15.0
         with:
-          tag_name: ${{ env.tag_name }}
-          release_name: iree candidate ${{ env.tag_name }}
-          commitish: ${{ steps.last_green_commit.outputs.latest-green }}
+          tag: ${{ env.tag_name }}
+          name: iree candidate ${{ env.tag_name }}
+          commit: ${{ steps.last_green_commit.outputs.release-commit }}
           body: |
             Automatic candidate release of iree.
           draft: true
           prerelease: true
+          token: ${{ secrets.WRITE_ACCESS_TOKEN }}
 
-      - name: "Invoke workflow :: Build Native Release Packages"
-        uses: benc-uk/workflow-dispatch@4c044c1613fabbe5250deadc65452d54c4ad4fc7 # v1
+      - name: "Invoke workflow :: Build Release Packages"
+        uses: benc-uk/workflow-dispatch@e2e5e9a103e331dad343f381a29e654aea3cf8fc # v1.2.4
         with:
-          workflow: Build Native Release Packages
+          workflow: Build Release Packages
           token: ${{ secrets.WRITE_ACCESS_TOKEN }}
           ref: "${{ env.tag_name }}"
           inputs: |
             {
               "package_suffix": "",
+              "legacy_package_version": "${{ env.legacy_package_version }}",
               "package_version": "${{ env.package_version }}",
+              "compiler_package_version": "${{ env.compiler_package_version }}",
+              "runtime_package_version": "${{ env.runtime_package_version }}",
               "release_id": "${{ steps.create_release.outputs.id }}",
-              "commit": "${{ steps.last_green_commit.outputs.latest-green }}"
+              "commit": "${{ steps.last_green_commit.outputs.release-commit }}"
             }

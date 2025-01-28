@@ -11,33 +11,56 @@
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassOptions.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+static llvm::cl::opt<bool> clAnnotateInputAffinities(
+    "iree-stream-annotate-input-affinities",
+    llvm::cl::desc("Annotates all tensor/resource affinities on the input to "
+                   "the pipeline for debugging."),
+    llvm::cl::init(false));
 
-using FunctionLikeNest = MultiOpNest<func::FuncOp, IREE::Util::InitializerOp>;
+// TODO(hanchung): Enable the pass by default once the implementation is done.
+static llvm::cl::opt<bool> clSpecializeEncodings(
+    "iree-stream-experimental-specialize-encodings",
+    llvm::cl::desc(
+        "Enables SpecializeEncodingPass in Stream pass pipeline. This pass is "
+        "currently under development, so it is not enabled by default. It can "
+        "only handle limited cases at this moment."),
+    llvm::cl::init(false));
+
+namespace mlir::iree_compiler::IREE::Stream {
+
+using FunctionLikeNest =
+    MultiOpNest<func::FuncOp, IREE::Util::InitializerOp, IREE::Util::FuncOp>;
 
 //===----------------------------------------------------------------------===//
-// Utilities
+// --iree-stream-cleanup-pipeline
 //===----------------------------------------------------------------------===//
 
-static void addCleanupPatterns(OpPassManager &passManager) {
+static void buildStreamCleanupPassPipeline(
+    OpPassManager &passManager,
+    const IREE::Stream::TransformOptions &transformOptions) {
   FunctionLikeNest(passManager)
       // Standard MLIR cleanup.
       .addPass(mlir::createCanonicalizerPass)
       .addPass(mlir::createCSEPass)
 
+      // Integer optimizations. These operate best on a canonical form both
+      // for performance (post-simplifications cause less analysis) and
+      // simplified pattern matching.
+      .addPass(IREE::Util::createOptimizeIntArithmeticPass)
+
       // Simplify util.global accesses; this can help with data flow tracking as
       // redundant store-loads are removed.
-      .addPass(IREE::Util::createSimplifyGlobalAccessesPass);
+      .addPass(IREE::Util::createSimplifyGlobalAccessesPass)
+
+      // Aggressive cleanup.
+      .addPass(IREE::Util::createApplyPatternsPass);
 
   // Cleanup and canonicalization of util.global (and other util ops).
-  passManager.addPass(IREE::Util::createApplyPatternsPass());
   passManager.addPass(IREE::Util::createFoldGlobalsPass());
   passManager.addPass(IREE::Util::createFuseGlobalsPass());
 
@@ -49,7 +72,7 @@ static void addCleanupPatterns(OpPassManager &passManager) {
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-tensor-transformation-pipeline
+// --iree-stream-tensor-transformation-pipeline
 //===----------------------------------------------------------------------===//
 
 void buildStreamTensorPassPipeline(OpPassManager &passManager,
@@ -61,18 +84,20 @@ void buildStreamTensorPassPipeline(OpPassManager &passManager,
   // Verify we support the program.
   passManager.addPass(IREE::Stream::createVerifyInputPass());
 
-  // Turn all constant ops into global variables and fix up the IR.
-  // As many locations change and constants are deduplicated we'll end up with
-  // a lot of extraneous IR (mostly global loads) and clean those up here.
-  passManager.addPass(IREE::Stream::createOutlineConstantsPass());
-
-  // Perform cleanup after constnat simplification as more canonicalizers may be
-  // able to kick in.
-  addCleanupPatterns(passManager);
+  // Cleanup the program prior to outlining constants in case there is
+  // propagation or fusion that needs to happen first.
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   //----------------------------------------------------------------------------
   // Conversion
   //----------------------------------------------------------------------------
+
+  // Annotate all ops/resources with the analyzed affinities.
+  // This should have no behavioral changes during conversion but allows for
+  // debugging of analysis errors in end-user tooling.
+  if (clAnnotateInputAffinities) {
+    passManager.addPass(IREE::Stream::createAnnotateAffinitiesPass());
+  }
 
   // Converts from all input dialects into various levels of the stream dialect.
   // Tensor-like things go to stream.tensor.* ops while lower level buffer-like
@@ -87,8 +112,11 @@ void buildStreamTensorPassPipeline(OpPassManager &passManager,
   // Constant/variable optimization
   //----------------------------------------------------------------------------
 
+  // Run inlining after having baked out affinities.
+  passManager.addPass(mlir::createInlinerPass());
+
   // Cleanup globals that were created during conversion.
-  addCleanupPatterns(passManager);
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   // Bring all initializers together so that we can schedule them.
   passManager.addPass(IREE::Util::createCombineInitializersPass());
@@ -101,10 +129,20 @@ void buildStreamTensorPassPipeline(OpPassManager &passManager,
   // TODO(benvanik): compute affinities for executables.
   // TODO(benvanik): annotate all dispatches with preferred executable affinity.
   // TODO(benvanik): DFA to specify all value affinities and pin dispatches.
+
+  // TODO(multi-device): it's really nice to be able to verify here but it
+  // prevents compiling to stream without devices specified or continuation at
+  // various phases. It'd be nice to find a way to enable this when the user
+  // expects it to work and otherwise not.
+  //
+  // Verify that all ops that may require affinities have them assigned or
+  // available (on a parent scope, etc). This allows subsequent passes to trust
+  // that an affinity lookup will always return a valid affinity.
+  // passManager.addPass(IREE::Stream::createVerifyAffinitiesPass());
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-async-transformation-pipeline
+// --iree-stream-async-transformation-pipeline
 //===----------------------------------------------------------------------===//
 
 void buildStreamAsyncPassPipeline(OpPassManager &passManager,
@@ -113,6 +151,10 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   // Tensor lowering and resource management
   //----------------------------------------------------------------------------
 
+  if (clSpecializeEncodings) {
+    passManager.addPass(IREE::Stream::createSpecializeEncodingsPass());
+  }
+
   // Lower stream.tensor.* ops to stream.async.* ops based on
   // affinity/configuration assigned during placement.
   FunctionLikeNest(passManager)
@@ -120,10 +162,11 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   passManager.addNestedPass<IREE::Stream::ExecutableOp>(
       IREE::Stream::createEncodeDeviceTensorsPass());
 
-  // Expand builtins to dispatches. This may introduce new executables.
-  passManager.addPass(IREE::Stream::createMaterializeBuiltinsPass());
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
-  addCleanupPatterns(passManager);
+  // Everything must now be in stream.async.* form but we don't yet have
+  // lifetime assigned.
+  passManager.addPass(IREE::Stream::createVerifyLoweringToAsyncResourcesPass());
 
   // Materialize copy-on-write behavior with explicit stream.async.* ops.
   // This will insert a lot of copies, so follow it up with a pass that elides
@@ -132,7 +175,8 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   // required for correct execution while copy elision is for performance only
   // (though it's critical enough that it is not optional).
   FunctionLikeNest(passManager)
-      .addPass(IREE::Stream::createMaterializeCopyOnWritePass);
+      .addPass(IREE::Stream::createMaterializeCopyOnWritePass)
+      .addPass(mlir::createCanonicalizerPass);
   passManager.addPass(IREE::Stream::createElideAsyncCopiesPass());
   FunctionLikeNest(passManager)
       .addPass(mlir::createCanonicalizerPass)
@@ -143,7 +187,17 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   // move across devices. We do it before scheduling waves as lifetime doesn't
   // change and it makes the IR cleaner.
   passManager.addPass(IREE::Stream::createRefineUsagePass());
-  addCleanupPatterns(passManager);
+
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
+
+  // Verify all stream.async.* op access ranges that we can by taking advantage
+  // of statically available information or that which we can infer from data
+  // flow analysis. Because this may require a global analysis it's best done in
+  // a pass instead of individual op verifiers. We could run the pass more
+  // frequently above or move some of the simpler checks to op verifiers if we
+  // wanted to catch errors earlier but this is mostly a guard before we go into
+  // the stream.cmd.* layer.
+  passManager.addPass(IREE::Stream::createVerifyAsyncAccessRangesPass());
 
   //----------------------------------------------------------------------------
   // Stream formation and scheduling
@@ -155,27 +209,39 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
       // Group concurrently executable work into waves.
       .addPass(IREE::Stream::createScheduleConcurrencyPass);
 
+  // When synchronous initialization is requested we need to separate any work
+  // behind a timepoint in the initializer from the consumers of that timepoint.
+  if (transformOptions.initializationMode ==
+      IREE::Stream::InitializationMode::Synchronous) {
+    passManager.addPass(IREE::Stream::createSyncInitializersPass());
+  }
+
   // Materialize timepoints across the entire module. This simplifies scheduling
   // of the timeline as we can shake the IR and see what timepoints we still
   // have left.
   passManager.addPass(IREE::Stream::createPropagateTimepointsPass());
-  addCleanupPatterns(passManager);
+
+  // Expand builtins to dispatches. This may introduce new executables.
+  // We do this after scheduling so that we preserve the semantics of the ops
+  // for partitioning/placement before turning them into opaque dispatches.
+  passManager.addPass(IREE::Stream::createMaterializeBuiltinsPass());
+
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   // Everything must now be in stream.async.* form.
   passManager.addPass(IREE::Stream::createVerifyLoweringToAsyncPass());
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-cmd-transformation-pipeline
+// --iree-stream-cmd-transformation-pipeline
 //===----------------------------------------------------------------------===//
 
 void buildStreamCmdPassPipeline(OpPassManager &passManager,
                                 const TransformOptions &transformOptions) {
   // Schedule fine-grained allocations and insert placeholders for larger/longer
   // lifetime allocations.
+  passManager.addPass(IREE::Stream::createScheduleAllocationPass());
   FunctionLikeNest(passManager)
-      .addPass(IREE::Stream::createScheduleAllocationPass)
-
       // TODO(benvanik): passes to convert alloc to alloca and thread through
       // streams. Ideally all transient allocs become stream-ordered allocas.
       // createPropagateTransientsPass()
@@ -185,19 +251,20 @@ void buildStreamCmdPassPipeline(OpPassManager &passManager,
       // storage buffers and upload logic.
       .addPass(IREE::Stream::createPackConstantsPass)
 
-      // Pack fused allocations based on lifetime.
-      .addPass(IREE::Stream::createPackAllocationsPass)
-
       // Layout packed slices to emit the arithmetic required for all resource
       // offsets. This enables us to propagate the subviews across the program
       // below.
-      .addPass(IREE::Stream::createLayoutSlicesPass);
+      .addPass(IREE::Stream::createLayoutSlicesPass)
+
+      // Apply canonicalization patterns to clean up subview ops prior to
+      // propagating subranges.
+      .addPass(mlir::createCanonicalizerPass);
 
   // Propagate subviews throughout the program to unify resource storage access.
   // After propagation many resource SSA values can be deduped or folded by the
   // cleanup patterns.
   passManager.addPass(IREE::Util::createPropagateSubrangesPass());
-  addCleanupPatterns(passManager);
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   // TODO(benvanik): outline streams (ala dispatch regions). Note that we may
   // want to do this earlier to enable better deduplication but that makes the
@@ -209,14 +276,14 @@ void buildStreamCmdPassPipeline(OpPassManager &passManager,
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-optimization-pipeline
+// --iree-stream-optimization-pipeline
 //===----------------------------------------------------------------------===//
 
 void buildStreamOptimizationPassPipeline(
     OpPassManager &passManager, const TransformOptions &transformOptions) {
   // Forming streams involves a fair amount of subgraph stitching, which can
   // cause duplication. Run CSE to collapse.
-  addCleanupPatterns(passManager);
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   // If any scf ops crept in we get rid of them here. We should be able to
   // support them all the way through the stream dialect but some passes are not
@@ -236,7 +303,7 @@ void buildStreamOptimizationPassPipeline(
     OpPassManager ipoPipeline(mlir::ModuleOp::getOperationName());
 
     // IPO and other cleanups.
-    addCleanupPatterns(ipoPipeline);
+    buildStreamCleanupPassPipeline(ipoPipeline, transformOptions);
 
     // TODO(#9747): elide timepoints that are know-reached due to host
     // synchronization via stream.timepoint.await.
@@ -270,14 +337,16 @@ void buildStreamOptimizationPassPipeline(
   // sites. This allows codegen to see the potential values for the operands
   // when operating locally on executables.
   passManager.addPass(IREE::Stream::createAnnotateDispatchArgumentsPass());
+  passManager.addPass(IREE::Stream::createAnnotateDispatchAssumptionsPass());
 
   // Pack dispatch operands on stream.executable into i32 values.
   // We do this prior to exiting the pipeline as here we can still easily
   // add/remove operands.
   passManager.addPass(IREE::Stream::createPackDispatchOperandsPass());
 
-  // Folding operands requires that CSE folds the inputs that we check for.
-  passManager.addPass(mlir::createCSEPass());
+  // Folding operands requires that canonicalization/CSE folds the inputs that
+  // we check for.
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
   passManager.addPass(IREE::Stream::createFoldUniformOperandsPass());
 
   // Only want to specialize after we've added all the operands we need above.
@@ -292,7 +361,7 @@ void buildStreamOptimizationPassPipeline(
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-transformation-pipeline
+// --iree-stream-transformation-pipeline
 //===----------------------------------------------------------------------===//
 
 void buildStreamTransformPassPipeline(
@@ -309,9 +378,11 @@ void buildStreamTransformPassPipeline(
   // Optimizations such as dispatch operand fusion remove information we can use
   // to determine memory usage by dispatches.
   if (transformOptions.dumpStatisticsFormat != DumpOutputFormat::None) {
-    passManager.addPass(IREE::Stream::createDumpStatisticsPass(
-        transformOptions.dumpStatisticsFormat,
-        transformOptions.dumpStatisticsFile));
+    DumpStatisticsPassOptions dumpStatisticsOptions;
+    dumpStatisticsOptions.outputFormat = transformOptions.dumpStatisticsFormat;
+    dumpStatisticsOptions.outputFile = transformOptions.dumpStatisticsFile;
+    passManager.addPass(
+        IREE::Stream::createDumpStatisticsPass(dumpStatisticsOptions));
   }
 
   //----------------------------------------------------------------------------
@@ -324,11 +395,8 @@ void buildStreamTransformPassPipeline(
   // Post-pipeline cleanup
   //----------------------------------------------------------------------------
 
-  // Memoize shared resources.
-  passManager.addPass(IREE::Stream::createMemoizeChannelsPass());
-
   // Final cleanup after we optimize dispatches and fuse operands and bindings.
-  addCleanupPatterns(passManager);
+  buildStreamCleanupPassPipeline(passManager, transformOptions);
 
   // Symbol DCE any remaining variables/functions that are now no longer
   // required.
@@ -339,7 +407,23 @@ void buildStreamTransformPassPipeline(
 // Registration
 //===----------------------------------------------------------------------===//
 
-void registerStreamTransformPassPipelines() {
+namespace {
+#define GEN_PASS_REGISTRATION
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc" // IWYU pragma: export
+} // namespace
+
+void registerStreamPasses() {
+  // Generated.
+  registerPasses();
+
+  // Pipelines.
+  PassPipelineRegistration<TransformOptions> cleanupPassPipeline(
+      "iree-stream-cleanup-pipeline",
+      "Runs the cleanup passes that are performed between stages of the full "
+      "stream pipeline.",
+      [](OpPassManager &passManager, const TransformOptions &transformOptions) {
+        buildStreamCleanupPassPipeline(passManager, transformOptions);
+      });
   PassPipelineRegistration<TransformOptions> tensorPassPipeline(
       "iree-stream-tensor-transformation-pipeline",
       "Lowers source dialects into stream.tensor.* IR.",
@@ -373,20 +457,4 @@ void registerStreamTransformPassPipelines() {
       });
 }
 
-namespace {
-#define GEN_PASS_REGISTRATION
-#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"  // IWYU pragma: export
-}  // namespace
-
-void registerStreamPasses() {
-  // Generated.
-  registerPasses();
-
-  // Pipelines.
-  registerStreamTransformPassPipelines();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

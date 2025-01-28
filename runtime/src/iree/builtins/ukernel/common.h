@@ -7,100 +7,12 @@
 #ifndef IREE_BUILTINS_UKERNEL_COMMON_H_
 #define IREE_BUILTINS_UKERNEL_COMMON_H_
 
-//===----------------------------------------------------------------------===//
-// Generic microkernel library
-//===----------------------------------------------------------------------===//
-//
-// Rules summary:
-// 1. Microkernels are bare-metal, excluding even the standard C library.
-//    a. Can't #include any system header.
-//    b. Can't #include any standard library header.
-//    c. Can't interface with the OS in any way.
-// 2. Microkernels code may be specialized for a target CPU architecture, but
-//    not for a complete target platform/OS/triple. In particular:
-//    a. It's OK to have a `#ifdef __aarch64__` but not a `#ifdef __ANDROID__`.
-// 3. Microkernels are pure/reentrant/stateless.
-//    a. Pure: the only effect of calling a ukernel is to write to destination
-//       buffers specified by pointers passed as ukernel arguments.
-//    b. Reentrant: ukernels may be called concurrently with
-//       themselves, other ukernels, or any other code, on any thread.
-//    c. Stateless: ukernels can't mutate any global (or static local) variable.
-//
-// Explanation:
-// 1. a. Microkernels will eventually be called from IREE LLVM-CPU codegen
-//       modules. So we need to be able to build microkernels for all the target
-//       architectures that iree-compile supports. If microkernels included
-//       system headers, we would need to compile them not merely for each
-//       target architecture but for each target triple, and we would need to
-//       have the system headers for each of these.
-// 1. b. Follows from a. because many standard C library headers #include
-//       system headers. We can't keep track of which do. Even plausibly "pure"
-//       ones such as <stdint.h> have been known to drag in surprising amounts.
-// 1. c. Since we're only targeting a CPU architecture, not a complete target
-//       platform/OS, we can't use any features that rely on the OS. For example
-//       we can't use TLS (thread-local-storage) or Linux's auxiliary vector, or
-//       syscalls.
-//       * This means in particular that any CPU feature detection needs
-//         to be made ahead of calling the ukernel, and the results passed as
-//         ukernel args.
-// 2. We don't want code to depend on platform `#ifdefs` beyond just target CPU
-//    architecture ifdefs, in any way --- even if the code paths are not
-//    interfacing with the OS (see 1.c.), it's still forbidden to have separate
-//    code paths. When we will in the future call microkernels from IREE
-//    LLVM-CPU codegen, this will make it legal for us to compile them only for
-//    each target CPU architecture, which will be easier than having to compile
-//    them separately for each supported target triple.
-// 3. Microkernels are typically called on tiles, after the workload has been
-//    tiled and distributed to several threads. Keeping microkernels pure,
-//    reentrant and stateless keeps them automatically compatible with any
-//    tiling and distribution that we may use in the future.
-//
-// FAQ:
-// Q: Can a microkernel save, change, and restore the CPU float rounding mode?
-//    A: Yes, as long as:
-//       * It properly restores it in all its return paths.
-//       * The CPU rounding mode is accessed in the microkernel's
-//         own local code (as opposed to trying to use some standard library
-//         header for that).
-//       * The CPU architecture treats the rounding mode as a thread-local
-//         setting (this tends to be the case on current CPU architectures).
-// Q: How can a microkernel depend on CPU identification information?
-//    A: Microkernels that need to know CPU identification information, such as
-//       bits indicating support for optional SIMD ISA features, should take
-//       such information as arguments. This moves the problem of obtaining the
-//       CPU identification information to the caller. This serves multiple
-//       purposes:
-//       * This allows writing tests that exercise all variants supported by the
-//         test machine, not just whichever variant would be selected for that
-//         machine.
-//       * On CPU architectures where only the OS can directly access CPU
-//         identification bits (that includes ARM architectures), this is
-//         basically required by rule 1.c. (forbidding microkernels from
-//         querying the OS directly).
-//         - While other CPU architectures like x86 allow userspace processes to
-//           directly query CPU identification, it's best to keep all kernels
-//           on all architectures aligned on this.
-//         - While some OSes may trap CPU identification instructions to make
-//           them appear as succeeding in userspace programs
-//           (https://www.kernel.org/doc/html/latest/arm64/cpu-feature-registers.html),
-//           there are portability, reliability and performance concerns with
-//           that.
-
-// Include the build-system-generated configured header and use it as the only
-// source of information about the target we're compiling against, as opposed to
-// including iree/base/target_platform.h.
-//
-// For example, using IREE_UK_ARCH_ARM_64 (from arch/config.h) rather than
-// IREE_ARCH_ARM_64 (from target_platform.h) means that we can control from a
-// single place in the build system whether we enable ARM_64-specific code paths
-// or stick to generic code.
-#include "iree/builtins/ukernel/arch/config.h"
+#ifdef __cplusplus
+#error This file should only be included in ukernel/ code, which should be C, not C++.
+#endif  // __cplusplus
 
 // Include common flag values, shared with the compiler.
 #include "iree/builtins/ukernel/exported_bits.h"
-
-// Include IREE_UK_STATIC_ASSERT.
-#include "iree/builtins/ukernel/static_assert.h"
 
 // Clang on Windows has __builtin_clzll; otherwise we need to use the
 // windows intrinsic functions.
@@ -110,9 +22,39 @@
 #pragma intrinsic(_BitScanForward)
 #endif  // defined(_MSC_VER)
 
-#ifdef __cplusplus
-extern "C" {
-#endif  // __cplusplus
+//===----------------------------------------------------------------------===//
+// Compiler/version checks
+//===----------------------------------------------------------------------===//
+
+#if defined(__GNUC__)
+#define IREE_UK_COMPILER_CLANG_OR_GCC
+#endif
+
+#define IREE_UK_VERSION_GREATER_EQUAL(a_major, a_minor, b_major, b_minor) \
+  ((a_major > b_major) || ((a_major == b_major) && (a_minor >= b_minor)))
+
+#if defined(__clang__)
+#define IREE_UK_COMPILER_CLANG
+#define IREE_UK_COMPILER_CLANG_VERSION_AT_LEAST(major, minor) \
+  IREE_UK_VERSION_GREATER_EQUAL(__clang_major__, __clang_minor__, major, minor)
+#else  // defined(__clang__)
+#define IREE_UK_COMPILER_CLANG_VERSION_AT_LEAST(major, minor) 0
+#endif  // defined(__clang__)
+
+#if defined(IREE_UK_COMPILER_CLANG_OR_GCC) && !defined(IREE_UK_COMPILER_CLANG)
+#define IREE_UK_COMPILER_GCC
+#define IREE_UK_COMPILER_GCC_VERSION_AT_LEAST(major, minor) \
+  IREE_UK_VERSION_GREATER_EQUAL(__GNUC__, __GNUC_MINOR__, major, minor)
+#else  // defined(__GNUC__) && !defined(IREE_UK_COMPILER_CLANG)
+#define IREE_UK_COMPILER_GCC_VERSION_AT_LEAST(major, minor) 0
+#endif  // defined(__GNUC__) && !defined(IREE_UK_COMPILER_CLANG)
+
+#if defined(_MSC_VER)
+#define IREE_UK_COMPILER_MSVC
+#define IREE_UK_COMPILER_MSVC_VERSION_AT_LEAST(msc_ver) (_MSC_VER >= msc_ver)
+#else  // defined(_MSC_VER)
+#define IREE_UK_COMPILER_MSVC_VERSION_AT_LEAST(msc_ver) 0
+#endif  // defined(_MSC_VER)
 
 //===----------------------------------------------------------------------===//
 // Attributes and metadata
@@ -141,69 +83,27 @@ extern "C" {
 // Local fork of IREE_RESTRICT. We can't #include iree/base/attributes.h because
 // it drags in platform headers, via target_platform.h. TODO, consider sharing
 // this and other attributes that can be defined without any #include.
-#if defined(_MSC_VER) && _MSC_VER >= 1900
+#if IREE_UK_COMPILER_MSVC_VERSION_AT_LEAST(1900)
 #define IREE_UK_RESTRICT __restrict
-#elif defined(_MSC_VER)
+#elif defined(IREE_UK_COMPILER_MSVC)
 #define IREE_UK_RESTRICT
-#elif defined(__cplusplus)
-#define IREE_UK_RESTRICT __restrict__
 #else
 #define IREE_UK_RESTRICT restrict
-#endif  // _MSC_VER
+#endif  // IREE_UK_COMPILER_MSVC_VERSION_AT_LEAST(1900)
 
-// Same as LLVM_BUILTIN_UNREACHABLE. Extremely dangerous. Use only in locations
-// that are provably unreachable (+/- edge case of unreachable-past-assertions
-// discussed below).
-//
-// The potential benefit of UNREACHABLE statements is code size and/or speed
-// optimization. This is an arcane optimization. As such, each use must be
-// carefully justified.
-//
-// There is the edge case of locations that are provably unreachable when
-// optional validation code is enabled, but the validation code may also be
-// disabled, making the location technically reachable. Typically: assertions.
-// Use careful judgement for such cases.
-//
-// A typical use case in microkernels is as follows. A microkernel is
-// parametrized by type triples packed into uint32s, and needs to have a switch
-// statement on those:
-//
-// switch (params->type_triple) {
-//   case iree_uk_mykernel_f32f32f32:  // 0xf5f5f5
-//     return 123;
-//   case iree_uk_mykernel_i8i8i32:  // 0x232325
-//     return 321;
-//   default:
-//     return 0;
-// }
-//
-// As long as the microkernel has validation code (running at least as Debug
-// assertions) validating type_triple, and this code is already past that,
-// and this switch statement covers all valid cases, the `default:` case should
-// be unreachable. Adding an UNREACHABLE statement there can help with code
-// size. This would be negligible if the case constants were small enough to
-// fit in compare-with-immediate instructions, but the 24-bit type triple
-// constants here would typically not, so without UNREACHABLE, the compiler has
-// to fully implement each 24-bit literal separately.
-//
-// https://godbolt.org/z/hTv4qqbx9 shows a snipped similar as above where
-// the __builtin_unreachable shrinks the AArch64 code from 11 to 7 instructions.
-#if IREE_UK_HAVE_BUILTIN(__builtin_unreachable) || defined(__GNUC__)
-#define IREE_UK_ASSUME_UNREACHABLE __builtin_unreachable()
-#elif defined(_MSC_VER)
-#define IREE_UK_ASSUME_UNREACHABLE __assume(false)
-#else
-#define IREE_UK_ASSUME_UNREACHABLE
-#endif
-
-#if IREE_UK_HAVE_ATTRIBUTE(noinline) || \
-    (defined(__GNUC__) && !defined(__clang__))
+#if IREE_UK_HAVE_ATTRIBUTE(noinline) || defined(IREE_UK_COMPILER_GCC)
 #define IREE_UK_ATTRIBUTE_NOINLINE __attribute__((noinline))
 #else
 #define IREE_UK_ATTRIBUTE_NOINLINE
 #endif  // IREE_UK_HAVE_ATTRIBUTE(noinline)
 
-#if defined(__GNUC__) || defined(__clang__)
+#if IREE_UK_HAVE_ATTRIBUTE(always_inline) || defined(IREE_UK_COMPILER_GCC)
+#define IREE_UK_ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define IREE_UK_ATTRIBUTE_ALWAYS_INLINE
+#endif  // IREE_UK_HAVE_ATTRIBUTE(always_inline)
+
+#if defined(IREE_UK_COMPILER_CLANG_OR_GCC)
 #define IREE_UK_LIKELY(x) (__builtin_expect(!!(x), 1))
 #define IREE_UK_UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #else
@@ -211,12 +111,50 @@ extern "C" {
 #define IREE_UK_UNLIKELY(x) (x)
 #endif  // IREE_HAVE_ATTRIBUTE(likely)
 
-#if IREE_UK_HAVE_ATTRIBUTE(aligned) || \
-    (defined(__GNUC__) && !defined(__clang__))
+#if IREE_UK_HAVE_ATTRIBUTE(aligned) || defined(IREE_UK_COMPILER_GCC)
 #define IREE_UK_ATTRIBUTE_ALIGNED(N) __attribute__((aligned(N)))
 #else
 #define IREE_UK_ATTRIBUTE_ALIGNED(N)
 #endif  // IREE_UK_HAVE_ATTRIBUTE(noinline)
+
+#if IREE_UK_HAVE_ATTRIBUTE(maybe_unused) && defined(IREE_UK_COMPILER_CLANG)
+#define IREE_UK_ATTRIBUTE_UNUSED __attribute__((maybe_unused))
+#elif IREE_UK_HAVE_ATTRIBUTE(unused) || defined(IREE_UK_COMPILER_CLANG_OR_GCC)
+#define IREE_UK_ATTRIBUTE_UNUSED __attribute__((unused))
+#else
+#define IREE_UK_ATTRIBUTE_UNUSED
+#endif  // IREE_UK_HAVE_ATTRIBUTE(maybe_unused / unused)
+
+// IREE_UK_UNROLL: request full unrolling of loops with constant trip count.
+#if defined(IREE_UK_COMPILER_CLANG)
+#define IREE_UK_UNROLL _Pragma("clang loop unroll(full)")
+#elif defined(IREE_UK_COMPILER_GCC)
+// GCC requires passing a max unroll factor. 64 should be enough for anybody.
+#define IREE_UK_UNROLL _Pragma("GCC unroll 64")
+#else
+// MSVC doesn't have a pragma unroll.
+#define IREE_UK_UNROLL
+#endif  // defined(IREE_UK_COMPILER_CLANG)
+
+//===----------------------------------------------------------------------===//
+// Local replacement for stdbool.h
+//===----------------------------------------------------------------------===//
+
+// Exactly as in stdbool.h.
+// As stdbool.h is only macros, not typedefs, and it is standardized how these
+// macros expand, we can simply do them here. We still avoid #including it
+// in case in some toolchain it might include unexpected other headers.
+#define bool _Bool
+#define true 1
+#define false 0
+
+//===----------------------------------------------------------------------===//
+// IREE_UK_STATIC_ASSERT, a wrapper around the static-assertion keyword.
+//===----------------------------------------------------------------------===//
+
+// Currently unconditionally _Static_assert since C11, but will have to evaluate
+// to static_assert on C23.
+#define IREE_UK_STATIC_ASSERT(COND) _Static_assert(COND, #COND)
 
 //===----------------------------------------------------------------------===//
 // Local replacements for stdint.h types and constants
@@ -226,9 +164,6 @@ extern "C" {
 
 // These typedefs are making assumptions about the widths of standard C types.
 // These assumptions are guarded by the IREE_UK_STATIC_ASSERT's below.
-// If someday these assumptions fail, then we can always add #if's to control
-// these typedefs, perhaps similarly to what is done for iree_uk_ssize_t
-// below.
 typedef signed char iree_uk_int8_t;
 typedef short iree_uk_int16_t;
 typedef int iree_uk_int32_t;
@@ -247,66 +182,119 @@ IREE_UK_STATIC_ASSERT(sizeof(iree_uk_uint16_t) == 2);
 IREE_UK_STATIC_ASSERT(sizeof(iree_uk_uint32_t) == 4);
 IREE_UK_STATIC_ASSERT(sizeof(iree_uk_uint64_t) == 8);
 
-#define IREE_UK_INT8_MIN (-127i8 - 1)
-#define IREE_UK_INT16_MIN (-32767 - 1)
-#define IREE_UK_INT32_MIN (-2147483647 - 1)
-#define IREE_UK_INT64_MIN (-9223372036854775807LL - 1)
-#define IREE_UK_INT8_MAX 127i8
-#define IREE_UK_INT16_MAX 32767
-#define IREE_UK_INT32_MAX 2147483647
-#define IREE_UK_INT64_MAX 9223372036854775807LL
-#define IREE_UK_UINT8_MAX 0xff
-#define IREE_UK_UINT16_MAX 0xffff
+#define IREE_UK_INT8_MIN -0x80
+#define IREE_UK_INT16_MIN -0x8000
+#define IREE_UK_INT32_MIN -0x80000000
+#define IREE_UK_INT64_MIN -0x8000000000000000LL
+#define IREE_UK_INT8_MAX 0x7f
+#define IREE_UK_INT16_MAX 0x7fff
+#define IREE_UK_INT32_MAX 0x7fffffff
+#define IREE_UK_INT64_MAX 0x7fffffffffffffffLL
+#define IREE_UK_UINT8_MAX 0xffU
+#define IREE_UK_UINT16_MAX 0xffffU
 #define IREE_UK_UINT32_MAX 0xffffffffU
 #define IREE_UK_UINT64_MAX 0xffffffffffffffffULL
 
-// Helper for microkernel input validation
+// Helper for microkernel input validation. Macro to be type-generic.
 #define IREE_UK_VALUE_IN_UNSIGNED_INT_RANGE(VALUE, BIT_COUNT) \
   (((VALUE) >= 0) && !((VALUE) >> (BIT_COUNT)))
 
+// Helper for checking CPU feature requirements.
+static inline bool iree_uk_all_bits_set(const iree_uk_uint64_t val,
+                                        const iree_uk_uint64_t required_bits) {
+  return (val & required_bits) == required_bits;
+}
+
 //===----------------------------------------------------------------------===//
-// Local replacement for ssize_t
+// Architecture detection (copied from target_platorm.h)
 //===----------------------------------------------------------------------===//
 
-// Use iree_uk_ssize_t for all sizes that may need pointer width.
-// For any argument that is known to fit in a specific size prefer that to
-// ensure this code operates well on systems with small/weird widths (x32/ilp32,
-// etc).
-#if IREE_UK_POINTER_SIZE == 4
-typedef iree_uk_int32_t iree_uk_ssize_t;
-#elif IREE_UK_POINTER_SIZE == 8
-typedef iree_uk_int64_t iree_uk_ssize_t;
+#if defined(__arm64) || defined(__aarch64__) || defined(_M_ARM64) || \
+    defined(_M_ARM64EC)
+#define IREE_UK_ARCH_ARM_64 1
+#elif defined(__arm__) || defined(__thumb__) || defined(__TARGET_ARCH_ARM) || \
+    defined(__TARGET_ARCH_THUMB) || defined(_M_ARM)
+#define IREE_UK_ARCH_ARM_32 1
+#endif  // ARM
+
+#if defined(__riscv) && (__riscv_xlen == 32)
+#define IREE_UK_ARCH_RISCV_32 1
+#elif defined(__riscv) && (__riscv_xlen == 64)
+#define IREE_UK_ARCH_RISCV_64 1
+#endif  // RISCV
+
+#if defined(__wasm32__)
+#define IREE_UK_ARCH_WASM_32 1
+#elif defined(__wasm64__)
+#define IREE_UK_ARCH_WASM_64 1
+#endif  // WASM
+
+#if defined(__i386__) || defined(__i486__) || defined(__i586__) || \
+    defined(__i686__) || defined(__i386) || defined(_M_IX86) || defined(_X86_)
+#define IREE_UK_ARCH_X86_32 1
+#elif defined(__x86_64) || defined(__x86_64__) || defined(__amd64__) || \
+    defined(__amd64) || defined(_M_X64)
+#define IREE_UK_ARCH_X86_64 1
+#endif  // X86
+
+//===----------------------------------------------------------------------===//
+// Architecture bitness
+//===----------------------------------------------------------------------===//
+
+#if defined(IREE_UK_ARCH_ARM_64) || defined(IREE_UK_ARCH_RISCV_64) || \
+    defined(IREE_UK_ARCH_WASM_64) || defined(IREE_UK_ARCH_X86_64)
+#define IREE_UK_ARCH_IS_64_BIT
+#elif defined(IREE_UK_ARCH_ARM_32) || defined(IREE_UK_ARCH_RISCV_32) || \
+    defined(IREE_UK_ARCH_WASM_32) || defined(IREE_UK_ARCH_X86_32)
+#define IREE_UK_ARCH_IS_32_BIT
 #else
-#error Unexpected pointer size
+#error Unknown architecture
 #endif
 
-static inline void iree_uk_ssize_swap(iree_uk_ssize_t* a, iree_uk_ssize_t* b) {
-  iree_uk_ssize_t t = *a;
+//===----------------------------------------------------------------------===//
+// iree_uk_index_t: signed integer type, same size as MLIR `index`.
+//===----------------------------------------------------------------------===//
+
+// When ukernels are built as bitcode to embed in the compiler, the requirement
+// here is that the size of iree_uk_index_t equals the size of the compiler's
+// `index` type.
+//
+// So when here we define iree_uk_index_t as a pointer-sized type, there is an
+// implicit assumption about how this ukernel code is built. When building as
+// bitcode to embed in the compiler, this code must be built twice, once for
+// some 32-bit-pointers architecture and once for some 64-bit-pointers
+// architecture. Then the compiler must select the bitcode module that matches
+// the size of the `index` type.
+
+#if defined(IREE_UK_ARCH_IS_64_BIT)
+typedef iree_uk_int64_t iree_uk_index_t;
+#elif defined(IREE_UK_ARCH_IS_32_BIT)
+typedef iree_uk_int32_t iree_uk_index_t;
+#else
+#error Unknown architecture
+#endif
+
+static inline void iree_uk_index_swap(iree_uk_index_t* a, iree_uk_index_t* b) {
+  iree_uk_index_t t = *a;
   *a = *b;
   *b = t;
 }
 
-static inline iree_uk_ssize_t iree_uk_ssize_clamp(iree_uk_ssize_t val,
-                                                  iree_uk_ssize_t min,
-                                                  iree_uk_ssize_t max) {
-  if (val < min) val = min;
-  if (val > max) val = max;
-  return val;
+static inline iree_uk_index_t iree_uk_index_min(iree_uk_index_t a,
+                                                iree_uk_index_t b) {
+  return a <= b ? a : b;
 }
 
-//===----------------------------------------------------------------------===//
-// Local replacement for stdbool.h
-//===----------------------------------------------------------------------===//
+static inline iree_uk_index_t iree_uk_index_max(iree_uk_index_t a,
+                                                iree_uk_index_t b) {
+  return a >= b ? a : b;
+}
 
-#ifndef __cplusplus
-// Exactly as in stdbool.h.
-// As stdbool.h is only macros, not typedefs, and it is standardized how these
-// macros expand, we can simply do them here. We still avoid #including it
-// in case in some toolchain it might include unexpected other headers.
-#define bool _Bool
-#define true 1
-#define false 0
-#endif
+static inline iree_uk_index_t iree_uk_index_clamp(iree_uk_index_t val,
+                                                  iree_uk_index_t min,
+                                                  iree_uk_index_t max) {
+  return iree_uk_index_min(max, iree_uk_index_max(min, val));
+}
 
 //===----------------------------------------------------------------------===//
 // Local replacement for <assert.h>
@@ -384,7 +372,7 @@ typedef iree_uk_uint8_t iree_uk_type_t;
 // Signless integers. Use in microkernels that perform same-bit-width integer
 // arithmetic that is insensitive to signedness. For example, same-bit-width
 // element-wise integer add and mul ops.
-#define IREE_UK_TYPE_CATEGORY_INTEGER 0x20u
+#define IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS 0x20u
 // Signed integers. Use in microkernels that are specifically performing signed
 // integer arithmetic. For example, any mixed-bit-width op that involves a
 // sign-extension (as in arith.extsi).
@@ -412,14 +400,17 @@ enum {
   IREE_UK_TYPE_OPAQUE_16 = IREE_UK_TYPE_CATEGORY_OPAQUE | 4,
   IREE_UK_TYPE_OPAQUE_32 = IREE_UK_TYPE_CATEGORY_OPAQUE | 5,
   IREE_UK_TYPE_OPAQUE_64 = IREE_UK_TYPE_CATEGORY_OPAQUE | 6,
-  IREE_UK_TYPE_INT_8 = IREE_UK_TYPE_CATEGORY_INTEGER | 3,
-  IREE_UK_TYPE_INT_16 = IREE_UK_TYPE_CATEGORY_INTEGER | 4,
-  IREE_UK_TYPE_INT_32 = IREE_UK_TYPE_CATEGORY_INTEGER | 5,
-  IREE_UK_TYPE_INT_64 = IREE_UK_TYPE_CATEGORY_INTEGER | 6,
+  IREE_UK_TYPE_INT_4 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS | 2,
+  IREE_UK_TYPE_INT_8 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS | 3,
+  IREE_UK_TYPE_INT_16 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS | 4,
+  IREE_UK_TYPE_INT_32 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS | 5,
+  IREE_UK_TYPE_INT_64 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS | 6,
+  IREE_UK_TYPE_SINT_4 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED | 2,
   IREE_UK_TYPE_SINT_8 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED | 3,
   IREE_UK_TYPE_SINT_16 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED | 4,
   IREE_UK_TYPE_SINT_32 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED | 5,
   IREE_UK_TYPE_SINT_64 = IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED | 6,
+  IREE_UK_TYPE_UINT_4 = IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED | 2,
   IREE_UK_TYPE_UINT_8 = IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED | 3,
   IREE_UK_TYPE_UINT_16 = IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED | 4,
   IREE_UK_TYPE_UINT_32 = IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED | 5,
@@ -441,11 +432,50 @@ static inline int iree_uk_type_bit_count_log2(iree_uk_type_t t) {
   return t & IREE_UK_TYPE_BIT_COUNT_LOG2_MASK;
 }
 
+// Mutate type category while keeping the same bit-width
+static inline iree_uk_uint8_t iree_uk_type_mutate_category(
+    iree_uk_type_t t, iree_uk_uint8_t new_category) {
+  return new_category | iree_uk_type_bit_count_log2(t);
+}
+
+// Integer type helpers
+static inline iree_uk_uint8_t iree_uk_type_is_integer(iree_uk_type_t t) {
+  switch (iree_uk_type_category(t)) {
+    case IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS:
+    case IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED:
+    case IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static inline iree_uk_uint8_t iree_uk_integer_type_as_signless(
+    iree_uk_type_t t) {
+  IREE_UK_ASSERT(iree_uk_type_is_integer(t));
+  return iree_uk_type_mutate_category(t,
+                                      IREE_UK_TYPE_CATEGORY_INTEGER_SIGNLESS);
+}
+
+static inline iree_uk_uint8_t iree_uk_integer_type_as_signed(iree_uk_type_t t) {
+  IREE_UK_ASSERT(iree_uk_type_is_integer(t));
+  return iree_uk_type_mutate_category(t, IREE_UK_TYPE_CATEGORY_INTEGER_SIGNED);
+}
+
+static inline iree_uk_uint8_t iree_uk_integer_type_as_unsigned(
+    iree_uk_type_t t) {
+  IREE_UK_ASSERT(iree_uk_type_is_integer(t));
+  return iree_uk_type_mutate_category(t,
+                                      IREE_UK_TYPE_CATEGORY_INTEGER_UNSIGNED);
+}
+
 // Behavior is undefined if the bit-count is not a multiple of 8!
 // The current implementation might return a negative value, but don't rely on
 // that.
 static inline int iree_uk_type_size_log2(iree_uk_type_t t) {
-  return iree_uk_type_bit_count_log2(t) - 3;
+  int bit_count_log2 = iree_uk_type_bit_count_log2(t);
+  IREE_UK_ASSERT(bit_count_log2 >= 3);
+  return bit_count_log2 - 3;
 }
 
 static inline int iree_uk_type_bit_count(iree_uk_type_t t) {
@@ -459,6 +489,21 @@ static inline int iree_uk_type_size(iree_uk_type_t t) {
   return 1 << iree_uk_type_size_log2(t);
 }
 
+// Helper to correctly convert a bit-size to a byte-size, rounding up if the
+// bit-size is not a multiple of 8.
+static inline iree_uk_index_t iree_uk_bits_to_bytes_rounding_up(
+    iree_uk_index_t bits) {
+  return (bits + 7) / 8;
+}
+
+// Helper to correctly convert a bit-size to a byte-size, asserting that the
+// bit-size is a multiple of 8.
+static inline iree_uk_index_t iree_uk_bits_to_bytes_exact(
+    iree_uk_index_t bits) {
+  IREE_UK_ASSERT(!(bits % 8));
+  return bits / 8;
+}
+
 //===----------------------------------------------------------------------===//
 // Tuples of types, packed ("tied") into a word.
 //===----------------------------------------------------------------------===//
@@ -470,18 +515,30 @@ static inline int iree_uk_type_size(iree_uk_type_t t) {
 typedef iree_uk_uint16_t iree_uk_type_pair_t;
 typedef iree_uk_uint32_t iree_uk_type_triple_t;
 
-#define IREE_UK_TIE_2_TYPES(B0, B1) ((B0) + ((B1) << 8))
-#define IREE_UK_TIE_3_TYPES(B0, B1, B2) ((B0) + ((B1) << 8) + ((B2) << 16))
+// These need to be macros because they are used to define enum values.
+#define IREE_UK_TIE_2_TYPES(T0, T1) ((T0) + ((T1) << 8))
+#define IREE_UK_TIE_3_TYPES(T0, T1, T2) ((T0) + ((T1) << 8) + ((T2) << 16))
+
+// Convenience macros to build tuples of literal types.
 #define IREE_UK_TIE_2_TYPES_LITERAL(T0, T1) \
   IREE_UK_TIE_2_TYPES(IREE_UK_TYPE_##T0, IREE_UK_TYPE_##T1)
 #define IREE_UK_TIE_3_TYPES_LITERAL(T0, T1, T2) \
   IREE_UK_TIE_3_TYPES(IREE_UK_TYPE_##T0, IREE_UK_TYPE_##T1, IREE_UK_TYPE_##T2)
 
-#define IREE_UK_UNTIE_TYPE(POS, WORD) (((WORD) >> (8 * (POS))) & 0xFF)
+static inline iree_uk_uint32_t iree_uk_tie_2_types(iree_uk_type_t t0,
+                                                   iree_uk_type_t t1) {
+  return IREE_UK_TIE_2_TYPES(t0, t1);
+}
+
+static inline iree_uk_uint32_t iree_uk_tie_3_types(iree_uk_type_t t0,
+                                                   iree_uk_type_t t1,
+                                                   iree_uk_type_t t2) {
+  return IREE_UK_TIE_3_TYPES(t0, t1, t2);
+}
 
 static inline iree_uk_type_t iree_uk_untie_type(int pos,
                                                 iree_uk_uint32_t word) {
-  return IREE_UK_UNTIE_TYPE(pos, word);
+  return (word >> (8 * pos)) & 0xFF;
 }
 
 //===----------------------------------------------------------------------===//
@@ -489,17 +546,17 @@ static inline iree_uk_type_t iree_uk_untie_type(int pos,
 //===----------------------------------------------------------------------===//
 
 // The `restrict` here have the effect of enabling the compiler to rewrite this
-// as a memcpy call.
+// as a iree_uk_memcpy call.
 static inline void iree_uk_memcpy(void* IREE_UK_RESTRICT dst,
                                   const void* IREE_UK_RESTRICT src,
-                                  iree_uk_ssize_t size) {
-  for (iree_uk_ssize_t i = 0; i < size; ++i)
+                                  iree_uk_index_t size) {
+  for (iree_uk_index_t i = 0; i < size; ++i)
     ((char*)dst)[i] = ((const char*)src)[i];
 }
 
-static inline void iree_uk_memset(void* buf, int val, iree_uk_ssize_t n) {
+static inline void iree_uk_memset(void* buf, int val, iree_uk_index_t n) {
   // This naive loop is lifted to a memset by both clang and gcc on ARM64.
-  for (iree_uk_ssize_t i = 0; i < n; ++i) ((char*)buf)[i] = val;
+  for (iree_uk_index_t i = 0; i < n; ++i) ((char*)buf)[i] = val;
 }
 
 //===----------------------------------------------------------------------===//
@@ -557,8 +614,181 @@ static inline int iree_uk_ceil_log2_u32(const iree_uk_uint32_t n) {
   return n <= 1 ? 0 : (1 + iree_uk_floor_log2_u32(n - 1));
 }
 
-#ifdef __cplusplus
-}  // extern "C"
-#endif  // __cplusplus
+//===----------------------------------------------------------------------===//
+// Portable explicit prefetch hints
+//
+// Architecture-specific files may use architecture prefetch intrinsics instead.
+//
+// Any explicit prefetch should be justified by measurements on a specific CPU.
+//===----------------------------------------------------------------------===//
+
+#if IREE_UK_HAVE_BUILTIN(__builtin_prefetch) || defined(IREE_UK_COMPILER_GCC)
+#define IREE_UK_PREFETCH_RO(ptr, hint) __builtin_prefetch((ptr), /*rw=*/0, hint)
+#define IREE_UK_PREFETCH_RW(ptr, hint) __builtin_prefetch((ptr), /*rw=*/1, hint)
+#else
+#define IREE_UK_PREFETCH_RO(ptr, hint)
+#define IREE_UK_PREFETCH_RW(ptr, hint)
+#endif
+
+// This is how the 0--3 locality hint is interpreted by both Clang and GCC on
+// both arm64 and x86-64.
+#define IREE_UK_PREFETCH_LOCALITY_NONE 0  // No locality. Data accessed once.
+#define IREE_UK_PREFETCH_LOCALITY_L3 1    // Some locality. Try to keep in L3.
+#define IREE_UK_PREFETCH_LOCALITY_L2 2    // More locality. Try to keep in L2.
+#define IREE_UK_PREFETCH_LOCALITY_L1 3    // Most locality. Try to keep in L1.
+
+//===----------------------------------------------------------------------===//
+// 16-bit <-> 32-bit floating point conversions.
+// Adapted from runtime/src/iree/base/internal/math.h.
+//===----------------------------------------------------------------------===//
+
+// NOTE: We used to have code here using built-in _Float16 type support.
+// It worked well (https://godbolt.org/z/3a6WM39M1) until it didn't for
+// some people (#14549). It's not worth the hassle, this is only used
+// in slow generic fallbacks or test code, and we weren't able to use
+// a builtin for bf16 anyway.
+
+#define IREE_UK_FP_FORMAT_CONSTANTS(prefix, bits, ebits)            \
+  const int prefix##exp_bits IREE_UK_ATTRIBUTE_UNUSED = ebits;      \
+  const int prefix##mantissa_bits IREE_UK_ATTRIBUTE_UNUSED =        \
+      bits - 1 - prefix##exp_bits;                                  \
+  const int prefix##sign_shift IREE_UK_ATTRIBUTE_UNUSED = bits - 1; \
+  const int prefix##exp_shift IREE_UK_ATTRIBUTE_UNUSED =            \
+      prefix##mantissa_bits;                                        \
+  const int prefix##sign_mask IREE_UK_ATTRIBUTE_UNUSED =            \
+      1u << prefix##sign_shift;                                     \
+  const int prefix##mantissa_mask IREE_UK_ATTRIBUTE_UNUSED =        \
+      (1u << prefix##exp_shift) - 1;                                \
+  const int prefix##exp_mask IREE_UK_ATTRIBUTE_UNUSED =             \
+      (1u << prefix##sign_shift) - (1u << prefix##exp_shift);
+
+static inline float iree_uk_generic_fp16_to_f32(iree_uk_uint16_t f16_value,
+                                                int exp_bits) {
+  IREE_UK_FP_FORMAT_CONSTANTS(f16_, 16, exp_bits)
+  IREE_UK_FP_FORMAT_CONSTANTS(f32_, 32, 8)
+  const iree_uk_uint32_t f16_sign = f16_value & f16_sign_mask;
+  const iree_uk_uint32_t f32_sign = f16_sign
+                                    << (f32_sign_shift - f16_sign_shift);
+  const iree_uk_uint32_t f16_exp = f16_value & f16_exp_mask;
+  const iree_uk_uint32_t f16_mantissa = f16_value & f16_mantissa_mask;
+  iree_uk_uint32_t f32_exp = 0;
+  iree_uk_uint32_t f32_mantissa = 0;
+  if (f16_exp == f16_exp_mask) {
+    // NaN or Inf case.
+    f32_exp = f32_exp_mask;
+    if (f16_mantissa) {
+      // NaN. Generate a quiet NaN.
+      f32_mantissa = f32_mantissa_mask;
+    } else {
+      // Inf. Leave zero mantissa.
+    }
+  } else if (f16_exp == 0) {
+    // Zero or subnormal. Generate zero. Leave zero mantissa.
+  } else {
+    // Normal finite value.
+    int arithmetic_f16_exp = f16_exp >> f16_exp_shift;
+    int arithmetic_f32_exp = arithmetic_f16_exp + (1 << (f32_exp_bits - 1)) -
+                             (1 << (f16_exp_bits - 1));
+    f32_exp = arithmetic_f32_exp << f32_exp_shift;
+    f32_mantissa = f16_mantissa << (f32_mantissa_bits - f16_mantissa_bits);
+  }
+  const iree_uk_uint32_t u32_value = f32_sign | f32_exp | f32_mantissa;
+  float f32_value;
+  iree_uk_memcpy(&f32_value, &u32_value, sizeof f32_value);
+  return f32_value;
+}
+
+static inline iree_uk_uint16_t iree_uk_f32_to_generic_fp16(float value,
+                                                           int exp_bits) {
+  IREE_UK_FP_FORMAT_CONSTANTS(f16_, 16, exp_bits)
+  IREE_UK_FP_FORMAT_CONSTANTS(f32_, 32, 8)
+  iree_uk_uint32_t u32_value;
+  iree_uk_memcpy(&u32_value, &value, sizeof value);
+  const iree_uk_uint32_t f32_sign = u32_value & f32_sign_mask;
+  const iree_uk_uint32_t f16_sign =
+      f32_sign >> (f32_sign_shift - f16_sign_shift);
+  const iree_uk_uint32_t f32_exp = u32_value & f32_exp_mask;
+  const iree_uk_uint32_t f32_mantissa = u32_value & f32_mantissa_mask;
+  iree_uk_uint32_t f16_exp = 0;
+  iree_uk_uint32_t f16_mantissa = 0;
+  if (f32_exp == f32_exp_mask) {
+    // NaN or Inf case.
+    f16_exp = f16_exp_mask;
+    if (f32_mantissa) {
+      // NaN. Generate a quiet NaN.
+      f16_mantissa = f16_mantissa_mask;
+    } else {
+      // Inf. Leave zero mantissa.
+    }
+  } else if (f32_exp == 0) {
+    // Zero or subnormal. Generate zero. Leave zero mantissa.
+  } else {
+    // Normal finite value.
+    int arithmetic_exp = (f32_exp >> f32_exp_shift) - (1 << (f32_exp_bits - 1));
+    if (arithmetic_exp >= (1 << (f16_exp_bits - 1))) {
+      // Overflow. Generate Inf. Leave zero mantissa.
+      f16_exp = f16_exp_mask;
+    } else if (arithmetic_exp < -(1 << (f16_exp_bits - 1))) {
+      // Underflow. Generate zero. Leave zero mantissa.
+      f16_exp = 0;
+    } else {
+      // Normal case.
+      // Implement round-to-nearest-even, by adding a bias before truncating.
+      // truncating.
+      int even_bit = 1u << (f32_mantissa_bits - f16_mantissa_bits);
+      int odd_bit = even_bit >> 1;
+      iree_uk_uint32_t biased_f32_mantissa =
+          f32_mantissa +
+          ((f32_mantissa & even_bit) ? (odd_bit) : (odd_bit - 1));
+      // Adding the bias may cause an exponent increment.
+      if (biased_f32_mantissa > f32_mantissa_mask) {
+        // Note: software implementations that try to be fast tend to get this
+        // conditional increment of exp and zeroing of mantissa for free by
+        // simplying incrementing the whole uint32 encoding of the float value,
+        // so that the mantissa overflows into the exponent bits.
+        // This results in magical-looking code like in the following links.
+        // We'd rather not care too much about performance of this function;
+        // we should only care about fp16 performance on fp16 hardware, and
+        // then, we should use hardware instructions.
+        // https://github.com/pytorch/pytorch/blob/e1502c0cdbfd17548c612f25d5a65b1e4b86224d/c10/util/BFloat16.h#L76
+        // https://gitlab.com/libeigen/eigen/-/blob/21cd3fe20990a5ac1d683806f605110962aac3f1/Eigen/src/Core/arch/Default/BFloat16.h#L565
+        biased_f32_mantissa = 0;
+        ++arithmetic_exp;
+      }
+      // The exponent increment in the above if() branch may cause overflow.
+      // This is exercised by converting 65520.0f from f32 to f16. No special
+      // handling is needed for this case: the above if() branch already set
+      // biased_f32_mantissa=0, so we will be generating a 0 mantissa, as
+      // needed for infinite values.
+      f16_exp = (arithmetic_exp + (1 << (f16_exp_bits - 1))) << f16_exp_shift;
+      f16_mantissa =
+          biased_f32_mantissa >> (f32_mantissa_bits - f16_mantissa_bits);
+    }
+  }
+  iree_uk_uint16_t f16_value = f16_sign | f16_exp | f16_mantissa;
+  return f16_value;
+}
+
+// Converts a fp16 value to a 32-bit C `float`.
+static inline float iree_uk_f16_to_f32(iree_uk_uint16_t f16_value) {
+  return iree_uk_generic_fp16_to_f32(f16_value, 5);
+}
+
+// Converts a 32-bit C `float` value to a fp16 value, rounding to nearest
+// even.
+static inline iree_uk_uint16_t iree_uk_f32_to_f16(float value) {
+  return iree_uk_f32_to_generic_fp16(value, 5);
+}
+
+// Converts a bfloat16 value to a 32-bit C `float`.
+static inline float iree_uk_bf16_to_f32(iree_uk_uint16_t bf16_value) {
+  return iree_uk_generic_fp16_to_f32(bf16_value, 8);
+}
+
+// Converts a 32-bit C `float` value to a bfloat16 value, rounding to nearest
+// even.
+static inline iree_uk_uint16_t iree_uk_f32_to_bf16(float value) {
+  return iree_uk_f32_to_generic_fp16(value, 8);
+}
 
 #endif  // IREE_BUILTINS_UKERNEL_COMMON_H_

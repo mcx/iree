@@ -7,9 +7,6 @@
 #include "iree-dialects-c/Dialects.h"
 
 #include "iree-dialects/Dialect/Input/InputDialect.h"
-#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
-#include "iree-dialects/Dialect/LinalgExt/TransformOps/LinalgExtTransformOps.h"
-#include "iree-dialects/Dialect/LinalgTransform/LinalgTransformOps.h"
 #include "iree-dialects/Dialect/LinalgTransform/Passes.h"
 #include "iree-dialects/Dialect/LinalgTransform/StructuredTransformOpsExt.h"
 #include "mlir/CAPI/IR.h"
@@ -33,26 +30,13 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
     IREEInput, iree_input, mlir::iree_compiler::IREE::Input::IREEInputDialect)
 
 //===--------------------------------------------------------------------===//
-// IREELinalgExt
-//===--------------------------------------------------------------------===//
-
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
-    IREELinalgExt, iree_linalg_ext,
-    mlir::iree_compiler::IREE::LinalgExt::IREELinalgExtDialect)
-
-//===--------------------------------------------------------------------===//
 // IREELinalgTransform
 //===--------------------------------------------------------------------===//
 
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
-    IREELinalgTransform, iree_linalg_transform,
-    mlir::linalg::transform::LinalgTransformDialect)
-
 void mlirIREELinalgTransformRegisterPasses() {
-  mlir::linalg::transform::registerTransformDialectInterpreterPass();
-  mlir::linalg::transform::registerLinalgTransformExpertExpansionPass();
   mlir::linalg::transform::registerDropSchedulePass();
 }
+
 //===--------------------------------------------------------------------===//
 // TransformDialect
 //===--------------------------------------------------------------------===//
@@ -60,13 +44,11 @@ void mlirIREELinalgTransformRegisterPasses() {
 void ireeRegisterTransformExtensions(MlirContext context) {
   MLIRContext *ctx = unwrap(context);
   DialectRegistry registry;
-  registry.addExtensions<
-      mlir::iree_compiler::IREE::LinalgExt::LinalgExtTransformOpsExtension,
-      mlir::transform_ext::StructuredTransformOpsExtension>();
+  registry
+      .addExtensions<mlir::transform_ext::StructuredTransformOpsExtension>();
   ctx->appendDialectRegistry(registry);
 }
 
 void mlirIREETransformRegisterPasses() {
   mlir::linalg::transform::registerDropSchedulePass();
-  mlir::linalg::transform::registerTransformDialectInterpreterPass();
 }

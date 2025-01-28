@@ -1,5 +1,27 @@
 // RUN: iree-opt --split-input-file --iree-stream-annotate-dispatch-arguments %s | FileCheck %s
 
+// Tests that external executables don't get annotated
+
+// CHECK-LABEL: @skipExternExecutablesEx
+stream.executable private @skipExternExecutablesEx {
+  // CHECK: stream.executable.export public @dispatch
+  stream.executable.export public @dispatch
+}
+util.func public @skipExternExecutables(%arg0: i32) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c0_i32 = arith.constant 0 : i32
+  %alloc = stream.resource.alloc uninitialized : !stream.resource<transient>{%c1}
+  %result_timepoint = stream.cmd.execute with(%alloc as %capture: !stream.resource<transient>{%c1}) {
+    stream.cmd.dispatch @annotatePotentialValuesEx::@dispatch[%c1, %c1, %c1](%c0_i32 : i32) {
+      rw %capture[%c0 for %c1] : !stream.resource<transient>{%c1}
+    }
+  } => !stream.timepoint
+  util.return
+}
+
+// -----
+
 // Tests that operands are annotated with their potential values.
 // %arg0: cannot be annotated because it comes from outside the program.
 // %arg1: all values known, gets alignment being an index.
@@ -10,17 +32,17 @@
 stream.executable private @annotatePotentialValuesEx {
   stream.executable.export public @dispatch
   builtin.module  {
-    // CHECK: func.func @dispatch(
+    // CHECK:  util.func public @dispatch(
     // CHECK-SAME: %arg0: i32,
     // CHECK-SAME: %arg1: index {stream.alignment = 4 : index, stream.values = [20 : index, 40 : index]},
     // CHECK-SAME: %arg2: i1 {stream.values = [false, true]},
-    // CHECK-SAME: %arg3: f32)
-    func.func @dispatch(%arg0: i32, %arg1: index, %arg2: i1, %arg3: f32) {
-      return
+    // CHECK-SAME: %arg3: f32
+     util.func public @dispatch(%arg0: i32, %arg1: index, %arg2: i1, %arg3: f32, %binding: !stream.binding) {
+      util.return
     }
   }
 }
-func.func @annotatePotentialValues(%arg0: i32) {
+util.func public @annotatePotentialValues(%arg0: i32) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c0_i32 = arith.constant 0 : i32
@@ -39,7 +61,7 @@ func.func @annotatePotentialValues(%arg0: i32) {
       rw %capture[%c0 for %c1] : !stream.resource<transient>{%c1}
     }
   } => !stream.timepoint
-  return
+  util.return
 }
 
 // -----
@@ -55,24 +77,24 @@ func.func @annotatePotentialValues(%arg0: i32) {
 stream.executable private @annotateOperandAlignmentEx {
   stream.executable.export public @dispatch
   builtin.module  {
-    // CHECK: func.func @dispatch(
+    // CHECK:  util.func public @dispatch(
     // CHECK-SAME: %arg0: index,
     // CHECK-SAME: %arg1: index {stream.alignment = 16 : index},
     // CHECK-SAME: %arg2: index {stream.values = [4096 : index, 4097 : index]},
     // CHECK-SAME: %arg3: index {stream.alignment = 16 : index, stream.values = [1200 : index, 5232 : index]}
     // CHECK-SAME: %arg4: index {stream.alignment = 1024 : index, stream.values = [1024 : index, 2048 : index]}
-    func.func @dispatch(%arg0: index, %arg1: index, %arg2: index, %arg3: index, %arg4: index) {
-      return
+     util.func public @dispatch(%arg0: index, %arg1: index, %arg2: index, %arg3: index, %arg4: index, %binding: !stream.binding) {
+      util.return
     }
   }
 }
 util.global private mutable @global_var = 1024 : index
-func.func @otherFunc() {
+util.func public @otherFunc() {
   %c2048 = arith.constant 2048 : index
   util.global.store %c2048, @global_var : index
-  return
+  util.return
 }
-func.func @annotateOperandAlignment(%arg0: index, %arg1: index) {
+util.func public @annotateOperandAlignment(%arg0: index, %arg1: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c16 = arith.constant 16 : index
@@ -92,7 +114,7 @@ func.func @annotateOperandAlignment(%arg0: index, %arg1: index) {
       rw %capture[%c0 for %c1] : !stream.resource<transient>{%c1}
     }
   } => !stream.timepoint
-  return
+  util.return
 }
 
 // -----
@@ -107,17 +129,17 @@ func.func @annotateOperandAlignment(%arg0: index, %arg1: index) {
 stream.executable private @annotateBindingAlignmentEx {
   stream.executable.export public @dispatch
   builtin.module  {
-    // CHECK: func.func @dispatch(
+    // CHECK:  util.func public @dispatch(
     // CHECK-SAME: %arg0: !stream.binding {stream.alignment = 64 : index},
     // CHECK-SAME: %arg1: !stream.binding,
     // CHECK-SAME: %arg2: !stream.binding {stream.alignment = 8 : index},
     // CHECK-SAME: %arg3: !stream.binding {stream.alignment = 16 : index})
-    func.func @dispatch(%arg0: !stream.binding, %arg1: !stream.binding, %arg2: !stream.binding, %arg3: !stream.binding) {
-      return
+     util.func public @dispatch(%arg0: !stream.binding, %arg1: !stream.binding, %arg2: !stream.binding, %arg3: !stream.binding) {
+      util.return
     }
   }
 }
-func.func @annotateBindingAlignment(%arg0: index, %arg1: index) {
+util.func public @annotateBindingAlignment(%arg0: index, %arg1: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c8 = arith.constant 8 : index
@@ -141,5 +163,5 @@ func.func @annotateBindingAlignment(%arg0: index, %arg1: index) {
       rw %capture[%aligned1 for %c8] : !stream.resource<transient>{%c64}
     }
   } => !stream.timepoint
-  return
+  util.return
 }

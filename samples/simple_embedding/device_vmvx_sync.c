@@ -24,7 +24,8 @@ iree_status_t create_sample_device(iree_allocator_t host_allocator,
   iree_hal_sync_device_params_initialize(&params);
 
   iree_vm_instance_t* instance = NULL;
-  IREE_RETURN_IF_ERROR(iree_vm_instance_create(host_allocator, &instance));
+  IREE_RETURN_IF_ERROR(iree_vm_instance_create(IREE_VM_TYPE_CAPACITY_DEFAULT,
+                                               host_allocator, &instance));
 
   iree_hal_executable_loader_t* loader = NULL;
   iree_status_t status = iree_hal_vmvx_module_loader_create(
@@ -33,7 +34,7 @@ iree_status_t create_sample_device(iree_allocator_t host_allocator,
   iree_vm_instance_release(instance);
 
   // Use the default host allocator for buffer allocations.
-  iree_string_view_t identifier = iree_make_cstring_view("vmvx");
+  iree_string_view_t identifier = iree_make_cstring_view("local-sync");
   iree_hal_allocator_t* device_allocator = NULL;
   if (iree_status_is_ok(status)) {
     status = iree_hal_allocator_create_heap(identifier, host_allocator,

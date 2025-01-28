@@ -30,7 +30,20 @@ macro(iree_llvm_configure_bundled)
   # Stash cmake build type in case LLVM messes with it.
   set(_CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 
-  add_subdirectory("third_party/llvm-project/llvm" "llvm-project" EXCLUDE_FROM_ALL)
+  # Setup LLVM lib and bin directories.
+  set(LLVM_LIBRARY_OUTPUT_INTDIR "${CMAKE_CURRENT_BINARY_DIR}/llvm-project/lib")
+  set(LLVM_RUNTIME_OUTPUT_INTDIR "${CMAKE_CURRENT_BINARY_DIR}/llvm-project/bin")
+
+  message(STATUS "Configuring third_party/llvm-project")
+  list(APPEND CMAKE_MESSAGE_INDENT "  ")
+  set(_BUNDLED_LLVM_CMAKE_SOURCE_SUBDIR "third_party/llvm-project/llvm")
+  add_subdirectory("${_BUNDLED_LLVM_CMAKE_SOURCE_SUBDIR}" "llvm-project" EXCLUDE_FROM_ALL)
+  get_directory_property(LLVM_VERSION_MAJOR DIRECTORY "${_BUNDLED_LLVM_CMAKE_SOURCE_SUBDIR}" LLVM_VERSION_MAJOR)
+  if (NOT LLVM_VERSION_MAJOR)
+    message(SEND_ERROR "Failed to read LLVM_VERSION_MAJOR property on LLVM directory. Should have been set since https://github.com/llvm/llvm-project/pull/83346.")
+  endif()
+
+  list(POP_BACK CMAKE_MESSAGE_INDENT)
 
   # Reset CMAKE_BUILD_TYPE to its previous setting.
   set(CMAKE_BUILD_TYPE "${_CMAKE_BUILD_TYPE}" )
@@ -42,12 +55,16 @@ macro(iree_llvm_configure_bundled)
   set(LLVM_CMAKE_DIR "${IREE_BINARY_DIR}/llvm-project/lib/cmake/llvm")
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
   # TODO: Fix MLIR upstream so it doesn't spew into the containing project
-  # binary dir.
-  set(MLIR_CMAKE_DIR "${IREE_BINARY_DIR}/lib/cmake/mlir")
+  # binary dir. See mlir/cmake/modules/CMakeLists.txt
+  # (and other LLVM sub-projects).
+  set(MLIR_CMAKE_DIR "${CMAKE_BINARY_DIR}/lib/cmake/mlir")
+  if(NOT EXISTS "${MLIR_CMAKE_DIR}/AddMLIR.cmake")
+    message(SEND_ERROR "Could not find AddMLIR.cmake in ${MLIR_CMAKE_DIR}: LLVM sub-projects may have changed their layout. See the mlir_cmake_builddir variable in mlir/cmake/modules/CMakeLists.txt")
+  endif()
   list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 
   set(LLVM_INCLUDE_DIRS
-    ${IREE_SOURCE_DIR}/third_party/llvm-project/llvm/include
+    ${IREE_SOURCE_DIR}/${_BUNDLED_LLVM_CMAKE_SOURCE_SUBDIR}/include
     ${IREE_BINARY_DIR}/llvm-project/include
   )
   set(MLIR_INCLUDE_DIRS
@@ -61,7 +78,12 @@ macro(iree_llvm_configure_bundled)
 
   set(LLVM_BINARY_DIR "${IREE_BINARY_DIR}/llvm-project")
   set(LLVM_TOOLS_BINARY_DIR "${LLVM_BINARY_DIR}/bin")
-  set(LLVM_EXTERNAL_LIT "${IREE_SOURCE_DIR}/third_party/llvm-project/llvm/utils/lit/lit.py")
+  set(LLVM_EXTERNAL_LIT "${IREE_SOURCE_DIR}/${_BUNDLED_LLVM_CMAKE_SOURCE_SUBDIR}/utils/lit/lit.py")
+
+  set(IREE_LLVM_LINK_BINARY "$<TARGET_FILE:${IREE_LLVM_LINK_TARGET}>")
+  set(IREE_LLD_BINARY "$<TARGET_FILE:${IREE_LLD_TARGET}>")
+  set(IREE_CLANG_BINARY "$<TARGET_FILE:${IREE_CLANG_TARGET}>")
+  set(IREE_CLANG_BUILTIN_HEADERS_PATH "${LLVM_BINARY_DIR}/lib/clang/${LLVM_VERSION_MAJOR}/include/")
 endmacro()
 
 macro(iree_llvm_configure_installed)
@@ -80,6 +102,7 @@ macro(iree_llvm_configure_installed)
 
   find_package(Clang REQUIRED)
   list(APPEND CMAKE_MODULE_PATH "${CLANG_CMAKE_DIR}")
+  include_directories(${CLANG_INCLUDE_DIRS})
 
   # Lit never gets installed with LLVM. So we have to reach into our copy
   # of the monorepo to get it. I'm sorry. If this doesn't work for you,
@@ -88,6 +111,14 @@ macro(iree_llvm_configure_installed)
   # so this is consistent between the projects.
   if(NOT LLVM_EXTERNAL_LIT)
     set(LLVM_EXTERNAL_LIT "${IREE_SOURCE_DIR}/third_party/llvm-project/llvm/utils/lit/lit.py")
+  endif()
+
+  set(IREE_LLVM_LINK_BINARY "$<TARGET_FILE:llvm-link>")
+  set(IREE_LLD_BINARY "$<TARGET_FILE:lld>")
+  set(IREE_CLANG_BINARY "$<TARGET_FILE:clang>")
+  set(IREE_CLANG_BUILTIN_HEADERS_PATH "${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}/include")
+  if(NOT EXISTS "${IREE_CLANG_BUILTIN_HEADERS_PATH}")
+    message(WARNING "Could not find installed clang-resource-headers (tried ${IREE_CLANG_BUILTIN_HEADERS_PATH})")
   endif()
 endmacro()
 
@@ -108,6 +139,15 @@ macro(iree_llvm_set_bundled_cmake_options)
   set(LLVM_ENABLE_IDE ON CACHE BOOL "")
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "")
 
+  # Force LLVM to avoid dependencies, which we don't ever really want in our
+  # limited builds.
+  set(LLVM_ENABLE_LIBEDIT OFF CACHE BOOL "Default disable")
+  set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "Default disable")
+  set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "Default disable")
+  set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "Default disable")
+  set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Default disable")
+  set(LLVM_FORCE_ENABLE_STATS ON CACHE BOOL "Default enable")
+
   # LLVM defaults to building all targets. We always enable targets that we need
   # as we need them, so default to none. The user can override this as needed,
   # which is fine.
@@ -121,6 +161,10 @@ macro(iree_llvm_set_bundled_cmake_options)
   set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "")
   set(MHLO_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "")
 
+  # Disable MLIR attempting to configure Python dev packages. We take care of
+  # that in IREE as a super-project.
+  set(MLIR_DISABLE_CONFIGURE_PYTHON_DEV_PACKAGES ON CACHE BOOL "" FORCE)
+
   # If we are building clang/lld/etc, these will be the targets.
   # Otherwise, empty so scripts can detect unavailability.
   set(IREE_CLANG_TARGET)
@@ -128,6 +172,8 @@ macro(iree_llvm_set_bundled_cmake_options)
 
   # Unconditionally enable some other cheap LLVM tooling.
   set(IREE_LLVM_LINK_TARGET llvm-link)
+  set(IREE_FILECHECK_TARGET FileCheck)
+  set(IREE_NOT_TARGET not)
 
   # Unconditionally enable mlir.
   list(APPEND LLVM_ENABLE_PROJECTS mlir)
@@ -157,6 +203,7 @@ macro(iree_llvm_set_bundled_cmake_options)
   if(IREE_TARGET_BACKEND_ROCM)
     message(STATUS "  - rocm")
     list(APPEND LLVM_TARGETS_TO_BUILD AMDGPU)
+    set(IREE_CLANG_TARGET clang)
   endif()
   if(IREE_TARGET_BACKEND_VULKAN_SPIRV)
     message(STATUS "  - vulkan-spirv")
@@ -164,8 +211,8 @@ macro(iree_llvm_set_bundled_cmake_options)
   if(IREE_TARGET_BACKEND_VMVX)
     message(STATUS "  - vmvx")
   endif()
-  if(IREE_TARGET_BACKEND_WEBGPU)
-    message(STATUS "  - webgpu")
+  if(IREE_TARGET_BACKEND_WEBGPU_SPIRV)
+    message(STATUS "  - webgpu-spirv")
   endif()
 
   if(IREE_CLANG_TARGET)

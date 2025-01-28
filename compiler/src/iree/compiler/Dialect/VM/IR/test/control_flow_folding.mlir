@@ -55,17 +55,12 @@ vm.module @cond_br_folds {
   // ^bb2(%1 : i32):
   //   vm.return %1 : i32
   // }
+}
 
-  // CHECK-LABEL: @erase_unused_pure_call
-  vm.func @erase_unused_pure_call(%arg0 : i32) {
-    %0 = vm.call @nonvariadic_pure_func(%arg0) : (i32) -> i32
-    %1 = vm.call.variadic @variadic_pure_func([%arg0]) : (i32 ...) -> i32
-    // CHECK-NEXT: vm.return
-    vm.return
-  }
-  vm.import private @nonvariadic_pure_func(%arg0 : i32) -> i32 attributes {nosideeffects}
-  vm.import private @variadic_pure_func(%arg0 : i32 ...) -> i32 attributes {nosideeffects}
+// -----
 
+// CHECK-LABEL: @call_folds
+vm.module @call_folds {
   // CHECK-LABEL: @convert_nonvariadic_to_call
   vm.func @convert_nonvariadic_to_call(%arg0 : i32) -> (i32, i32) {
     // CHECK-NEXT: vm.call @nonvariadic_func(%arg0) : (i32) -> i32
@@ -116,10 +111,10 @@ vm.module @check_folds {
 
   // CHECK-LABEL: @check_nearly_eq_f32
   vm.func @check_nearly_eq_f32(%arg0 : f32, %arg1 : f32) {
-    // CHECK-NEXT:   %zero = vm.const.f32.zero
-    // CHECK-NEXT:   %c1 = vm.const.i32 1
-    // CHECK-NEXT:   [[THRESHOLD:%.+]] = vm.const.i32 100
-    // CHECK-NEXT:   %c9 = vm.const.i32 9
+    //  CHECK-DAG:   %zero = vm.const.f32.zero
+    //  CHECK-DAG:   %c1 = vm.const.i32 1
+    //  CHECK-DAG:   [[THRESHOLD:%.+]] = vm.const.i32 100
+    //  CHECK-DAG:   %c9 = vm.const.i32 9
     // CHECK-NEXT:   %0 = vm.cmp.lt.f32.o %arg0, %zero : f32
     // CHECK-NEXT:   %1 = vm.xor.i32 %0, %c1 : i32
     // CHECK-NEXT:   %2 = vm.cmp.lt.f32.o %arg1, %zero : f32

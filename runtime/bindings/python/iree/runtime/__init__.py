@@ -1,4 +1,4 @@
-"""Module init for the python bindings."""
+"""IREE runtime Python bindings."""
 
 # Copyright 2019 The IREE Authors
 #
@@ -13,6 +13,15 @@
 from . import _binding
 
 # Pull some of the native symbols into the public API.
+# Io imports
+from ._binding import (
+    FileHandle,
+    ParameterIndex,
+    ParameterIndexEntry,
+    ParameterProvider,
+    create_io_parameters_module,
+)
+
 # Hal imports
 from ._binding import (
     BufferCompatibility,
@@ -20,18 +29,23 @@ from ._binding import (
     HalAllocator,
     HalBuffer,
     HalBufferView,
+    HalCommandBuffer,
     HalDevice,
+    HalDeviceLoopBridge,
     HalDriver,
     HalElementType,
+    HalFence,
+    HalSemaphore,
+    MappedMemory,
     MemoryAccess,
     MemoryType,
     PyModuleInterface,
     Shape,
+    create_hal_module,
 )
 
 # Vm imports
 from ._binding import (
-    create_hal_module,
     Linkage,
     VmBuffer,
     VmVariantList,
@@ -39,7 +53,12 @@ from ._binding import (
     VmInstance,
     VmContext,
     VmModule,
+    VmRef,
 )
+
+# Debug imports
+from ._binding import HalModuleDebugSink
+from .typing import HalModuleBufferViewTraceCallback
 
 from .array_interop import *
 from .benchmark import *
@@ -51,6 +70,6 @@ from .system_setup import (
     query_available_drivers,
 )
 from .function import *
-from .tracing import *
+from .io import *
 
 from . import flags

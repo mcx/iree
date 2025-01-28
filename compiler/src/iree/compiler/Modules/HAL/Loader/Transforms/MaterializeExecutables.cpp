@@ -7,23 +7,25 @@
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderDialect.h"
-#include "iree/compiler/Modules/HAL/Loader/Transforms/PassDetail.h"
 #include "iree/compiler/Modules/HAL/Loader/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Loader {
+namespace mlir::iree_compiler::IREE::HAL::Loader {
 
-static void replaceExecutableWithGlobal(IREE::HAL::ExecutableOp executableOp) {
+#define GEN_PASS_DEF_MATERIALIZEEXECUTABLESPASS
+#include "iree/compiler/Modules/HAL/Loader/Transforms/Passes.h.inc"
+
+namespace {
+
+static void replaceExecutableWithGlobal(
+    IREE::HAL::ExecutableOp executableOp,
+    DenseMap<Attribute, IREE::Util::GlobalOpInterface> &executableGlobalOps) {
   OpBuilder moduleBuilder(executableOp);
 
   auto loc = executableOp.getLoc();
@@ -60,7 +62,7 @@ static void replaceExecutableWithGlobal(IREE::HAL::ExecutableOp executableOp) {
         loc, status,
         "none of the executable binaries in the module are supported by the "
         "runtime");
-    failBuilder.create<IREE::Util::InitializerReturnOp>(loc);
+    failBuilder.create<IREE::Util::ReturnOp>(loc);
   }
 
   // Exit block takes the loaded executable and stores it.
@@ -68,9 +70,8 @@ static void replaceExecutableWithGlobal(IREE::HAL::ExecutableOp executableOp) {
   {
     auto exitBuilder = OpBuilder::atBlockBegin(exitBlock);
     auto executableArg = exitBlock->addArgument(executableType, loc);
-    exitBuilder.create<IREE::Util::GlobalStoreOp>(loc, executableArg,
-                                                  globalOp.getName());
-    exitBuilder.create<IREE::Util::InitializerReturnOp>(loc);
+    globalOp.createStoreOp(loc, executableArg, exitBuilder);
+    exitBuilder.create<IREE::Util::ReturnOp>(loc);
   }
 
   // Start with the first try.
@@ -116,7 +117,7 @@ static void replaceExecutableWithGlobal(IREE::HAL::ExecutableOp executableOp) {
     Value binaryData = loadBuilder.create<IREE::Util::BufferConstantOp>(
         binaryLoc, binaryOp.getNameAttr(), binaryOp.getData(), alignmentAttr,
         binaryOp.getMimeTypeAttr());
-    SmallVector<Value> constants;  // TBD
+    SmallVector<Value> constants; // TBD
     Value executable = loadBuilder.create<IREE::HAL::Loader::ExecutableLoadOp>(
         binaryLoc, executableType, binaryOp.getFormatAttr(), binaryData,
         constants);
@@ -124,14 +125,18 @@ static void replaceExecutableWithGlobal(IREE::HAL::ExecutableOp executableOp) {
                                      ValueRange{executable});
   }
 
+  // Stash for faster lookup when replacing using.
+  executableGlobalOps[FlatSymbolRefAttr::get(globalOp.getNameAttr())] =
+      globalOp;
+
   // Op goes away to get replaced with a global.
   executableOp.erase();
 }
 
 // Runs conversion with registered input dialects.
-class MaterializeExecutablesPass
-    : public MaterializeExecutablesBase<MaterializeExecutablesPass> {
- public:
+class MaterializeExecutablesPass final
+    : public impl::MaterializeExecutablesPassBase<MaterializeExecutablesPass> {
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::Util::UtilDialect, IREE::HAL::HALDialect,
                     IREE::HAL::Loader::HALLoaderDialect, arith::ArithDialect,
@@ -142,18 +147,20 @@ class MaterializeExecutablesPass
     mlir::ModuleOp moduleOp = getOperation();
 
     // Walk executables and convert each one to a global.
+    DenseMap<Attribute, IREE::Util::GlobalOpInterface> executableGlobalOps;
     for (auto executableOp : llvm::make_early_inc_range(
              moduleOp.getOps<IREE::HAL::ExecutableOp>())) {
-      replaceExecutableWithGlobal(executableOp);
+      replaceExecutableWithGlobal(executableOp, executableGlobalOps);
     }
 
     // Find lookup ops referencing an executable and swap it to a global load.
     for (auto funcOp : llvm::make_early_inc_range(
              moduleOp.getOps<mlir::FunctionOpInterface>())) {
       funcOp.walk([&](IREE::HAL::Loader::ExecutableLookupOp lookupOp) {
-        Value executable = OpBuilder(lookupOp).create<IREE::Util::GlobalLoadOp>(
-            lookupOp.getLoc(), lookupOp.getResult().getType(),
-            lookupOp.getExecutableAttr());
+        OpBuilder builder(lookupOp);
+        auto globalOp = executableGlobalOps[lookupOp.getExecutableAttr()];
+        Value executable = globalOp.createLoadOp(lookupOp.getLoc(), builder)
+                               .getLoadedGlobalValue();
         lookupOp.replaceAllUsesWith(executable);
         lookupOp.erase();
       });
@@ -161,13 +168,5 @@ class MaterializeExecutablesPass
   }
 };
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createMaterializeExecutablesPass() {
-  return std::make_unique<MaterializeExecutablesPass>();
-}
-
-}  // namespace Loader
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler::IREE::HAL::Loader

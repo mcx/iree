@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowTypes.h"
+#include "iree/compiler/Dialect/Stream/Analysis/Affinity.h"
 #include "iree/compiler/Dialect/Stream/Conversion/FlowToStream/Patterns.h"
 #include "iree/compiler/Dialect/Stream/Conversion/HALToStream/Patterns.h"
 #include "iree/compiler/Dialect/Stream/Conversion/PatternUtils.h"
@@ -14,7 +15,6 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Conversion/ConversionPatterns.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
@@ -33,164 +33,204 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_CONVERTTOSTREAMPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
 namespace {
-
-// Builds a stream.tensor.import op that imports an external tensor value into
-// a stream resource. |consumingOps| will be populated with all ops that consume
-// the original |sourceTensor| and that should not be replaced with the returned
-// value.
-static Value buildTensorImportOp(Location loc, Value sourceTensor,
-                                 Type targetType,
-                                 SmallPtrSetImpl<Operation *> &consumingOps,
-                                 OpBuilder &builder) {
-  // Gather dynamic dimensions from the input value.
-  auto dynamicDims =
-      IREE::Util::buildDynamicDimsForValue(loc, sourceTensor, builder);
-
-  // Compute the size of the tensor once in the stream resource.
-  // This may differ from the external encoding of the tensor as imports are
-  // a transfer operation that may need to reformat the tensor.
-  auto encodingAttr = TypeAttr::get(sourceTensor.getType());
-  auto resultSize = builder.createOrFold<IREE::Stream::TensorSizeOfOp>(
-      loc, builder.getIndexType(), encodingAttr, dynamicDims,
-      /*affinity=*/nullptr);
-
-  // Associate the external SSA value, encoding, and shape information with the
-  // stream resource. When lowering we'll then have all the metadata required
-  // even after erasing it all on the resource.
-  auto externalType = builder.getType<IREE::Stream::ResourceType>(
-      IREE::Stream::Lifetime::External);
-  auto importOp = builder.create<IREE::Stream::TensorImportOp>(
-      loc, externalType, sourceTensor, encodingAttr, dynamicDims, resultSize,
-      /*affinity=*/nullptr);
-  consumingOps.insert(importOp);
-
-  // If needed insert a transfer to the target lifetime.
-  Value result = importOp.getResult();
-  if (targetType != externalType) {
-    result = builder
-                 .create<IREE::Stream::AsyncTransferOp>(
-                     loc, targetType, result, resultSize, resultSize,
-                     /*source_affinity=*/nullptr,
-                     /*result_affinity=*/nullptr)
-                 .getResult();
-  }
-
-  auto castOp = builder.create<mlir::UnrealizedConversionCastOp>(
-      loc, sourceTensor.getType(), ValueRange{result, resultSize});
-  consumingOps.insert(castOp);
-  return castOp.getResult(0);
-}
-
-// Builds a stream.tensor.export op that exports a stream resource into an
-// external tensor value.
-static Value buildTensorExportOp(Location loc, Value sourceValue,
-                                 TensorType targetType, ValueRange dynamicDims,
-                                 OpBuilder &builder) {
-  auto source = consumeTensorOperand(loc, sourceValue, builder);
-
-  // If needed insert a transfer to external resource lifetime.
-  auto externalType = builder.getType<IREE::Stream::ResourceType>(
-      IREE::Stream::Lifetime::External);
-  if (source.resource.getType() != externalType) {
-    source.resource = builder.create<IREE::Stream::AsyncTransferOp>(
-        loc, externalType, source.resource, source.resourceSize,
-        source.resourceSize,
-        /*source_affinity=*/nullptr,
-        /*result_affinity=*/nullptr);
-  }
-
-  // Associate the stream resource and external encoding and shape information.
-  auto newOp = builder.create<IREE::Stream::TensorExportOp>(
-      loc, targetType, source.resource, TypeAttr::get(targetType), dynamicDims,
-      source.resourceSize,
-      /*affinity=*/nullptr);
-  return newOp.getResult();
-}
 
 // Returns true if |op| has tensor I/O that is not yet imported/exported using
 // the stream ops that capture encodings and shapes.
 static bool doesOperationNeedWrapping(Operation *op) {
-  return llvm::any_of(
-             op->getOperands(),
-             [&](Value operand) {
-               if (!operand.getType().isa<TensorType>()) return false;
-               return !isa_and_nonnull<TensorExportOp>(operand.getDefiningOp());
-             }) ||
-         llvm::any_of(op->getResults(), [&](Value result) {
-           if (!result.getType().isa<TensorType>()) return false;
-           return !llvm::all_of(result.getUsers(), [&](Operation *user) {
-             return isa<TensorImportOp>(user);
-           });
+  return llvm::any_of(op->getOperands(),
+                      [](Value operand) {
+                        if (!llvm::isa<TensorType>(operand.getType()))
+                          return false;
+                        return !isa_and_nonnull<TensorExportOp>(
+                            operand.getDefiningOp());
+                      }) ||
+         llvm::any_of(op->getResults(), [](Value result) {
+           if (!isa<TensorType>(result.getType())) {
+             return false;
+           }
+           return !llvm::all_of(result.getUsers(),
+                                llvm::IsaPred<TensorImportOp>);
          });
 }
 
 // Fallback handler for unknown ops taking/returning tensors that need to be
 // marshaled into/outof stream resource types.
 struct GenericResourcePattern : public ConversionPattern {
-  GenericResourcePattern(MLIRContext *context, TypeConverter &converter)
-      : ConversionPattern(converter, MatchAnyOpTypeTag(), 0, context) {}
-  LogicalResult matchAndRewrite(
-      Operation *op, ArrayRef<Value> operands,
-      ConversionPatternRewriter &rewriter) const override {
-    if (!doesOperationNeedWrapping(op)) return failure();
+  GenericResourcePattern(MLIRContext *context, TypeConverter &converter,
+                         IREE::Stream::AffinityAnalysis *affinityAnalysis)
+      : ConversionPattern(converter, MatchAnyOpTypeTag(), 0, context),
+        affinityAnalysis(affinityAnalysis) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<ValueRange> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!doesOperationNeedWrapping(op)) {
+      return failure();
+    }
+
+    auto executionAffinityAttr = affinityAnalysis->inferExecutionAffinity(op);
 
     // Export resources into tensor operands for the op to consume.
     SmallVector<Value> newOperands;
     newOperands.reserve(op->getNumOperands());
     rewriter.setInsertionPoint(op);
-    for (auto [oldOperand, newOperand] :
+    for (auto [oldOperand, convertedOperands] :
          llvm::zip_equal(op->getOperands(), operands)) {
-      if (!newOperand.getType().isa<IREE::Stream::ResourceType>() &&
-          !newOperand.getType().isa<TensorType>()) {
-        newOperands.push_back(newOperand);
+      if (!isa<IREE::Stream::ResourceType, TensorType>(oldOperand.getType())) {
+        newOperands.push_back(convertedOperands.front());
         continue;
       }
-      auto tensorType = oldOperand.getType().dyn_cast<TensorType>();
+      auto tensorType = dyn_cast<TensorType>(oldOperand.getType());
       assert(tensorType && "must have a tensor type to map to a resource");
 
+      auto exportAffinityAttr =
+          affinityAnalysis->lookupResourceAffinity(oldOperand);
       auto dynamicDims = IREE::Util::buildDynamicDimsForValue(
           op->getLoc(), oldOperand, rewriter);
       newOperands.push_back(buildTensorExportOp(
-          op->getLoc(), newOperand, tensorType, dynamicDims, rewriter));
+          op->getLoc(), oldOperand, convertedOperands, tensorType, dynamicDims,
+          exportAffinityAttr ? exportAffinityAttr : executionAffinityAttr,
+          rewriter));
     }
-    rewriter.updateRootInPlace(op, [&]() { op->setOperands(newOperands); });
+    rewriter.modifyOpInPlace(op, [&]() { op->setOperands(newOperands); });
 
     // Import into resources from tensor results produced by the op.
     rewriter.setInsertionPointAfter(op);
     for (auto result : op->getResults()) {
-      auto tensorType = result.getType().dyn_cast<TensorType>();
-      if (!tensorType) continue;
+      auto tensorType = dyn_cast<TensorType>(result.getType());
+      if (!tensorType) {
+        continue;
+      }
 
+      auto importAffinityAttr =
+          affinityAnalysis->lookupResourceAffinity(result);
       auto dynamicDims =
           IREE::Util::buildDynamicDimsForValue(op->getLoc(), result, rewriter);
       SmallPtrSet<Operation *, 4> consumingOps;
       auto importedValue = buildTensorImportOp(
           op->getLoc(), result, rewriter.getType<IREE::Stream::ResourceType>(),
-          consumingOps, rewriter);
+          consumingOps,
+          importAffinityAttr ? importAffinityAttr : executionAffinityAttr,
+          rewriter);
       result.replaceAllUsesExcept(importedValue, consumingOps);
     }
 
     return success();
   }
-};
 
-class ConvertToStreamPass : public ConvertToStreamBase<ConvertToStreamPass> {
- public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::func::FuncDialect>();
-    registry.insert<mlir::arith::ArithDialect>();
-    registry.insert<mlir::tensor::TensorDialect>();
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
+  // Builds a stream.tensor.export op that exports a stream resource into an
+  // external tensor value.
+  Value buildTensorExportOp(Location loc, Value originalValue,
+                            ValueRange convertedValue, TensorType targetType,
+                            ValueRange dynamicDims,
+                            IREE::Stream::AffinityAttr executionAffinityAttr,
+                            OpBuilder &builder) const {
+    auto source = transferTensorOperands(loc, originalValue, convertedValue,
+                                         executionAffinityAttr,
+                                         affinityAnalysis, builder);
+
+    // If needed insert a transfer to external resource lifetime.
+    auto externalType = builder.getType<IREE::Stream::ResourceType>(
+        IREE::Stream::Lifetime::External);
+    if (source.resource.getType() != externalType) {
+      source.resource = builder.create<IREE::Stream::AsyncTransferOp>(
+          loc, externalType, source.resource, source.resourceSize,
+          source.resourceSize,
+          /*source_affinity=*/source.affinity,
+          /*result_affinity=*/executionAffinityAttr);
+    }
+
+    // Associate the stream resource and external encoding and shape
+    // information.
+    auto newOp = builder.create<IREE::Stream::TensorExportOp>(
+        loc, targetType, source.resource, TypeAttr::get(targetType),
+        dynamicDims, source.resourceSize, executionAffinityAttr);
+    return newOp.getResult();
   }
 
+  // Builds a stream.tensor.import op that imports an external tensor value into
+  // a stream resource. |consumingOps| will be populated with all ops that
+  // consume the original |sourceTensor| and that should not be replaced with
+  // the returned value.
+  Value buildTensorImportOp(Location loc, Value sourceTensor, Type targetType,
+                            SmallPtrSetImpl<Operation *> &consumingOps,
+                            IREE::Stream::AffinityAttr executionAffinityAttr,
+                            OpBuilder &builder) const {
+    // Gather dynamic dimensions from the input value.
+    auto dynamicDims =
+        IREE::Util::buildDynamicDimsForValue(loc, sourceTensor, builder);
+
+    // Compute the size of the tensor once in the stream resource.
+    // This may differ from the external encoding of the tensor as imports are
+    // a transfer operation that may need to reformat the tensor.
+    auto encodingAttr = TypeAttr::get(sourceTensor.getType());
+    Value resultSize = builder.create<IREE::Stream::TensorSizeOfOp>(
+        loc, builder.getIndexType(), encodingAttr, dynamicDims,
+        executionAffinityAttr);
+
+    // Associate the external SSA value, encoding, and shape information with
+    // the stream resource. When lowering we'll then have all the metadata
+    // required even after erasing it all on the resource.
+    auto externalType = builder.getType<IREE::Stream::ResourceType>(
+        IREE::Stream::Lifetime::External);
+    auto importOp = builder.create<IREE::Stream::TensorImportOp>(
+        loc, externalType, sourceTensor, encodingAttr, dynamicDims, resultSize,
+        executionAffinityAttr);
+    consumingOps.insert(importOp);
+
+    // If needed insert a transfer to the target lifetime.
+    Value result = importOp.getResult();
+    if (targetType != externalType) {
+      result = builder
+                   .create<IREE::Stream::AsyncTransferOp>(
+                       loc, targetType, result, resultSize, resultSize,
+                       /*source_affinity=*/executionAffinityAttr,
+                       /*result_affinity=*/executionAffinityAttr)
+                   .getResult();
+    }
+
+    auto castOp = builder.create<mlir::UnrealizedConversionCastOp>(
+        loc, sourceTensor.getType(), ValueRange{result, resultSize});
+    consumingOps.insert(castOp);
+    return castOp.getResult(0);
+  }
+
+  IREE::Stream::AffinityAnalysis *affinityAnalysis = nullptr;
+};
+
+static void stripAffinityAttrs(ModuleOp moduleOp) {
+  auto affinityName = StringAttr::get(moduleOp.getContext(), "stream.affinity");
+  for (auto &op : moduleOp.getOps()) {
+    op.removeDiscardableAttr(affinityName);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// --iree-stream-conversion
+//===----------------------------------------------------------------------===//
+
+struct ConvertToStreamPass final
+    : public IREE::Stream::impl::ConvertToStreamPassBase<ConvertToStreamPass> {
   void runOnOperation() override {
     auto *context = &getContext();
+
+    // Run affinity analysis so that the required producer/consumer affinities
+    // for all SSA values we'll use during conversion are available.
+    AffinityAnalysis affinityAnalysis(getOperation());
+    if (failed(affinityAnalysis.run())) {
+      getOperation().emitError()
+          << "affinity analysis failed to converge (input program may have "
+             "invalid affinities assigned); use"
+             "`--iree-stream-annotate-input-affinities` to help identify the "
+             "invalid affinities";
+      return signalPassFailure();
+    }
 
     TypeConverter typeConverter;
     ConversionTarget conversionTarget(getContext());
@@ -204,11 +244,10 @@ class ConvertToStreamPass : public ConvertToStreamBase<ConvertToStreamPass> {
     // Allow unknown types to pass through; these come from custom dialects that
     // may be mixed into the IR we are converting.
     typeConverter.addConversion([=](Type type) -> Type {
-      // convert flow.channel into stream.channel
-      if (type.isa<IREE::Flow::ChannelType>())
+      if (llvm::isa<IREE::Flow::ChannelType>(type)) {
         return IREE::Stream::ChannelType::get(context);
-
-      return !type.isa<TensorType>() ? type : Type{};
+      }
+      return !llvm::isa<TensorType>(type) ? type : Type{};
     });
 
     // Disallow tensor dialects; the goal here is to remove all tensors and
@@ -222,38 +261,41 @@ class ConvertToStreamPass : public ConvertToStreamBase<ConvertToStreamPass> {
           resultTypes.push_back(indexType);
           return success();
         });
-    typeConverter.addArgumentMaterialization(
-        [](OpBuilder &builder, TensorType resultType, ValueRange inputs,
-           Location loc) -> Optional<Value> {
-          assert(inputs.size() >= 2);
-          auto resourceValue = inputs[0];
-          auto resourceSize = inputs[1];
-          assert(inputs.size() == 2 &&
-                 "expecting 2 operands (resource + size)");
-          return builder
-              .create<IREE::Stream::AsyncTransferOp>(
-                  loc, resourceValue.getType(), resourceValue, resourceSize,
-                  resourceSize,
-                  /*source_affinity=*/nullptr,
-                  /*result_affinity=*/nullptr)
-              .getResult();
-        });
+    typeConverter.addArgumentMaterialization([](OpBuilder &builder,
+                                                TensorType resultType,
+                                                ValueRange inputs,
+                                                Location loc) -> Value {
+      assert(inputs.size() >= 2);
+      auto resourceValue = inputs[0];
+      auto resourceSize = inputs[1];
+      assert(inputs.size() == 2 && "expecting 2 operands (resource + size)");
+      Value cast = builder
+                       .create<IREE::Stream::AsyncTransferOp>(
+                           loc, resourceValue.getType(), resourceValue,
+                           resourceSize, resourceSize,
+                           /*source_affinity=*/nullptr,
+                           /*result_affinity=*/nullptr)
+                       .getResult();
+      return builder.create<UnrealizedConversionCastOp>(loc, resultType, cast)
+          .getResult(0);
+    });
 
     populateUtilConversionPatterns(context, conversionTarget, typeConverter,
                                    patterns);
-    populateUtilToStreamConversionPatterns(context, conversionTarget,
-                                           typeConverter, patterns);
+    populateUtilToStreamConversionPatterns(
+        context, conversionTarget, typeConverter, &affinityAnalysis, patterns);
 
-    populateStandardToStreamConversionPatterns(context, conversionTarget,
-                                               typeConverter, patterns);
-    populateFlowToStreamConversionPatterns(context, conversionTarget,
-                                           typeConverter, patterns);
-    populateHALToStreamConversionPatterns(context, conversionTarget,
-                                          typeConverter, patterns);
+    populateStandardToStreamConversionPatterns(
+        context, conversionTarget, typeConverter, &affinityAnalysis, patterns);
+    populateFlowToStreamConversionPatterns(
+        context, conversionTarget, typeConverter, &affinityAnalysis, patterns);
+    populateHALToStreamConversionPatterns(
+        context, conversionTarget, typeConverter, &affinityAnalysis, patterns);
 
     conversionTarget.markUnknownOpDynamicallyLegal(
         [&](Operation *op) -> bool { return !doesOperationNeedWrapping(op); });
-    patterns.insert<GenericResourcePattern>(context, typeConverter);
+    patterns.insert<GenericResourcePattern>(context, typeConverter,
+                                            &affinityAnalysis);
 
     // NOTE: we allow ops that we don't know about to allow custom dialects
     // that don't need anything Stream-specific to pass through.
@@ -262,16 +304,12 @@ class ConvertToStreamPass : public ConvertToStreamBase<ConvertToStreamPass> {
                                       std::move(patterns)))) {
       return signalPassFailure();
     }
+
+    // Strip affinity ops as they are no longer required.
+    stripAffinityAttrs(getOperation());
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createConvertToStreamPass() {
-  return std::make_unique<ConvertToStreamPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

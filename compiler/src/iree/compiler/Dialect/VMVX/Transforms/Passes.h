@@ -14,14 +14,15 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VMVX {
+namespace mlir::iree_compiler::IREE::VMVX {
 
 //===----------------------------------------------------------------------===//
 // Helpers
 //===----------------------------------------------------------------------===//
+
+// Adds a set of passes to the given pass manager that configure the required
+// VMVX transforms and tiling parameters.
+void buildVMVXConfigurationPassPipeline(OpPassManager &variantPassManager);
 
 // Adds a set of passes to the given pass manager that run the required VMVX
 // transforms in the canonical order.
@@ -31,32 +32,20 @@ namespace VMVX {
 //
 // The expected usage is:
 //   <run conversion from TF/HLO/etc to flow>
+//   buildVMVXConfigurationPassPipeline & run
 //   buildVMVXTransformPassPipeline & run
 //   <serialize VM module>
-void buildVMVXTransformPassPipeline(OpPassManager &passManager);
-
-//===----------------------------------------------------------------------===//
-// Dialect conversion
-//===----------------------------------------------------------------------===//
-
-// Converts from various dialects (HAL, standard, etc) to the VMVX dialect.
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createConversionPass();
-
-// Materializes executable constant global values.
-std::unique_ptr<OperationPass<mlir::ModuleOp>> createMaterializeConstantsPass();
-
-// Resolves any outstanding get_buffer_descriptor ops.
-std::unique_ptr<OperationPass<>> createResolveBufferDescriptorsPass();
+void buildVMVXTransformPassPipeline(OpPassManager &variantPassManager);
 
 //===----------------------------------------------------------------------===//
 // Register all Passes
 //===----------------------------------------------------------------------===//
 
+#define GEN_PASS_DECL
+#include "iree/compiler/Dialect/VMVX/Transforms/Passes.h.inc"
+
 void registerVMVXPasses();
 
-}  // namespace VMVX
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VMVX
 
-#endif  // IREE_COMPILER_DIALECT_VMVX_TRANSFORMS_PASSES_H_
+#endif // IREE_COMPILER_DIALECT_VMVX_TRANSFORMS_PASSES_H_

@@ -11,9 +11,7 @@
 
 #define DEBUG_TYPE "iree-util-dfx"
 
-namespace mlir {
-namespace iree_compiler {
-namespace DFX {
+namespace mlir::iree_compiler::DFX {
 
 Solver::~Solver() {
   // Cleanup all elements; since we allocated them from the bump ptr allocator
@@ -116,7 +114,8 @@ LogicalResult Solver::runTillFixpoint() {
 
       // Use the invalidElements vector to propagate invalid states fast
       // transitively without requiring updates.
-      if (!elementState.isValidState()) invalidElements.insert(element);
+      if (!elementState.isValidState())
+        invalidElements.insert(element);
     }
 
     // Add elements to the changed set if they have been created in the last
@@ -142,7 +141,8 @@ LogicalResult Solver::runTillFixpoint() {
   SmallPtrSet<AbstractElement *, 32> visitedElements;
   for (size_t i = 0; i < changedElements.size(); i++) {
     auto *changedElement = changedElements[i];
-    if (!visitedElements.insert(changedElement).second) continue;
+    if (!visitedElements.insert(changedElement).second)
+      continue;
 
     auto &elementState = changedElement->getState();
     if (!elementState.isAtFixpoint()) {
@@ -184,7 +184,8 @@ ChangeStatus Solver::updateElement(AbstractElement &element) {
     // will not change and we can indicate that right away.
     elementState.indicateOptimisticFixpoint();
   }
-  if (!elementState.isAtFixpoint()) rememberDependences();
+  if (!elementState.isAtFixpoint())
+    rememberDependences();
 
   // Verify the stack is balanced by ensuring we pop the vector we pushed above.
   auto *poppedDependencies = dependenceStack.pop_back_val();
@@ -198,12 +199,15 @@ ChangeStatus Solver::updateElement(AbstractElement &element) {
 void Solver::recordDependence(const AbstractElement &fromElement,
                               const AbstractElement &toElement,
                               Resolution resolution) {
-  if (resolution == Resolution::NONE) return;
+  if (resolution == Resolution::NONE)
+    return;
   // If we are outside of an update, thus before the actual fixpoint iteration
   // started (= when we create elements), we do not track dependences because we
   // will put all elements into the initial worklist anyway.
-  if (dependenceStack.empty()) return;
-  if (fromElement.getState().isAtFixpoint()) return;
+  if (dependenceStack.empty())
+    return;
+  if (fromElement.getState().isAtFixpoint())
+    return;
   dependenceStack.back()->push_back({&fromElement, &toElement, resolution});
 }
 
@@ -225,6 +229,4 @@ void Solver::print(llvm::raw_ostream &os) { depGraph.print(os); }
 
 void Solver::dumpGraph() { depGraph.dumpGraph(); }
 
-}  // namespace DFX
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::DFX

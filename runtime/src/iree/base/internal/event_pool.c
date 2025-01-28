@@ -11,7 +11,6 @@
 #include <string.h>
 
 #include "iree/base/internal/synchronization.h"
-#include "iree/base/tracing.h"
 
 struct iree_event_pool_t {
   // Allocator used to create the event pool.
@@ -67,6 +66,7 @@ iree_status_t iree_event_pool_allocate(iree_host_size_t available_capacity,
 }
 
 void iree_event_pool_free(iree_event_pool_t* event_pool) {
+  if (!event_pool) return;
   iree_allocator_t host_allocator = event_pool->host_allocator;
   IREE_TRACE_ZONE_BEGIN(z0);
 

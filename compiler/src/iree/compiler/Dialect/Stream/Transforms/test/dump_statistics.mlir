@@ -2,22 +2,22 @@
 // RUN: iree-opt --split-input-file --pass-pipeline="builtin.module(iree-stream-dump-statistics{output-format=csv})" %s 2>&1 | FileCheck %s --check-prefix=CHECK-CSV
 
 // CHECK-PRETTY: Aggregate Statistics
-// CHECK-PRETTY:   Constants: 1, 0 B
-// CHECK-PRETTY:   Variables: 0, 0 B
+// CHECK-PRETTY:   Constants: 1, estimated storage of 192 B
+// CHECK-PRETTY:   Variables: 0, (TBD)
 // CHECK-PRETTY:  D->H Syncs: 2
-// CHECK-PRETTY: Submissions: 3, using cumulative 0 B
+// CHECK-PRETTY: Submissions: 2, using cumulative 0 B
 // CHECK-PRETTY:   DMA Fills: 0
-// CHECK-PRETTY:  DMA Copies: 2
+// CHECK-PRETTY:  DMA Copies: 1
 // CHECK-PRETTY: Collectives: 0
 // CHECK-PRETTY:  Dispatches: 3
 // CHECK-PRETTY: Executables: 2, 33% reuse
 
 // CHECK-CSV: ; Aggregate Statistics
-// CHECK-CSV: "Constants","Constant Size","Variables","Variable Size","Awaits","Submissions","Transient Size","Fills","Copies","Dispatches","Executables"
-// CHECK-CSV: 1,0,0,0,2,3,0,0,2,3,2
+// CHECK-CSV: "Constants","Constant Size","Variables","Variable Size","Awaits","Submissions","Transient Size","Fills","Copies","Dispatches","Async Calls","Executables"
+// CHECK-CSV: 1,192,0,0,2,2,0,0,1,3,0,2
 // CHECK-CSV: ; Execution
 // CHECK-CSV: "Depth","Command","Symbol","Length","Invocations","Workload","Operands","Resources"
-// CHECK-CSV: 0,"copy",,192,,,,
+// CHECK-CSV: 0,"copy",,16,,,,
 // CHECK-CSV: 0,"dispatch","@func_a_ex_0::@dispatch_0",,4,"4;1;1",0,3
 
 util.global private mutable @_constant__timepoint = #stream.timepoint<immediate>
@@ -41,33 +41,23 @@ util.initializer {
       dense<0> : vector<20xi8>,
   ]>
   %did_map, %result = stream.resource.try_map %1[%c0] : !util.buffer -> i1, !stream.resource<constant>{%c192}
-  %2:2 = scf.if %did_map -> (!stream.resource<constant>, !stream.timepoint) {
-    scf.yield %result, %0 : !stream.resource<constant>, !stream.timepoint
-  } else {
-    %3 = stream.resource.map %1[%c0] : !util.buffer -> !stream.resource<staging>{%c192}
-    %4 = stream.resource.alloc uninitialized : !stream.resource<constant>{%c192}
-    %5 = stream.cmd.execute with(%3 as %arg0: !stream.resource<staging>{%c192}, %4 as %arg1: !stream.resource<constant>{%c192}) {
-      stream.cmd.copy %arg0[%c0], %arg1[%c0], %c192 : !stream.resource<staging>{%c192} -> !stream.resource<constant>{%c192}
-    } => !stream.timepoint
-    scf.yield %4, %5 : !stream.resource<constant>, !stream.timepoint
-  }
-  util.global.store %2#0, @_constant : !stream.resource<constant>
-  util.global.store %2#1, @_constant__timepoint : !stream.timepoint
-  util.initializer.return
+  util.global.store %result, @_constant : !stream.resource<constant>
+  util.global.store %0, @_constant__timepoint : !stream.timepoint
+  util.return
 }
 
 stream.executable private @func_a_ex_0 {
   stream.executable.export public @dispatch_0
   builtin.module {
-    func.func @dispatch_0(%arg0: !stream.binding {stream.alignment = 32 : index}, %arg1: !stream.binding {stream.alignment = 32 : index}, %arg2: !stream.binding {stream.alignment = 32 : index}) {
+     util.func public @dispatch_0(%arg0: !stream.binding {stream.alignment = 32 : index}, %arg1: !stream.binding {stream.alignment = 32 : index}, %arg2: !stream.binding {stream.alignment = 32 : index}) {
       %c4 = arith.constant 4 : index
       %c0 = arith.constant 0 : index
       %0 = stream.binding.subspan %arg0[%c0] : !stream.binding -> !flow.dispatch.tensor<readonly:tensor<4xi32>>
       %1 = stream.binding.subspan %arg1[%c0] : !stream.binding -> !flow.dispatch.tensor<readonly:tensor<4xi32>>
       %2 = stream.binding.subspan %arg2[%c0] : !stream.binding -> !flow.dispatch.tensor<writeonly:tensor<4xi32>>
-      %workgroup_size_0 = flow.dispatch.workgroup.size[0] : index
-      %workgroup_id_0 = flow.dispatch.workgroup.id[0] : index
-      %workgroup_count_0 = flow.dispatch.workgroup.count[0] : index
+      %workgroup_size_0 = stream.dispatch.workgroup.size[0] : index
+      %workgroup_id_0 = stream.dispatch.workgroup.id[0] : index
+      %workgroup_count_0 = stream.dispatch.workgroup.count[0] : index
       %3 = affine.apply affine_map<()[s0, s1] -> (s0 * s1)>()[%workgroup_id_0, %workgroup_size_0]
       %4 = affine.apply affine_map<()[s0, s1] -> (s0 * s1)>()[%workgroup_count_0, %workgroup_size_0]
       scf.for %arg3 = %3 to %c4 step %4 {
@@ -82,7 +72,7 @@ stream.executable private @func_a_ex_0 {
         } -> tensor<?xi32>
         flow.dispatch.tensor.store %9, %2, offsets = [%arg3], sizes = [%5], strides = [1] : tensor<?xi32> -> !flow.dispatch.tensor<writeonly:tensor<4xi32>>
       }
-      return
+      util.return
     }
   }
 }
@@ -90,15 +80,15 @@ stream.executable private @func_a_ex_0 {
 stream.executable private @func_a_ex_1 {
   stream.executable.export public @dispatch_1
   builtin.module {
-    func.func @dispatch_1(%arg0: !stream.binding {stream.alignment = 32 : index}, %arg1: !stream.binding {stream.alignment = 32 : index}, %arg2: !stream.binding {stream.alignment = 32 : index}) {
+     util.func public @dispatch_1(%arg0: !stream.binding {stream.alignment = 32 : index}, %arg1: !stream.binding {stream.alignment = 32 : index}, %arg2: !stream.binding {stream.alignment = 32 : index}) {
       %c3 = arith.constant 3 : index
       %c0 = arith.constant 0 : index
       %0 = stream.binding.subspan %arg0[%c0] : !stream.binding -> !flow.dispatch.tensor<readonly:tensor<3xi32>>
       %1 = stream.binding.subspan %arg1[%c0] : !stream.binding -> !flow.dispatch.tensor<readonly:tensor<3xi32>>
       %2 = stream.binding.subspan %arg2[%c0] : !stream.binding -> !flow.dispatch.tensor<writeonly:tensor<3xi32>>
-      %workgroup_size_0 = flow.dispatch.workgroup.size[0] : index
-      %workgroup_id_0 = flow.dispatch.workgroup.id[0] : index
-      %workgroup_count_0 = flow.dispatch.workgroup.count[0] : index
+      %workgroup_size_0 = stream.dispatch.workgroup.size[0] : index
+      %workgroup_id_0 = stream.dispatch.workgroup.id[0] : index
+      %workgroup_count_0 = stream.dispatch.workgroup.count[0] : index
       %3 = affine.apply affine_map<()[s0, s1] -> (s0 * s1)>()[%workgroup_id_0, %workgroup_size_0]
       %4 = affine.apply affine_map<()[s0, s1] -> (s0 * s1)>()[%workgroup_count_0, %workgroup_size_0]
       scf.for %arg3 = %3 to %c3 step %4 {
@@ -113,12 +103,12 @@ stream.executable private @func_a_ex_1 {
         } -> tensor<?xi32>
         flow.dispatch.tensor.store %9, %2, offsets = [%arg3], sizes = [%5], strides = [1] : tensor<?xi32> -> !flow.dispatch.tensor<writeonly:tensor<3xi32>>
       }
-      return
+      util.return
     }
   }
 }
 
-func.func public @func_a() -> (tensor<4xi32>, tensor<4xi32>) {
+util.func public @func_a() -> (tensor<4xi32>, tensor<4xi32>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c4 = arith.constant 4 : index
@@ -154,5 +144,5 @@ func.func public @func_a() -> (tensor<4xi32>, tensor<4xi32>) {
   %5 = stream.tensor.export %4 : tensor<4xi32> in !stream.resource<external>{%c16} -> tensor<4xi32>
   %6 = stream.timepoint.await %1 => %0 : !stream.resource<external>{%c16}
   %7 = stream.tensor.export %6 : tensor<4xi32> in !stream.resource<external>{%c16} -> tensor<4xi32>
-  return %5, %7 : tensor<4xi32>, tensor<4xi32>
+  util.return %5, %7 : tensor<4xi32>, tensor<4xi32>
 }

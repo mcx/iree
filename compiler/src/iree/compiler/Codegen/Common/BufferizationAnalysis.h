@@ -16,18 +16,17 @@
 
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// Class that tracks the equivalence relationship between tensors. Its a
 /// light-weight wrapper around `llvm::EquivalenceClasses` to account for
 /// `Value` not directly supported as a value type by this class.
 class BufferizationPlan {
- public:
+public:
   llvm::EquivalenceClasses<void *>::iterator findValue(Value v) const {
     return mappedTensors.findValue(getPointer(v));
   }
@@ -67,13 +66,14 @@ class BufferizationPlan {
   /// the dispatch region.
   bool isInStoreSet(Value v) {
     Value leader = getLeaderValue(v);
-    if (!leader) return false;
+    if (!leader)
+      return false;
     return storeLeaders.count(leader);
   }
 
   void dump();
 
- private:
+private:
   Value getLeaderValue(Value v1) const {
     void *ptr = getPointer(v1);
     auto it = mappedTensors.findLeader(ptr);
@@ -98,9 +98,8 @@ class BufferizationPlan {
 /// Analysis the `tensor` values in `funcOp` and groups them together into
 /// equivalence classes such that each class contains tensors that can be mapped
 /// to the same buffer.
-LogicalResult createTensorEquivalenceClasses(func::FuncOp funcOp,
+LogicalResult createTensorEquivalenceClasses(mlir::FunctionOpInterface funcOp,
                                              BufferizationPlan &plan);
 
-}  // namespace iree_compiler
-}  // namespace mlir
-#endif  // IREE_COMPILER_CODEGEN_COMMON_BUFFERIZATIONANALYSIS_H
+} // namespace mlir::iree_compiler
+#endif // IREE_COMPILER_CODEGEN_COMMON_BUFFERIZATIONANALYSIS_H

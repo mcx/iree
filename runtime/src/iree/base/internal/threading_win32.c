@@ -15,11 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "iree/base/api.h"
 #include "iree/base/internal/atomics.h"
 #include "iree/base/internal/threading.h"
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
 
 // Great documentation:
 // https://www.microsoftpressstore.com/articles/article.aspx?p=2233328
@@ -28,7 +25,7 @@ struct iree_thread_t {
   iree_atomic_ref_count_t ref_count;
   iree_allocator_t allocator;
 
-  char name[16];
+  char name[32];
   HANDLE handle;
   DWORD id;
 
@@ -119,10 +116,6 @@ static DWORD WINAPI iree_thread_start_routine(LPVOID param) {
   thread->entry = NULL;
   thread->entry_arg = NULL;
 
-  // Release our ownership of the thread handle. If the creating thread doesn't
-  // want it this will free the memory and fully detach the thread.
-  iree_thread_release(thread);
-
   // Call the user thread entry point function.
   // Note that this can be a tail-call which saves a stack frame in all threads
   // (which is really just to make call stacks in debuggers much cleaner).
@@ -150,16 +143,12 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
   thread->entry_arg = entry_arg;
   strncpy_s(thread->name, IREE_ARRAYSIZE(thread->name), params.name.data,
             min(params.name.size, IREE_ARRAYSIZE(thread->name) - 1));
-  iree_atomic_store_int32(&thread->is_suspended,
-                          params.create_suspended ? 1 : 0,
-                          iree_memory_order_relaxed);
+  iree_atomic_store(&thread->is_suspended, params.create_suspended ? 1 : 0,
+                    iree_memory_order_relaxed);
   iree_thread_override_list_initialize(iree_thread_set_priority_class,
                                        params.priority_class, thread->allocator,
                                        &thread->qos_override_list);
 
-  // Retain the thread for the thread itself; this way if the caller immediately
-  // releases the iree_thread_t handle the thread won't explode.
-  iree_thread_retain(thread);
   *out_thread = thread;
 
   // Create the thread either suspended or running as the user requested.
@@ -172,7 +161,6 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
   }
   if (thread->handle == INVALID_HANDLE_VALUE) {
     iree_thread_release(thread);  // for self
-    iree_thread_release(thread);  // for caller
     *out_thread = NULL;
     IREE_TRACE_ZONE_END(z0);
     return iree_make_status(IREE_STATUS_INTERNAL,
@@ -281,8 +269,7 @@ void iree_thread_request_affinity(iree_thread_t* thread,
   int affinity_desc_length = snprintf(
       affinity_desc, IREE_ARRAYSIZE(affinity_desc), "group=%d, id=%d, smt=%d",
       affinity.group, affinity.id, affinity.smt);
-  IREE_TRACE_ZONE_APPEND_TEXT_STRING_VIEW(z0, affinity_desc,
-                                          affinity_desc_length);
+  IREE_TRACE_ZONE_APPEND_TEXT(z0, affinity_desc, affinity_desc_length);
 #endif  // IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_INSTRUMENTATION
 
   GROUP_AFFINITY group_affinity;
@@ -316,12 +303,18 @@ void iree_thread_resume(iree_thread_t* thread) {
   // always balance suspend/resume or else we'll mess with any
   // debuggers/profilers that may be suspending threads for their own uses.
   int32_t expected = 1;
-  if (iree_atomic_compare_exchange_strong_int32(
+  if (iree_atomic_compare_exchange_strong(
           &thread->is_suspended, &expected, 0, iree_memory_order_acq_rel,
           iree_memory_order_relaxed /* expected is unused */)) {
     ResumeThread(thread->handle);
   }
 
+  IREE_TRACE_ZONE_END(z0);
+}
+
+void iree_thread_join(iree_thread_t* thread) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  WaitForSingleObject(thread->handle, INFINITE);
   IREE_TRACE_ZONE_END(z0);
 }
 

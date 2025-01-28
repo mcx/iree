@@ -7,28 +7,28 @@
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "iree/compiler/Dialect/VM/Conversion/TypeConverter.h"
-#include "iree/compiler/Dialect/VM/Conversion/UtilToVM/ConvertUtilToVM.h"
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
 namespace {
 
 static Value castToI32(Value value, OpBuilder &builder) {
-  if (value.getType().isInteger(32)) return value;
+  if (value.getType().isInteger(32))
+    return value;
   return builder.createOrFold<IREE::VM::TruncI64I32Op>(
       value.getLoc(), builder.getI32Type(), value);
 }
 
 static Value castToIndex(Value value, OpBuilder &builder) {
-  if (value.getType().isIndex()) return value;
+  if (value.getType().isIndex())
+    return value;
   return builder.createOrFold<arith::IndexCastOp>(
       value.getLoc(), builder.getIndexType(), value);
 }
@@ -36,9 +36,9 @@ static Value castToIndex(Value value, OpBuilder &builder) {
 class ListCreateOpConversion
     : public OpConversionPattern<IREE::Util::ListCreateOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::ListCreateOp srcOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::ListCreateOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Value initialCapacity = adaptor.getInitialCapacity();
     if (initialCapacity) {
       initialCapacity = castToI32(initialCapacity, rewriter);
@@ -56,9 +56,9 @@ class ListCreateOpConversion
 class ListSizeOpConversion
     : public OpConversionPattern<IREE::Util::ListSizeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::ListSizeOp srcOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::ListSizeOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Value size = rewriter.create<IREE::VM::ListSizeOp>(
         srcOp.getLoc(), rewriter.getI32Type(), adaptor.getList());
     rewriter.replaceOp(srcOp, castToIndex(size, rewriter));
@@ -69,9 +69,9 @@ class ListSizeOpConversion
 class ListResizeOpConversion
     : public OpConversionPattern<IREE::Util::ListResizeOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::ListResizeOp srcOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::ListResizeOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<IREE::VM::ListResizeOp>(
         srcOp, adaptor.getList(), castToI32(adaptor.getNewSize(), rewriter));
     return success();
@@ -80,9 +80,9 @@ class ListResizeOpConversion
 
 class ListGetOpConversion : public OpConversionPattern<IREE::Util::ListGetOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::ListGetOp srcOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::ListGetOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto index = castToI32(adaptor.getIndex(), rewriter);
     auto resultType = typeConverter->convertType(srcOp.getResult().getType());
     if (resultType.isInteger(32)) {
@@ -109,9 +109,9 @@ class ListGetOpConversion : public OpConversionPattern<IREE::Util::ListGetOp> {
 
 class ListSetOpConversion : public OpConversionPattern<IREE::Util::ListSetOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      IREE::Util::ListSetOp srcOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Util::ListSetOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto index = castToI32(adaptor.getIndex(), rewriter);
     auto valueType = adaptor.getValue().getType();
     if (valueType.isInteger(32)) {
@@ -136,21 +136,23 @@ class ListSetOpConversion : public OpConversionPattern<IREE::Util::ListSetOp> {
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateUtilListToVMPatterns(MLIRContext *context,
                                   ConversionTarget &conversionTarget,
                                   TypeConverter &typeConverter,
                                   RewritePatternSet &patterns) {
   typeConverter.addConversion(
-      [&typeConverter](IREE::Util::ListType type) -> Optional<Type> {
+      [&typeConverter](IREE::Util::ListType type) -> std::optional<Type> {
         Type elementType;
-        if (type.getElementType().isa<IREE::Util::VariantType>()) {
+        if (llvm::isa<IREE::Util::ObjectType>(type.getElementType()) ||
+            llvm::isa<IREE::Util::VariantType>(type.getElementType())) {
           elementType = IREE::VM::OpaqueType::get(type.getContext());
         } else {
           elementType = typeConverter.convertType(type.getElementType());
         }
-        if (!elementType) return std::nullopt;
+        if (!elementType)
+          return std::nullopt;
         return IREE::VM::RefType::get(IREE::VM::ListType::get(elementType));
       });
 
@@ -164,5 +166,4 @@ void populateUtilListToVMPatterns(MLIRContext *context,
           typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

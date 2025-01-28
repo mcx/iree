@@ -20,14 +20,14 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 namespace {
 
 // Casts |value| to i32 if it is not already.
 static Value castToI32(Value value, OpBuilder &builder) {
-  if (value.getType().isInteger(32)) return value;
+  if (value.getType().isInteger(32))
+    return value;
   return builder.createOrFold<IREE::VM::TruncI64I32Op>(
       value.getLoc(), builder.getI32Type(), value);
 }
@@ -40,9 +40,9 @@ struct ExecutableLoadOpConversion
     importOp = importSymbols.lookup<IREE::VM::ImportOp>(importName);
     assert(importOp);
   }
-  LogicalResult matchAndRewrite(
-      IREE::HAL::Loader::ExecutableLoadOp loadOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::Loader::ExecutableLoadOp loadOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     // Get format string as a rodata blob.
     auto executableFormatStr = rewriter.create<IREE::VM::RodataInlineOp>(
         loadOp.getLoc(), loadOp.getFormatAttr());
@@ -64,7 +64,7 @@ struct ExecutableLoadOpConversion
     return success();
   }
 
- private:
+private:
   mutable IREE::VM::ImportOp importOp;
 };
 
@@ -78,32 +78,30 @@ struct ExecutableDispatchOpConversion
     importOp = importSymbols.lookup<IREE::VM::ImportOp>(importName);
     assert(importOp);
   }
-  LogicalResult matchAndRewrite(
-      IREE::HAL::Loader::ExecutableDispatchOp dispatchOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
-    auto entryPoint = rewriter.create<IREE::VM::ConstI32Op>(
-        dispatchOp.getLoc(),
-        static_cast<int32_t>(adaptor.getEntryPoint().getZExtValue()));
+  LogicalResult
+  matchAndRewrite(IREE::HAL::Loader::ExecutableDispatchOp dispatchOp,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     SmallVector<Value, 8> callOperands = {
         adaptor.getExecutable(),
-        entryPoint,
+        castToI32(adaptor.getEntryPoint(), rewriter),
         castToI32(adaptor.getWorkgroupX(), rewriter),
         castToI32(adaptor.getWorkgroupY(), rewriter),
         castToI32(adaptor.getWorkgroupZ(), rewriter),
     };
-    auto pushConstants = adaptor.getPushConstants();
+    auto constants = adaptor.getConstants();
     SmallVector<int16_t, 5> segmentSizes = {
         /*executable=*/-1,
         /*entry_point=*/-1,
         /*workgroup_x=*/-1,
         /*workgroup_y=*/-1,
         /*workgroup_z=*/-1,
-        /*push_constants=*/
-        static_cast<int16_t>(pushConstants.size()),
+        /*constants=*/
+        static_cast<int16_t>(constants.size()),
         /*bindings=*/
         static_cast<int16_t>(adaptor.getBindingBuffers().size()),
     };
-    callOperands.append(pushConstants.begin(), pushConstants.end());
+    callOperands.append(constants.begin(), constants.end());
     for (auto [bindingBuffer, bindingOffset, bindingLength] : llvm::zip_equal(
              adaptor.getBindingBuffers(), adaptor.getBindingOffsets(),
              adaptor.getBindingLengths())) {
@@ -121,11 +119,11 @@ struct ExecutableDispatchOpConversion
     return success();
   }
 
- private:
+private:
   mutable IREE::VM::ImportOp importOp;
 };
 
-}  // namespace
+} // namespace
 
 void populateHALLoaderToVMPatterns(MLIRContext *context,
                                    ConversionTarget &conversionTarget,
@@ -142,5 +140,4 @@ void populateHALLoaderToVMPatterns(MLIRContext *context,
       context, importSymbols, typeConverter, "hal_loader.executable.dispatch");
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

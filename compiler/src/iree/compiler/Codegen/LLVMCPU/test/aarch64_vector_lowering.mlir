@@ -1,5 +1,12 @@
-// RUN: iree-opt %s --iree-llvmcpu-mmt4d-vector-lowering --split-input-file | FileCheck %s
+// RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-llvmcpu-mmt4d-vector-lowering, iree-codegen-llvmcpu-vector-lowering-pipeline))" --split-input-file | FileCheck %s
+// RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-llvmcpu-mmt4d-vector-lowering{vector-contract-custom-kernels=false}))" --split-input-file | FileCheck %s -check-prefix=CHECK-KERNEL-OFF
+// RUN: iree-opt %s --pass-pipeline="builtin.module(func.func(iree-llvmcpu-mmt4d-vector-lowering{vector-contract-custom-kernels=true}))" --split-input-file | FileCheck %s -check-prefix=CHECK-KERNEL-ON
 
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
 #map0 = affine_map<()[s0] -> (s0 * 64)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
 #map2 = affine_map<(d0, d1, d2) -> (d2, d1)>
@@ -15,9 +22,9 @@ module {
     %cst_0 = arith.constant 0.000000e+00 : f32
     %c384 = arith.constant 384 : index
     %c128 = arith.constant 128 : index
-    %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
-    %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<512x128xf32>>
-    %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
+    %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
+    %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<512x128xf32>>
+    %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
     %workgroup_id_x = hal.interface.workgroup.id[0] : index
     %workgroup_count_x = hal.interface.workgroup.count[0] : index
     %workgroup_id_y = hal.interface.workgroup.id[1] : index
@@ -45,7 +52,7 @@ module {
           }
           scf.yield %11 : tensor<64x64xf32>
         }
-        flow.dispatch.tensor.store %10, %2, offsets = [%arg0, %arg1], sizes = [%c64, %c64], strides = [1, 1] : tensor<64x64xf32> -> !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
+        flow.dispatch.tensor.store %10, %2, offsets = [%arg0, %arg1], sizes = [64, 64], strides = [1, 1] : tensor<64x64xf32> -> !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
       }
     }
     return
@@ -62,9 +69,9 @@ module {
 //  CHECK-DAG: %[[C16:.+]] = arith.constant 16 : index
 //  CHECK-DAG: %[[C32:.+]] = arith.constant 32 : index
 //  CHECK-DAG: %[[C64:.+]] = arith.constant 64 : index
-//      CHECK: %[[LHS:.+]] = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
-//      CHECK: %[[RHS:.+]] = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<512x128xf32>>
-//      CHECK: %[[DST:.+]] = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
+//      CHECK: %[[LHS:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(0) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
+//      CHECK: %[[RHS:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(1) : !flow.dispatch.tensor<readonly:tensor<512x128xf32>>
+//      CHECK: %[[DST:.+]] = hal.interface.binding.subspan layout({{.+}}) binding(2) : !flow.dispatch.tensor<writeonly:tensor<384x128xf32>>
 //      CHECK: %[[DST_TILE_INIT:.+]] = tensor.empty()
 //      CHECK: scf.for %[[I_IDX:.+]] = {{.*}} to %[[C384]] step %{{[0-9]*}} {
 //      CHECK:   %[[LHS_TILE:.+]] = flow.dispatch.tensor.load %[[LHS]], {{.*}} -> tensor<64x512xf32>
@@ -76,10 +83,9 @@ module {
 // CHECK-SAME:         iter_args(%[[ITER1:.+]] = %[[ITER0]]) -> (tensor<64x64xf32>)
 //      CHECK:         %[[MATMUL_RES:.+]] = scf.for %[[L1_K:.+]] = %[[C0]] to %[[C512]] step %[[C32]]
 // CHECK-SAME:           iter_args(%[[ITER2:.+]] = %[[CST_VECTOR]]) -> (vector<16x16xf32>)
-//      CHECK:           {{.*}} = vector.transfer_read %[[LHS_TILE]]
-//      CHECK:           {{.*}} = vector.transfer_read %[[RHS_TILE]]
-// CHECK-COUNT-16:       vector.outerproduct
-// CHECK-COUNT-16:       vector.outerproduct
+//  CHECK-DAG:           {{.*}} = tensor.extract %[[LHS_TILE]]
+//  CHECK-DAD:           {{.*}} = vector.transfer_read %[[RHS_TILE]]
+// CHECK-COUNT-32:       vector.fma
 //      CHECK:           scf.yield %{{.*}} : vector<16x16xf32>
 //      CHECK:         %[[EXP:.+]] = math.exp %[[MATMUL_RES]] : vector<16x16xf32>
 //      CHECK:         %[[RES:.+]] = vector.transfer_write %[[EXP]], %[[ITER1]][%[[L1_I]], %[[L1_J]]] {{.*}} : vector<16x16xf32>, tensor<64x64xf32>
@@ -87,6 +93,14 @@ module {
 
 // -----
 
+#pipeline_layout = #hal.pipeline.layout<bindings = [
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>,
+  #hal.pipeline.binding<storage_buffer>
+]>
 #map0 = affine_map<()[s0] -> (s0 * 64)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d2)>
 #map2 = affine_map<(d0, d1, d2) -> (d2, d1)>
@@ -107,12 +121,12 @@ module {
     %c1835008 = arith.constant 1835008 : index
     %c0 = arith.constant 0 : index
     %c64 = arith.constant 64 : index
-    %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384xi32>>
-    %1 = hal.interface.binding.subspan set(0) binding(1) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
-    %2 = hal.interface.binding.subspan set(0) binding(2) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384x384xf32>>
-    %3 = hal.interface.binding.subspan set(0) binding(3) type(storage_buffer) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
-    %4 = hal.interface.binding.subspan set(0) binding(4) type(storage_buffer) offset(%c1835008) : !flow.dispatch.tensor<readonly:tensor<2x512xf32>>
-    %5 = hal.interface.binding.subspan set(0) binding(5) type(storage_buffer) : !flow.dispatch.tensor<writeonly:tensor<384x512xf32>>
+    %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) : !flow.dispatch.tensor<readonly:tensor<384xi32>>
+    %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
+    %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) : !flow.dispatch.tensor<readonly:tensor<384x384xf32>>
+    %3 = hal.interface.binding.subspan layout(#pipeline_layout) binding(3) : !flow.dispatch.tensor<readonly:tensor<384x512xf32>>
+    %4 = hal.interface.binding.subspan layout(#pipeline_layout) binding(4) offset(%c1835008) : !flow.dispatch.tensor<readonly:tensor<2x512xf32>>
+    %5 = hal.interface.binding.subspan layout(#pipeline_layout) binding(5) : !flow.dispatch.tensor<writeonly:tensor<384x512xf32>>
     %6 = flow.dispatch.tensor.load %4, offsets = [0, 0], sizes = [2, 512], strides = [1, 1] : !flow.dispatch.tensor<readonly:tensor<2x512xf32>> -> tensor<2x512xf32>
     %workgroup_id_x = hal.interface.workgroup.id[0] : index
     %workgroup_count_x = hal.interface.workgroup.count[0] : index
@@ -142,7 +156,7 @@ module {
             %21 = vector.transfer_write %20, %12[%c0, %c0] {in_bounds = [true, true]} : vector<32x32xf32>, tensor<32x32xf32>
             %22 = tensor.extract_slice %15[%arg2, %arg4] [32, 32] [1, 1] : tensor<64x64xf32> to tensor<32x32xf32>
             %23 = tensor.extract_slice %arg5[%arg2, %arg4] [32, 32] [1, 1] : tensor<64x64xf32> to tensor<32x32xf32>
-            %24 = linalg.generic {indexing_maps = [#map4, #map5, #map4, #map4], iterator_types = ["parallel", "parallel"]} ins(%21, %18, %22 : tensor<32x32xf32>, tensor<32xi32>, tensor<32x32xf32>) outs(%23 : tensor<32x32xf32>) attrs =  {__internal_linalg_transform__ = "vectorize"} {
+            %24 = linalg.generic {indexing_maps = [#map4, #map5, #map4, #map4], iterator_types = ["parallel", "parallel"]} ins(%21, %18, %22 : tensor<32x32xf32>, tensor<32xi32>, tensor<32x32xf32>) outs(%23 : tensor<32x32xf32>) {
             ^bb0(%arg6: f32, %arg7: i32, %arg8: f32, %arg9: f32):
               %26 = linalg.index 1 : index
               %27 = affine.apply #map6(%arg1, %26, %arg4)
@@ -160,13 +174,49 @@ module {
           }
           scf.yield %19 : tensor<64x64xf32>
         }
-        flow.dispatch.tensor.store %17, %5, offsets = [%arg0, %arg1], sizes = [%c64, %c64], strides = [1, 1] : tensor<64x64xf32> -> !flow.dispatch.tensor<writeonly:tensor<384x512xf32>>
+        flow.dispatch.tensor.store %17, %5, offsets = [%arg0, %arg1], sizes = [64, 64], strides = [1, 1] : tensor<64x64xf32> -> !flow.dispatch.tensor<writeonly:tensor<384x512xf32>>
       }
     }
     return
   }
 }
-//      CHECK: func.func @matmul_gather() {
+
 // Check that matmul is lowered to vector ops
-//      CHECK:   vector.outerproduct
-//      CHECK:   linalg.generic
+
+// CHECK-LABEL: func.func @matmul_gather() {
+//    CHECK-32:   vector.fma
+//       CHECK:   linalg.generic
+
+// -----
+
+// CHECK-KERNEL-OFF-LABEL: @simpul_mul_mixed_mini_no_custom_kernel
+// CHECK-KERNEL-OFF-NOT: llvm.inline_asm asm_dialect
+
+#executable_target = #hal.executable.target<"llvm-cpu", "embedded-elf-arm_64", {cpu = "generic", cpu_features = "+neon,+i8mm,+reserve-x18", data_layout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128", native_vector_size = 16 : i64, target_triple = "aarch64-unknown-unknown-eabi-elf", ukernels = "none"}>
+#translation_info = #iree_codegen.translation_info<pipeline = Mmt4dTilingExpert>
+module {
+  func.func @simpul_mul_mixed_mini_no_custom_kernel(%5 : vector<1x1x8x1xi8>, %6 : vector<1x1x8x1xi8> , %arg3 : vector<1x1x8x8xi32> ) -> vector<1x1x8x8xi32>
+  attributes { hal.executable.target = #executable_target, translation_info = #translation_info}  {
+    %7 = arith.extsi %5 : vector<1x1x8x1xi8> to vector<1x1x8x1xi32>
+    %8 = arith.extsi %6 : vector<1x1x8x1xi8> to vector<1x1x8x1xi32>
+    %9 = vector.contract {indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d2, d3, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d1, d2, d4, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d3, d4)>], iterator_types = ["parallel", "parallel", "reduction", "parallel", "parallel", "reduction"], kind = #vector.kind<add>} %7, %8, %arg3 : vector<1x1x8x1xi32>, vector<1x1x8x1xi32> into vector<1x1x8x8xi32>
+    return %9 : vector<1x1x8x8xi32>
+  }
+}
+
+// -----
+
+// CHECK-KERNEL-ON-LABEL: @simpul_mul_mixed_mini_custom_kernel
+// CHECK-KERNEL-ON-DAG: llvm.inline_asm asm_dialect
+
+#executable_target = #hal.executable.target<"llvm-cpu", "embedded-elf-arm_64", {cpu = "generic", cpu_features = "+neon,+i8mm,+reserve-x18", data_layout = "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128", native_vector_size = 16 : i64, target_triple = "aarch64-unknown-unknown-eabi-elf", ukernels = "none"}>
+#translation_info = #iree_codegen.translation_info<pipeline = Mmt4dTilingExpert>
+module {
+  func.func @simpul_mul_mixed_mini_custom_kernel(%5 : vector<1x1x8x1xi8>, %6 : vector<1x1x8x1xi8> , %arg3 : vector<1x1x8x8xi32> )  -> vector<1x1x8x8xi32>
+  attributes { hal.executable.target = #executable_target, translation_info = #translation_info} {
+    %7 = arith.extsi %5 : vector<1x1x8x1xi8> to vector<1x1x8x1xi32>
+    %8 = arith.extsi %6 : vector<1x1x8x1xi8> to vector<1x1x8x1xi32>
+    %9 = vector.contract {indexing_maps = [affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d2, d3, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d1, d2, d4, d5)>, affine_map<(d0, d1, d2, d3, d4, d5) -> (d0, d1, d3, d4)>], iterator_types = ["parallel", "parallel", "reduction", "parallel", "parallel", "reduction"], kind = #vector.kind<add>} %7, %8, %arg3 : vector<1x1x8x1xi32>, vector<1x1x8x1xi32> into vector<1x1x8x8xi32>
+    return %9 : vector<1x1x8x8xi32>
+  }
+}

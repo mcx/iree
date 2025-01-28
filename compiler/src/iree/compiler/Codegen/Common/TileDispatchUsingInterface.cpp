@@ -12,11 +12,11 @@
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/ViewLikeInterfaceUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
@@ -24,25 +24,19 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/TilingInterface.h"
-#include "mlir/Transforms/TopologicalSortUtils.h"
 
 #define DEBUG_TYPE "tile-dispatch-using-interface"
 
-namespace mlir {
-namespace iree_compiler {
-
-/// Method to check if a value is zero
-static bool isZero(Value val) {
-  OpFoldResult ofr = getAsOpFoldResult(val);
-  return isConstantIntValue(ofr, 0);
-}
+namespace mlir::iree_compiler {
 
 /// Helper method to adjust the interchange vector to match the iteration
 /// domain.
-static SmallVector<int64_t> fillInterchangeVector(
-    ArrayRef<unsigned> interchangeVector, size_t iterationDomainSize) {
+static SmallVector<int64_t>
+fillInterchangeVector(ArrayRef<unsigned> interchangeVector,
+                      size_t iterationDomainSize) {
   SmallVector<int64_t> filledVector;
-  for (auto v : interchangeVector) filledVector.push_back(v);
+  for (auto v : interchangeVector)
+    filledVector.push_back(v);
   if (filledVector.size() < iterationDomainSize) {
     auto range = llvm::seq<unsigned>(filledVector.size(), iterationDomainSize);
     filledVector.append(range.begin(), range.end());
@@ -56,19 +50,32 @@ static SmallVector<int64_t> fillInterchangeVector(
 /// for a distributed loop. Replace the iteration domain to
 /// - lb_partitioned = lb + procId * step
 /// - step_partitioned = step * nprocs
-static std::tuple<Value, Value> getDistributeLBAndStep(OpBuilder &b,
-                                                       Location loc, Value lb,
-                                                       Value step, Value procId,
-                                                       Value nprocs) {
+static std::tuple<OpFoldResult, OpFoldResult>
+getDistributeLBAndStep(OpBuilder &b, Location loc, OpFoldResult lb,
+                       OpFoldResult step, OpFoldResult procId,
+                       OpFoldResult nprocs) {
   AffineExpr s0, s1, s2;
   bindSymbols(b.getContext(), s0, s1, s2);
   auto offsetMap = AffineMap::get(0, 3, {s0 + s1 * s2});
   auto stepMap = AffineMap::get(0, 2, {s0 * s1});
-  Value distributeLB =
-      makeComposedAffineApply(b, loc, offsetMap, ValueRange{lb, procId, step});
-  Value distributeStep =
-      makeComposedAffineApply(b, loc, stepMap, ValueRange{step, nprocs});
+  OpFoldResult distributeLB = affine::makeComposedFoldedAffineApply(
+      b, loc, offsetMap, ArrayRef<OpFoldResult>{lb, procId, step});
+  OpFoldResult distributeStep = affine::makeComposedFoldedAffineApply(
+      b, loc, stepMap, ArrayRef<OpFoldResult>{step, nprocs});
   return {distributeLB, distributeStep};
+}
+
+// Helper function to change arith.constant to i64 attribute.
+static void changeArithCstToI64Attr(OpBuilder &b,
+                                    MutableArrayRef<OpFoldResult> constants) {
+  for (OpFoldResult &val : constants) {
+    if (auto dyn_cast = llvm::dyn_cast_if_present<Value>(val)) {
+      APInt intVal;
+      if (matchPattern(dyn_cast, m_ConstantInt(&intVal))) {
+        val = b.getI64IntegerAttr(intVal.getSExtValue());
+      }
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -81,17 +88,6 @@ static std::tuple<Value, Value> getDistributeLBAndStep(OpBuilder &b,
 /// distribution and also use `flow.dispatch.tensor.load/store` instead of
 /// `tensor.extract_slice/insert_slice`.
 
-namespace {
-// Till `scf.for` can take an `OpFoldResult` for lb, ub and step, use of `Range`
-// with `OpFoldResult` causes lots of `OpFoldResult` -> `Value` conversion.
-// This struct is a mirror of `Range` with `Value` type fields.
-struct RangeVal {
-  Value offset;
-  Value size;
-  Value stride;
-};
-}  // namespace
-
 /// Generate an empty loop nest that represents the tiled loop nest shell.
 /// - `loopRanges` specifies the lb, ub and step of the untiled iteration space.
 /// - `tileSizeVals` is the tile sizes to use. Zero represent untiled loops.
@@ -99,11 +95,11 @@ struct RangeVal {
 /// the
 ///   tile processed within the inner most loop.
 static SmallVector<scf::ForOp> generateTileLoopNest(
-    OpBuilder &builder, Location loc, ArrayRef<RangeVal> loopRanges,
-    ArrayRef<Value> tileSizeVals,
+    OpBuilder &builder, Location loc, ArrayRef<Range> loopRanges,
+    ArrayRef<OpFoldResult> tileSizeVals,
     ArrayRef<linalg::DistributionMethod> distributionMethod,
     ArrayRef<linalg::ProcInfo> procInfo, SmallVector<OpFoldResult> &offsets,
-    SmallVector<OpFoldResult> &sizes) {
+    SmallVector<OpFoldResult> &sizes, SmallVector<Value> &workgroupCount) {
   assert(!loopRanges.empty() && "expected at least one loop range");
   assert(loopRanges.size() == tileSizeVals.size() &&
          "expected as many tile sizes as loop ranges");
@@ -118,38 +114,45 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
   // The tile size to use (to avoid out of bounds access) is  minimum of
   // `tileSize` and `ub - iv`, where `iv` is the induction variable
   // of the tiled loop.
-  AffineExpr s0, s1, d0;
+  AffineExpr s0, s1, d0, s2;
   bindDims(builder.getContext(), d0);
-  bindSymbols(builder.getContext(), s0, s1);
+  bindSymbols(builder.getContext(), s0, s1, s2);
   AffineMap minMap = AffineMap::get(1, 2, {s0, s1 - d0}, builder.getContext());
-  auto createBoundedTileSize = [&](Value iv, Value tileSize,
-                                   Value size) -> OpFoldResult {
-    if (isConstantIntValue(getAsOpFoldResult(tileSize), 1)) {
-      return builder.getIndexAttr(1);
+  auto createBoundedTileSize = [&](OpFoldResult iv, OpFoldResult tileSize,
+                                   OpFoldResult size) -> OpFoldResult {
+    if (isConstantIntValue(tileSize, 1)) {
+      return tileSize;
     }
-    return makeComposedFoldedAffineMin(
+    return affine::makeComposedFoldedAffineMin(
         builder, loc, minMap, ArrayRef<OpFoldResult>{iv, tileSize, size});
   };
 
   unsigned procDim = 0;
+  AffineMap numIterationsMap =
+      AffineMap::get(0, 3, (s1 - s0).ceilDiv(s2), builder.getContext());
   for (auto [idx, loopRange] : llvm::enumerate(loopRanges)) {
     // Capturing structured bindings in lambdas is a c++20 feature, so we have
     // to declare a local variable for it.
     int index = idx;
-    Value lb = loopRange.offset;
-    Value ub = loopRange.size;
-    Value step = tileSizeVals[index];
-
+    OpFoldResult lb = loopRange.offset;
+    OpFoldResult ub = loopRange.size;
+    OpFoldResult step = tileSizeVals[index];
     // No loops if tile size is zero. Set offset and size to the loop
     // offset and size.
-    if (matchPattern(tileSizeVals[index], m_Zero())) {
-      offsets[index] = getAsOpFoldResult(lb);
-      sizes[index] = getAsOpFoldResult(ub);
+    if (isConstantIntValue(tileSizeVals[index], 0)) {
+      offsets[index] = lb;
+      sizes[index] = ub;
       continue;
     }
 
     auto method = distributionMethod[index];
     if (method != linalg::DistributionMethod::None) {
+      Value numWorkgroups = getValueOrCreateConstantIndexOp(
+          builder, loc,
+          affine::makeComposedFoldedAffineApply(
+              builder, loc, numIterationsMap,
+              {loopRange.offset, loopRange.size, tileSizeVals[index]}));
+      workgroupCount.push_back(numWorkgroups);
       std::tie(lb, step) = getDistributeLBAndStep(builder, loc, lb, step,
                                                   procInfo[procDim].procId,
                                                   procInfo[procDim].nprocs);
@@ -157,13 +160,16 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
     }
 
     if (method == linalg::DistributionMethod::CyclicNumProcsEqNumIters) {
-      offsets[index] = getAsOpFoldResult(lb);
+      offsets[index] = lb;
       sizes[index] = createBoundedTileSize(lb, tileSizeVals[index], ub);
       continue;
     }
 
+    Value lbVal = getValueOrCreateConstantIndexOp(builder, loc, lb);
+    Value ubVal = getValueOrCreateConstantIndexOp(builder, loc, ub);
+    Value stepVal = getValueOrCreateConstantIndexOp(builder, loc, step);
     auto loop = builder.create<scf::ForOp>(
-        loc, lb, ub, step, ValueRange{},
+        loc, lbVal, ubVal, stepVal, ValueRange{},
         [&](OpBuilder &bodyBuilder, Location bodyLoc, Value iv,
             ValueRange /*iterArgs*/) {
           sizes[index] = createBoundedTileSize(iv, tileSizeVals[index], ub);
@@ -173,6 +179,13 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
     loops.push_back(loop);
     builder.setInsertionPoint(loop.getBody()->getTerminator());
   }
+
+  // Update the sizes if it contains arith.index with i64 attrs.
+  // TODO: tensor.extract_slice is unable to determine the
+  // result type if arith.constant is present. This is a workaround
+  // to ensure that the result type is determined.
+  changeArithCstToI64Attr(builder, sizes);
+
   return loops;
 }
 
@@ -180,9 +193,12 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
 /// `flow.dispatch.tensor.store` that writes only a tile of the result at
 /// offsets given by `tiledOffsets` and sizes given by `tiledSizes`, using
 /// `tiledValue` as the source.
-static LogicalResult replaceStoreWithTiledVersion(
-    RewriterBase &rewriter, OpResult untiledValue, OpResult tiledValue,
-    ArrayRef<OpFoldResult> tileOffsets, ArrayRef<OpFoldResult> tileSizes) {
+static LogicalResult replaceStoresWithTiledVersion(
+    RewriterBase &rewriter, OpResult untiledValue, Value tiledValue,
+    ArrayRef<OpFoldResult> tileOffsets, ArrayRef<OpFoldResult> tileSizes,
+    Block *innerLoopBody) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(innerLoopBody->getTerminator());
   SmallVector<IREE::Flow::DispatchTensorStoreOp> storeOps;
   for (OpOperand &use : untiledValue.getUses()) {
     auto storeOp = dyn_cast<IREE::Flow::DispatchTensorStoreOp>(use.getOwner());
@@ -190,7 +206,8 @@ static LogicalResult replaceStoreWithTiledVersion(
       storeOps.push_back(storeOp);
     }
   }
-  if (storeOps.empty()) return success();
+  if (storeOps.empty())
+    return success();
   if (storeOps.size() != 1) {
     return rewriter.notifyMatchFailure(untiledValue.getOwner(),
                                        "expected a single store for the op");
@@ -203,7 +220,7 @@ static LogicalResult replaceStoreWithTiledVersion(
   SliceAndDynamicDims clonedSliceAndVals =
       cloneOffsetsSizesAndStrides(rewriter, storeOp);
 
-  if (failed(mergeOffsetsSizesAndStrides(
+  if (failed(affine::mergeOffsetsSizesAndStrides(
           rewriter, storeOp.getLoc(), clonedSliceAndVals.offsets,
           clonedSliceAndVals.sizes, clonedSliceAndVals.strides,
           storeOp.getDroppedDims(), tileOffsets, tileSizes, tileStrides,
@@ -226,7 +243,9 @@ static LogicalResult replaceStoreWithTiledVersion(
 static LogicalResult replaceAllStoresWithTiledVersion(
     RewriterBase &rewriter, TilingInterface untiledOp,
     ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes,
-    Operation *tiledOp) {
+    ValueRange tiledValues, Block *innerLoopBody) {
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(innerLoopBody->getTerminator());
   for (auto [index, result] : llvm::enumerate(untiledOp->getResults())) {
     SmallVector<OpFoldResult> resultOffsets, resultSizes;
     if (failed(untiledOp.getResultTilePosition(rewriter, index, offsets, sizes,
@@ -234,32 +253,18 @@ static LogicalResult replaceAllStoresWithTiledVersion(
       return rewriter.notifyMatchFailure(
           untiledOp, "failed to rewrite destructive update");
     }
-    OpBuilder::InsertionGuard g(rewriter);
-    rewriter.setInsertionPoint(tiledOp->getBlock()->getTerminator());
-    if (failed(replaceStoreWithTiledVersion(
-            rewriter, result.cast<OpResult>(),
-            tiledOp->getResult(index).cast<OpResult>(), resultOffsets,
-            resultSizes))) {
+    if (failed(replaceStoresWithTiledVersion(
+            rewriter, llvm::cast<OpResult>(result), tiledValues[index],
+            resultOffsets, resultSizes, innerLoopBody))) {
       return failure();
     }
   }
   return success();
 }
 
-namespace {
-/// Result of the tiled operation.
-struct TilingResult {
-  Operation *tiledOp = nullptr;
-  SmallVector<scf::ForOp> loops;
-  llvm::SmallBitVector tiledLoops;
-  SmallVector<OpFoldResult> tileOffsets;
-  SmallVector<OpFoldResult> tileSizes;
-};
-}  // namespace
-
-static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
-    TilingInterface op, linalg::LinalgTilingOptions options,
-    PatternRewriter &rewriter) {
+FailureOr<IREETilingResult>
+tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
+                          linalg::LinalgTilingOptions options) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointAfter(op);
 
@@ -269,47 +274,54 @@ static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
   }
 
   // 1. Get the range of the loops that are represented by the operation.
-  SmallVector<Range> iterationDomainOfr = op.getIterationDomain(rewriter);
+  SmallVector<Range> iterationDomain = op.getIterationDomain(rewriter);
   Location loc = op.getLoc();
-  size_t numLoops = iterationDomainOfr.size();
+  size_t numLoops = iterationDomain.size();
   if (numLoops == 0) {
-    return TilingResult();
+    return IREETilingResult();
   }
-  auto iterationDomain =
-      llvm::to_vector(llvm::map_range(iterationDomainOfr, [&](Range r) {
-        return RangeVal{
-            getValueOrCreateConstantIndexOp(rewriter, loc, r.offset),
-            getValueOrCreateConstantIndexOp(rewriter, loc, r.size),
-            getValueOrCreateConstantIndexOp(rewriter, loc, r.stride)};
-      }));
 
   // 2. Materialize the tile sizes. Enforce the convention that "tiling by zero"
   // skips tiling a particular dimension. This convention is significantly
   // simpler to handle instead of adjusting affine maps to account for missing
   // dimensions.
-  SmallVector<Value> tileSizeVector =
-      options.tileSizeComputationFunction(rewriter, op);
-  if (tileSizeVector.size() < numLoops) {
-    auto zero = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
-    tileSizeVector.append(numLoops - tileSizeVector.size(), zero);
-  }
-  tileSizeVector.resize(numLoops);
+  SmallVector<OpFoldResult> tileSizes =
+      getAsOpFoldResult(options.tileSizeComputationFunction(rewriter, op));
+  tileSizes.resize(numLoops, rewriter.getIndexAttr(0));
 
-  TilingResult tilingResult;
+  IREETilingResult tilingResult;
   tilingResult.tiledLoops.resize(numLoops, false);
-  for (auto [index, tileSize] : llvm::enumerate(tileSizeVector)) {
-    if (!isZero(tileSize)) {
-      tilingResult.tiledLoops.set(index);
+  AffineExpr s0, s1, s2, s3; // lb, ub, step, tileSize
+  bindSymbols(rewriter.getContext(), s0, s1, s2, s3);
+  AffineExpr numTilesExprs = (s1 - s0).ceilDiv(s2 * s3);
+  for (auto [index, iteratorType, range, tileSize] :
+       llvm::enumerate(op.getLoopIteratorTypes(), iterationDomain, tileSizes)) {
+    // If distribution is specified, only parallel loops are tiled.
+    if (options.distribution && iteratorType != utils::IteratorType::parallel) {
+      continue;
     }
+    // If tile size is 0, it isnt tiled.
+    if (isConstantIntValue(tileSize, 0)) {
+      continue;
+    }
+    // If number of tiles is statically know to be 1, the loop isnt tiled.
+    OpFoldResult numTiles = affine::makeComposedFoldedAffineApply(
+        rewriter, loc, numTilesExprs,
+        {range.offset, range.size, range.stride, tileSize});
+    if (isConstantIntValue(numTiles, 1)) {
+      continue;
+    }
+
+    tilingResult.tiledLoops.set(index);
   }
 
   if (!tilingResult.tiledLoops.any()) {
-    return TilingResult();
+    return IREETilingResult();
   }
 
-  SmallVector<Operation *> tiledImplementation;
   {
     SmallVector<OpFoldResult> offsets, sizes;
+    SmallVector<Value> workgroupCount;
     // If there is an interchange specified, permute the iteration domain and
     // the tile sizes.
     SmallVector<int64_t> interchangeVector;
@@ -320,13 +332,12 @@ static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
     if (!interchangeVector.empty()) {
       if (!isPermutationVector(interchangeVector)) {
         return rewriter.notifyMatchFailure(
-            op,
-            "invalid intechange vector, not a permutation of the entire "
-            "iteration space");
+            op, "invalid intechange vector, not a permutation of the entire "
+                "iteration space");
       }
 
       applyPermutationToVector(iterationDomain, interchangeVector);
-      applyPermutationToVector(tileSizeVector, interchangeVector);
+      applyPermutationToVector(tileSizes, interchangeVector);
     }
 
     // If there is distribution specified, adjust the loop ranges. Note that
@@ -335,35 +346,39 @@ static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
         iterationDomain.size(), linalg::DistributionMethod::None);
     SmallVector<linalg::ProcInfo> procInfo;
     if (options.distribution) {
-      SmallVector<utils::IteratorType> iteratorTypes =
-          op.getLoopIteratorTypes();
-
-      // The parallel loops that are tiled are partitionable loops.
       SmallVector<Range> parallelLoopRanges;
-      SmallVector<unsigned> partitionedLoopIds;
-      for (auto [index, iteratorType] : llvm::enumerate(iteratorTypes)) {
-        if (iteratorType == utils::IteratorType::parallel &&
-            !isZero(tileSizeVector[index])) {
-          parallelLoopRanges.push_back(iterationDomainOfr[index]);
-          partitionedLoopIds.push_back(index);
+      for (auto loopIdx : llvm::seq<unsigned>(0, numLoops)) {
+        if (tilingResult.tiledLoops.test(loopIdx)) {
+          AffineExpr s0, s1;
+          bindSymbols(rewriter.getContext(), s0, s1);
+          OpFoldResult parallelLoopStep = affine::makeComposedFoldedAffineApply(
+              rewriter, loc, s0 * s1,
+              {iterationDomain[loopIdx].stride, tileSizes[loopIdx]});
+          Range r = {iterationDomain[loopIdx].offset,
+                     iterationDomain[loopIdx].size, parallelLoopStep};
+          parallelLoopRanges.emplace_back(std::move(r));
         }
       }
 
-      // Query the callback to get the {procId, nprocs} to use.
       procInfo =
           options.distribution->procInfo(rewriter, loc, parallelLoopRanges);
 
-      for (auto [index, loopIdx] : llvm::enumerate(partitionedLoopIds)) {
-        distributionMethods[loopIdx] = procInfo[index].distributionMethod;
+      unsigned partitionedLoopIdx = 0;
+      for (auto loopIdx : llvm::seq<unsigned>(0, numLoops)) {
+        if (!tilingResult.tiledLoops.test(loopIdx)) {
+          continue;
+        }
+        distributionMethods[loopIdx] =
+            procInfo[partitionedLoopIdx++].distributionMethod;
       }
     }
 
     // 3. Materialize an empty loop nest that iterates over the tiles. These
     // loops for now do not return any values even if the original operation has
     // results.
-    tilingResult.loops =
-        generateTileLoopNest(rewriter, loc, iterationDomain, tileSizeVector,
-                             distributionMethods, procInfo, offsets, sizes);
+    tilingResult.loops = generateTileLoopNest(
+        rewriter, loc, iterationDomain, tileSizes, distributionMethods,
+        procInfo, offsets, sizes, workgroupCount);
 
     if (!interchangeVector.empty()) {
       auto inversePermutation = invertPermutationVector(interchangeVector);
@@ -383,8 +398,14 @@ static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
     if (!tilingResult.loops.empty())
       rewriter.setInsertionPoint(
           tilingResult.loops.back().getBody()->getTerminator());
-    tiledImplementation = op.getTiledImplementation(rewriter, offsets, sizes);
-    tilingResult.tiledOp = tiledImplementation.back();
+    FailureOr<TilingResult> tiledImplementation =
+        op.getTiledImplementation(rewriter, offsets, sizes);
+    if (failed(tiledImplementation)) {
+      return rewriter.notifyMatchFailure(
+          op, "failed to generate tiled implementation");
+    }
+    std::swap(tilingResult.tiledOps, tiledImplementation->tiledOps);
+    std::swap(tilingResult.tiledValues, tiledImplementation->tiledValues);
 
     LLVM_DEBUG({
       if (!tilingResult.loops.empty()) {
@@ -395,18 +416,21 @@ static FailureOr<TilingResult> tileDispatchUsingSCFFopOp(
     });
     std::swap(tilingResult.tileOffsets, offsets);
     std::swap(tilingResult.tileSizes, sizes);
+    std::swap(tilingResult.workgroupCount, workgroupCount);
   }
 
   if (op->getNumResults() == 0) {
     rewriter.eraseOp(op);
     return tilingResult;
   }
-
+  Block *body = tilingResult.loops.empty()
+                    ? op->getBlock()
+                    : tilingResult.loops.back().getBody();
   // Rewrite all `flow.dispatch.tensor.store` operation with tiled version
   // of the store. Its valid to this for all stores of the root untiled op.
   if (failed(replaceAllStoresWithTiledVersion(
           rewriter, op, tilingResult.tileOffsets, tilingResult.tileSizes,
-          tilingResult.tiledOp))) {
+          tilingResult.tiledValues, body))) {
     return failure();
   }
   return tilingResult;
@@ -426,9 +450,10 @@ static SmallVector<Operation *> getAllFusableProducers(TilingInterface op) {
     Operation *currOp = worklist.front();
     worklist.pop_front();
     for (OpOperand &operand : currOp->getOpOperands()) {
+      Operation *definingOp = operand.get().getDefiningOp();
       auto tilingInterfaceProducer =
-          operand.get().getDefiningOp<TilingInterface>();
-      if (!tilingInterfaceProducer ||
+          dyn_cast_or_null<TilingInterface>(definingOp);
+      if (!tilingInterfaceProducer || isa<tensor::PadOp>(definingOp) ||
           producers.count(tilingInterfaceProducer)) {
         continue;
       }
@@ -444,8 +469,9 @@ static SmallVector<Operation *> getAllFusableProducers(TilingInterface op) {
 
 /// Return all slices that are used to access a tile of the producer. Assume
 /// that `tiledOps` are in "reverse" order of their appearance in the IR.
-static SmallVector<tensor::ExtractSliceOp> getAllFusableProducerUses(
-    Operation *untiledOp, ArrayRef<Operation *> tiledOps) {
+static SmallVector<tensor::ExtractSliceOp>
+getAllFusableProducerUses(Operation *untiledOp,
+                          ArrayRef<Operation *> tiledOps) {
   SmallVector<tensor::ExtractSliceOp> sliceOps;
   for (auto tiledOp : llvm::reverse(tiledOps)) {
     for (OpOperand &operand : llvm::reverse(tiledOp->getOpOperands())) {
@@ -458,19 +484,20 @@ static SmallVector<tensor::ExtractSliceOp> getAllFusableProducerUses(
   return sliceOps;
 }
 
-FailureOr<TileAndFuseResult> tileAndFuseDispatchUsingSCFForOp(
-    TilingInterface op, linalg::LinalgTilingOptions tilingOptions,
-    PatternRewriter &rewriter) {
-  TileAndFuseResult tileAndFuseResult;
+FailureOr<IREETileAndFuseResult>
+tileAndFuseDispatchUsingSCFForOp(RewriterBase &rewriter, TilingInterface op,
+                                 linalg::LinalgTilingOptions tilingOptions) {
+  IREETileAndFuseResult tileAndFuseResult;
   auto fusableProducers = getAllFusableProducers(op);
   // Apply the tiling pattern.
-  FailureOr<TilingResult> tilingResult =
-      tileDispatchUsingSCFFopOp(op, tilingOptions, rewriter);
+  FailureOr<IREETilingResult> tilingResult =
+      tileDispatchUsingSCFFopOp(rewriter, op, tilingOptions);
   if (failed(tilingResult)) {
     return failure();
   }
-  tileAndFuseResult.tiledAndFusedOps.push_back(tilingResult->tiledOp);
-  tileAndFuseResult.loops.append(tilingResult->loops);
+  tileAndFuseResult.tiledAndFusedOps = tilingResult->tiledOps;
+  tileAndFuseResult.loops = tilingResult->loops;
+  tileAndFuseResult.workgroupCount = tilingResult->workgroupCount;
 
   // If there is no tiling then there is nothing to do for fusion.
   if (!tilingResult->tiledLoops.any()) {
@@ -488,66 +515,36 @@ FailureOr<TileAndFuseResult> tileAndFuseDispatchUsingSCFForOp(
     // could use the first slice as the insertion point.
     auto sliceOps = getAllFusableProducerUses(
         fusableProducer, tileAndFuseResult.tiledAndFusedOps);
-    if (sliceOps.empty()) continue;
-    tensor::ExtractSliceOp sliceOp = sliceOps.front();
-    OpBuilder::InsertionGuard g(rewriter);
-    rewriter.setInsertionPoint(sliceOp);
 
-    // Generate the tiled implementation of the producer.
-    FailureOr<Value> tiledProducerVal =
-        tensor::replaceExtractSliceWithTiledProducer(
-            rewriter, sliceOp, sliceOp.getSource().cast<OpResult>());
-    if (failed(tiledProducerVal)) {
-      return rewriter.notifyMatchFailure(sliceOp,
-                                         "fusion along slice op failed");
-    }
-    auto tiledProducer = tiledProducerVal->getDefiningOp();
-    if (tiledProducer->getNumResults() != fusableProducer->getNumResults()) {
-      return rewriter.notifyMatchFailure(fusableProducer,
-                                         "fused operation expected to produce "
-                                         "an op with same number of results");
-    }
-
-    // 2b. Assume that the tile sizes used are such that all tiled loops are
-    //     "common parallel loops" for the consumer and all pulled in
-    //     producers. So using the tile size of the tiled consumer op, and the
-    //     information about which loops are tiled and which arent, compute
-    //     the tile sizes to use for the producer as well.
-    SmallVector<OpFoldResult> producerOffset, producerSizes;
-    SmallVector<Range> producerIterationDomain =
-        fusableProducer.getIterationDomain(rewriter);
-    for (auto [index, range] : llvm::enumerate(producerIterationDomain)) {
-      if (index < tilingResult->tiledLoops.size() &&
-          tilingResult->tiledLoops.test(index)) {
-        // It is not true that the tiling sizes for produces are always as same
-        // as the tiling sizes for consumers. The tensor.extract_slice op
-        // carries the information, so we can get the tiling sizes and offsets
-        // from it.
-        producerOffset.push_back(sliceOp.getMixedOffsets()[index]);
-        producerSizes.push_back(sliceOp.getMixedSizes()[index]);
-      } else {
-        producerOffset.push_back(range.offset);
-        producerSizes.push_back(range.size);
-      }
-    }
-
-    // 2c. Finally replace any `flow.dispatch.tensor.store` operation with
-    //     tiled version of the operation. It is only valid to do this under the
-    //     above assumption that the producer and consumer share the loops
-    //     that can be tiled.
-    if (failed(replaceAllStoresWithTiledVersion(rewriter, fusableProducer,
-                                                producerOffset, producerSizes,
-                                                tiledProducer))) {
-      return failure();
-    }
-    // Replace all uses of the slices processed in this step with values from
-    // the producer.
     for (auto sliceOp : sliceOps) {
-      unsigned resultNumber =
-          sliceOp.getSource().cast<OpResult>().getResultNumber();
-      rewriter.replaceOp(sliceOp, tiledProducer->getResult(resultNumber));
+      OpBuilder::InsertionGuard g(rewriter);
+      rewriter.setInsertionPoint(sliceOp);
+
+      // Generate the tiled implementation of the producer.
+      OpResult untiledValue = llvm::cast<OpResult>(sliceOp.getSource());
+      FailureOr<TilingResult> swapSliceResult =
+          tensor::replaceExtractSliceWithTiledProducer(rewriter, sliceOp,
+                                                       untiledValue);
+      if (failed(swapSliceResult) || swapSliceResult->tiledValues.size() != 1) {
+        return rewriter.notifyMatchFailure(sliceOp,
+                                           "fusion along slice op failed");
+      }
+
+      Block *body = tileAndFuseResult.loops.empty()
+                        ? op->getBlock()
+                        : tileAndFuseResult.loops.back().getBody();
+      // 2c. Finally replace any `flow.dispatch.tensor.store` operation with
+      //     tiled version of the operation. It is only valid to do this under
+      //     the above assumption that the producer and consumer share the loops
+      //     that can be tiled.
+      if (failed(replaceStoresWithTiledVersion(
+              rewriter, untiledValue, swapSliceResult->tiledValues[0],
+              sliceOp.getMixedOffsets(), sliceOp.getMixedSizes(), body))) {
+        return failure();
+      }
+      rewriter.replaceOp(sliceOp, swapSliceResult->tiledValues[0]);
+      tileAndFuseResult.tiledAndFusedOps.append(swapSliceResult->tiledOps);
     }
-    tileAndFuseResult.tiledAndFusedOps.push_back(tiledProducer);
   }
 
   return tileAndFuseResult;
@@ -569,10 +566,11 @@ struct SwapExtractSliceWithDispatchTensorLoad
                                 PatternRewriter &rewriter) const override {
     auto loadOp =
         sliceOp.getSource().getDefiningOp<IREE::Flow::DispatchTensorLoadOp>();
-    if (!loadOp) return failure();
+    if (!loadOp)
+      return failure();
 
     SmallVector<OpFoldResult> combinedOffsets, combinedSizes, combinedStrides;
-    if (failed(mergeOffsetsSizesAndStrides(
+    if (failed(affine::mergeOffsetsSizesAndStrides(
             rewriter, loadOp.getLoc(), loadOp, sliceOp, loadOp.getDroppedDims(),
             combinedOffsets, combinedSizes, combinedStrides))) {
       return rewriter.notifyMatchFailure(
@@ -598,7 +596,8 @@ struct SwapExtractSliceWithTensorEmpty
   LogicalResult matchAndRewrite(tensor::ExtractSliceOp sliceOp,
                                 PatternRewriter &rewriter) const override {
     auto emptyTensorOp = sliceOp.getSource().getDefiningOp<tensor::EmptyOp>();
-    if (!emptyTensorOp) return failure();
+    if (!emptyTensorOp)
+      return failure();
 
     SmallVector<OpFoldResult> mixedSizes = sliceOp.getMixedSizes();
     if (mixedSizes.size() != sliceOp.getType().getRank()) {
@@ -606,7 +605,8 @@ struct SwapExtractSliceWithTensorEmpty
       rankReducedMixedSizes.reserve(sliceOp.getType().getRank());
       auto droppedDims = sliceOp.getDroppedDims();
       for (auto [index, size] : llvm::enumerate(mixedSizes)) {
-        if (droppedDims.test(index)) continue;
+        if (droppedDims.test(index))
+          continue;
         rankReducedMixedSizes.push_back(size);
       }
       std::swap(mixedSizes, rankReducedMixedSizes);
@@ -617,14 +617,13 @@ struct SwapExtractSliceWithTensorEmpty
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateTileAndDistributeToWorkgroupsCleanupPatterns(
-    RewritePatternSet &patterns, linalg::LinalgTilingOptions options) {
+    RewritePatternSet &patterns) {
   MLIRContext *context = patterns.getContext();
   patterns.insert<SwapExtractSliceWithDispatchTensorLoad,
                   SwapExtractSliceWithTensorEmpty>(context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

@@ -12,10 +12,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Diagnostics.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
 
 //===----------------------------------------------------------------------===//
 // Resource usage bits
@@ -24,7 +21,7 @@ namespace Stream {
 enum class ResourceUsageBitfield : uint32_t {
   Indirect = 1u << 0,
   External = 1u << 1,
-  Mutated = 1u << 2,  // beyond definition
+  Mutated = 1u << 2, // beyond definition
   Constant = 1u << 3,
   TransferRead = 1u << 4,
   TransferWrite = 1u << 5,
@@ -65,7 +62,7 @@ inline bool bitEnumContains(ResourceUsageBitfield bits,
 // All `!stream.resource` SSA values will be analyzed and their usage will be
 // available for querying via the lookup functions.
 class ResourceUsageAnalysis {
- public:
+public:
   explicit ResourceUsageAnalysis(Operation *rootOp);
   ~ResourceUsageAnalysis();
 
@@ -82,17 +79,14 @@ class ResourceUsageAnalysis {
   }
 
   // Returns the analyzed resource usage of the |value| resource, if analyzed.
-  llvm::Optional<ResourceUsageBitfield> tryLookupResourceUsage(Value value);
+  std::optional<ResourceUsageBitfield> tryLookupResourceUsage(Value value);
 
- private:
+private:
   Explorer explorer;
   llvm::BumpPtrAllocator allocator;
   DFX::Solver solver;
 };
 
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream
 
-#endif  // IREE_COMPILER_DIALECT_STREAM_ANALYSIS_RESOURCE_USAGE_H_
+#endif // IREE_COMPILER_DIALECT_STREAM_ANALYSIS_RESOURCE_USAGE_H_

@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "iree/base/tracing.h"
 #include "iree/vm/instance.h"
 
 IREE_VM_DEFINE_TYPE_ADAPTERS(iree_vm_buffer, iree_vm_buffer_t);
@@ -25,11 +24,12 @@ static iree_status_t iree_vm_buffer_map(const iree_vm_buffer_t* buffer,
   length &= ~(alignment - 1);
   const iree_host_size_t end = offset + length;
   if (IREE_UNLIKELY(end > buffer->data.data_length)) {
-    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                            "out-of-bounds access detected (offset=%zu, "
-                            "length=%zu, alignment=%zu, buffer length=%zu)",
-                            offset, length, alignment,
-                            buffer->data.data_length);
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "out-of-bounds access detected (offset=%" PRIhsz
+        ", "
+        "length=%" PRIhsz ", alignment=%" PRIhsz ", buffer length=%" PRIhsz ")",
+        offset, length, alignment, buffer->data.data_length);
   }
   *out_data = buffer->data.data + offset;
   *out_data_length = length;
@@ -123,11 +123,11 @@ static void iree_vm_buffer_destroy(void* ptr) {
 }
 
 IREE_API_EXPORT void iree_vm_buffer_retain(iree_vm_buffer_t* buffer) {
-  iree_vm_ref_object_retain(buffer, &iree_vm_buffer_descriptor);
+  iree_vm_ref_object_retain(buffer, iree_vm_buffer_type());
 }
 
 IREE_API_EXPORT void iree_vm_buffer_release(iree_vm_buffer_t* buffer) {
-  iree_vm_ref_object_release(buffer, &iree_vm_buffer_descriptor);
+  iree_vm_ref_object_release(buffer, iree_vm_buffer_type());
 }
 
 IREE_API_EXPORT iree_status_t iree_vm_buffer_clone(
@@ -184,6 +184,24 @@ iree_vm_buffer_length(const iree_vm_buffer_t* buffer) {
 IREE_API_EXPORT uint8_t* iree_vm_buffer_data(const iree_vm_buffer_t* buffer) {
   IREE_ASSERT_ARGUMENT(buffer);
   return buffer->data.data;
+}
+
+IREE_API_EXPORT iree_byte_span_t
+iree_vm_buffer_contents(const iree_vm_buffer_t* buffer) {
+  // Buffer requires mutable access.
+  if (!buffer ||
+      !iree_all_bits_set(buffer->access, IREE_VM_BUFFER_ACCESS_MUTABLE)) {
+    return iree_byte_span_empty();
+  }
+  return iree_make_byte_span(iree_vm_buffer_data(buffer),
+                             iree_vm_buffer_length(buffer));
+}
+
+IREE_API_EXPORT iree_const_byte_span_t
+iree_vm_buffer_const_contents(const iree_vm_buffer_t* buffer) {
+  return buffer ? iree_make_const_byte_span(iree_vm_buffer_data(buffer),
+                                            iree_vm_buffer_length(buffer))
+                : iree_const_byte_span_empty();
 }
 
 IREE_API_EXPORT iree_status_t iree_vm_buffer_copy_bytes(
@@ -296,14 +314,108 @@ IREE_API_EXPORT iree_status_t iree_vm_buffer_write_elements(
   return iree_ok_status();
 }
 
-iree_status_t iree_vm_buffer_register_types(iree_vm_instance_t* instance) {
-  if (iree_vm_buffer_descriptor.type != IREE_VM_REF_TYPE_NULL) {
-    // Already registered.
-    return iree_ok_status();
+// Based on reference implementation from https://github.com/veorq/SipHash
+// By Jean-Philippe Aumasson and Daniel J. Bernstein. (CC0 Licensed)
+#define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+#define SIPROUND(v0, v1, v2, v3) \
+  v0 += v1;                      \
+  v1 = ROTL(v1, 13);             \
+  v1 ^= v0;                      \
+  v0 = ROTL(v0, 32);             \
+  v2 += v3;                      \
+  v3 = ROTL(v3, 16);             \
+  v3 ^= v2;                      \
+  v0 += v3;                      \
+  v3 = ROTL(v3, 21);             \
+  v3 ^= v0;                      \
+  v2 += v1;                      \
+  v1 = ROTL(v1, 17);             \
+  v1 ^= v2;                      \
+  v2 = ROTL(v2, 32)
+
+// Using SipHash-2-4.
+#ifndef cROUNDS
+#define cROUNDS 2
+#endif
+#ifndef dROUNDS
+#define dROUNDS 4
+#endif
+
+IREE_API_EXPORT iree_status_t iree_vm_buffer_hash(
+    const iree_vm_buffer_t* source_buffer, iree_host_size_t source_offset,
+    iree_host_size_t length, int64_t* out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_ASSERT_ARGUMENT(source_buffer);
+
+  // Get the byte span for the source data.
+  iree_const_byte_span_t source_span = iree_const_byte_span_empty();
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_vm_buffer_map_ro(source_buffer, source_offset, length, 1,
+                                &source_span));
+  const uint8_t* source = source_span.data;
+  const uint8_t* end = source + source_span.data_length -
+                       (source_span.data_length % sizeof(uint64_t));
+  const int left = source_span.data_length & 7;
+  uint64_t hash = ((uint64_t)source_span.data_length) << 56;
+
+  // Using key = 0x000102030405060708090a0b0c0d0e0f
+  uint64_t v0 = UINT64_C(0x736f6d6570736575 ^ 0x0706050403020100);
+  uint64_t v1 = UINT64_C(0x646f72616e646f6d ^ 0x0f0e0d0c0b0a0908);
+  uint64_t v2 = UINT64_C(0x6c7967656e657261 ^ 0x0706050403020100);
+  uint64_t v3 = UINT64_C(0x7465646279746573 ^ 0x0f0e0d0c0b0a0908);
+  uint64_t m;
+
+  for (; source != end; source += 8) {
+    m = iree_unaligned_load_le_u64((const uint64_t*)source);
+    v3 ^= m;
+    for (int i = 0; i < cROUNDS; ++i) {
+      SIPROUND(v0, v1, v2, v3);
+    }
+    v0 ^= m;
   }
-  iree_vm_buffer_descriptor.destroy = iree_vm_buffer_destroy;
-  iree_vm_buffer_descriptor.offsetof_counter =
-      offsetof(iree_vm_buffer_t, ref_object.counter);
-  iree_vm_buffer_descriptor.type_name = iree_make_cstring_view("vm.buffer");
-  return iree_vm_ref_register_type(&iree_vm_buffer_descriptor);
+
+  uint64_t tmp = 0;
+  for (int l = left; l > 0; --l) {
+    tmp = tmp << 8;
+    tmp |= (uint64_t)source[l - 1];
+  }
+  hash |= tmp;
+  v3 ^= hash;
+
+  for (int i = 0; i < cROUNDS; ++i) {
+    SIPROUND(v0, v1, v2, v3);
+  }
+
+  v0 ^= hash;
+  v2 ^= 0xff;
+
+  for (int i = 0; i < dROUNDS; ++i) {
+    SIPROUND(v0, v1, v2, v3);
+  }
+
+  hash = v0 ^ v1 ^ v2 ^ v3;
+  *out_result = hash;
+  IREE_TRACE_ZONE_END(z0);
+  return iree_ok_status();
+}
+
+iree_status_t iree_vm_buffer_register_types(iree_vm_instance_t* instance) {
+  static const iree_vm_ref_type_descriptor_t descriptor = {
+      .destroy = iree_vm_buffer_destroy,
+      .type_name = IREE_SVL("vm.buffer"),
+      .offsetof_counter = offsetof(iree_vm_buffer_t, ref_object.counter) /
+                          IREE_VM_REF_COUNTER_ALIGNMENT,
+  };
+  return iree_vm_instance_register_type(instance, &descriptor,
+                                        &iree_vm_buffer_registration);
+}
+
+iree_status_t iree_vm_buffer_resolve_types(iree_vm_instance_t* instance) {
+  iree_vm_buffer_registration =
+      iree_vm_instance_lookup_type(instance, IREE_SV("vm.buffer"));
+  return iree_vm_buffer_registration
+             ? iree_ok_status()
+             : iree_make_status(
+                   IREE_STATUS_INTERNAL,
+                   "VM type `vm.buffer` not registered with the instance");
 }

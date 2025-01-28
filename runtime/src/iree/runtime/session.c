@@ -11,7 +11,6 @@
 
 #include "iree/base/internal/atomics.h"
 #include "iree/base/internal/file_io.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/api.h"
 #include "iree/modules/hal/module.h"
 #include "iree/runtime/instance.h"
@@ -94,9 +93,10 @@ IREE_API_EXPORT iree_status_t iree_runtime_session_create_with_device(
   // Lower-level usage of the VM can avoid the HAL if it's not required.
   iree_vm_module_t* hal_module = NULL;
   if (iree_status_is_ok(status)) {
-    status = iree_hal_module_create(iree_runtime_instance_vm_instance(instance),
-                                    device, IREE_HAL_MODULE_FLAG_NONE,
-                                    host_allocator, &hal_module);
+    status = iree_hal_module_create(
+        iree_runtime_instance_vm_instance(instance),
+        /*device_count=*/1, &device, IREE_HAL_MODULE_FLAG_NONE,
+        iree_hal_module_debug_sink_stdio(stderr), host_allocator, &hal_module);
   }
   if (iree_status_is_ok(status)) {
     status = iree_vm_context_register_modules(
@@ -164,7 +164,8 @@ IREE_API_EXPORT iree_vm_context_t* iree_runtime_session_context(
 IREE_API_EXPORT iree_hal_device_t* iree_runtime_session_device(
     const iree_runtime_session_t* session) {
   IREE_ASSERT_ARGUMENT(session);
-  return iree_hal_module_state_device(session->hal_module_state);
+  // NOTE: only one device is supported via this API today.
+  return iree_hal_module_state_device_get(session->hal_module_state, 0);
 }
 
 IREE_API_EXPORT iree_hal_allocator_t* iree_runtime_session_device_allocator(
@@ -207,15 +208,21 @@ iree_runtime_session_append_bytecode_module_from_memory(
   IREE_ASSERT_ARGUMENT(session);
   IREE_TRACE_ZONE_BEGIN(z0);
 
+  // NOTE: we always consume the flatbuffer data even if we fail and need to
+  // make sure all code paths guarantee it has been freed.
   iree_vm_module_t* module = NULL;
   iree_status_t status = iree_vm_bytecode_module_create(
       iree_runtime_instance_vm_instance(session->instance), flatbuffer_data,
       flatbuffer_allocator, iree_runtime_session_host_allocator(session),
       &module);
   if (iree_status_is_ok(status)) {
+    // Append may fail and we still need to clean up the module.
     status = iree_runtime_session_append_module(session, module);
+    iree_vm_module_release(module);
+  } else {
+    // API requires that we free the flatbuffer data even on failure.
+    iree_allocator_free(flatbuffer_allocator, (void*)flatbuffer_data.data);
   }
-  iree_vm_module_release(module);
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -232,18 +239,17 @@ iree_runtime_session_append_bytecode_module_from_file(
   // contents.
   iree_file_contents_t* flatbuffer_contents = NULL;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_file_read_contents(file_path,
+      z0, iree_file_read_contents(file_path, IREE_FILE_READ_FLAG_DEFAULT,
                                   iree_runtime_session_host_allocator(session),
                                   &flatbuffer_contents));
 
+  // Create the module from the file contents. The contents are consumed
+  // regardless of whether the module can be loaded or not.
   iree_status_t status =
       iree_runtime_session_append_bytecode_module_from_memory(
           session, flatbuffer_contents->const_buffer,
           iree_file_contents_deallocator(flatbuffer_contents));
 
-  if (!iree_status_is_ok(status)) {
-    iree_file_contents_free(flatbuffer_contents);
-  }
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -259,14 +265,13 @@ iree_runtime_session_append_bytecode_module_from_stdin(
       z0, iree_stdin_read_contents(iree_runtime_session_host_allocator(session),
                                    &flatbuffer_contents));
 
+  // Create the module from the stream contents. The contents are consumed
+  // regardless of whether the module can be loaded or not.
   iree_status_t status =
       iree_runtime_session_append_bytecode_module_from_memory(
           session, flatbuffer_contents->const_buffer,
           iree_file_contents_deallocator(flatbuffer_contents));
 
-  if (!iree_status_is_ok(status)) {
-    iree_file_contents_free(flatbuffer_contents);
-  }
   IREE_TRACE_ZONE_END(z0);
   return status;
 }

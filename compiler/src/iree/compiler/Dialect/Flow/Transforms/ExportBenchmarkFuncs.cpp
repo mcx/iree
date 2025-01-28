@@ -6,7 +6,6 @@
 
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
-#include "iree/compiler/Dialect/Flow/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Flow/Transforms/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
@@ -15,16 +14,16 @@
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+namespace mlir::iree_compiler::IREE::Flow {
+
+#define GEN_PASS_DEF_EXPORTBENCHMARKFUNCSPASS
+#include "iree/compiler/Dialect/Flow/Transforms/Passes.h.inc"
 
 // Creates a util.global with a primitive value of |type| initialized to zeros.
 // Supports: ints, floats, vectors, and tensors.
@@ -32,9 +31,10 @@ namespace Flow {
 // Example:
 //  util.global @some_fn_arg0 = 4 : i32
 //  util.global @some_fn_arg0 = dense<4> : tensor<4xi32>
-static IREE::Util::GlobalOp createPrimitiveDefaultGlobalOp(
-    std::string name, Location loc, Type type, SymbolTable& symbolTable,
-    OpBuilder& moduleBuilder) {
+static IREE::Util::GlobalOp
+createPrimitiveDefaultGlobalOp(std::string name, Location loc, Type type,
+                               SymbolTable &symbolTable,
+                               OpBuilder &moduleBuilder) {
   // Get a zero-initialized constant attribute for the type, if supported.
   auto initialValue = moduleBuilder.getZeroAttr(type);
   if (!initialValue) {
@@ -47,22 +47,25 @@ static IREE::Util::GlobalOp createPrimitiveDefaultGlobalOp(
       loc, name,
       /*isMutable=*/false, type, initialValue);
   globalOp.setPrivate();
-  globalOp->setAttr("noinline", moduleBuilder.getUnitAttr());
+  globalOp.setGlobalInliningPolicy(
+      moduleBuilder.getAttr<IREE::Util::InlineNeverAttr>());
   symbolTable.insert(globalOp);
   return globalOp;
 }
 
 // Creates a util.global of the given |globalType| and initializes a buffer or
 // buffer view as a zeroed |tensorType|.
-static IREE::Util::GlobalOp createBufferLikeGlobalOp(
-    std::string name, Location loc, Type globalType, TensorType tensorType,
-    SymbolTable& symbolTable, OpBuilder& moduleBuilder) {
+static IREE::Util::GlobalOp
+createBufferLikeGlobalOp(std::string name, Location loc, Type globalType,
+                         TensorType tensorType, SymbolTable &symbolTable,
+                         OpBuilder &moduleBuilder) {
   // Create !hal.buffer global for the storage buffer or buffer view.
   auto globalOp = moduleBuilder.create<IREE::Util::GlobalOp>(
       loc, name,
       /*isMutable=*/false, globalType);
   globalOp.setPrivate();
-  globalOp->setAttr("noinline", moduleBuilder.getUnitAttr());
+  globalOp.setGlobalInliningPolicy(
+      moduleBuilder.getAttr<IREE::Util::InlineNeverAttr>());
   symbolTable.insert(globalOp);
 
   // Create an initializer that allocates the buffer storage.
@@ -78,14 +81,15 @@ static IREE::Util::GlobalOp createBufferLikeGlobalOp(
       loc, tensorType, zeroOp, /*result_dims=*/ValueRange{});
   // hal.tensor.export
   auto bufferExportOp = initializerBuilder.create<IREE::HAL::TensorExportOp>(
-      loc, globalOp.getType(), splatOp.getResult());
+      loc, globalOp.getType(), splatOp.getResult(),
+      TypeAttr::get(splatOp.getType()), /*name=*/nullptr,
+      /*affinity=*/nullptr);
   // util.optimization_barrier (try to prevent optimizations across the export)
   auto barrierOp = initializerBuilder.create<IREE::Util::OptimizationBarrierOp>(
       loc, bufferExportOp.getTarget());
   // util.global.store
-  initializerBuilder.create<IREE::Util::GlobalStoreOp>(
-      loc, barrierOp.getResult(0), globalOp.getName());
-  initializerBuilder.create<IREE::Util::InitializerReturnOp>(loc);
+  globalOp.createStoreOp(loc, barrierOp.getResult(0), initializerBuilder);
+  initializerBuilder.create<IREE::Util::ReturnOp>(loc);
 
   return globalOp;
 }
@@ -98,14 +102,15 @@ static IREE::Util::GlobalOp createBufferLikeGlobalOp(
 // ->
 //  util.global @some_fn_arg0 : !hal.buffer_view
 //  util.initializer { ... }
-static IREE::Util::GlobalOp createImportBufferViewGlobalOp(
-    std::string name, BlockArgument arg, SymbolTable& symbolTable,
-    OpBuilder& moduleBuilder, Explorer& explorer) {
+static IREE::Util::GlobalOp
+createImportBufferViewGlobalOp(std::string name, BlockArgument arg,
+                               SymbolTable &symbolTable,
+                               OpBuilder &moduleBuilder, Explorer &explorer) {
   auto loc = arg.getLoc();
 
   // Find a hal.tensor.import user.
   IREE::HAL::TensorImportOp importOp;
-  if (explorer.walkTransitiveUsers(arg, [&](Operation* op) -> WalkResult {
+  if (explorer.walkTransitiveUsers(arg, [&](Operation *op) -> WalkResult {
         importOp = dyn_cast<IREE::HAL::TensorImportOp>(op);
         return importOp ? WalkResult::interrupt() : WalkResult::advance();
       }) == TraversalResult::INCOMPLETE) {
@@ -116,7 +121,7 @@ static IREE::Util::GlobalOp createImportBufferViewGlobalOp(
 
   // Extract the type, which must be a static tensor.
   auto targetType = importOp.getTarget().getType();
-  auto tensorType = targetType.dyn_cast<RankedTensorType>();
+  auto tensorType = llvm::dyn_cast<RankedTensorType>(targetType);
   if (!tensorType || !tensorType.hasStaticShape()) {
     mlir::emitError(loc) << "unsupported buffer view import tensor type on "
                          << arg << " used as " << targetType;
@@ -133,31 +138,36 @@ static IREE::Util::GlobalOp createImportBufferViewGlobalOp(
 // op.
 //
 // Example:
-//  %1 = hal.tensor.export %0 into %storage : tensor<4xi32> -> !hal.buffer_view
+//  %1 = hal.tensor.export %0 into(%storage) : tensor<4xi32> -> !hal.buffer_view
 // ->
 //  util.global @some_fn_arg0 : !hal.buffer
 //  util.initializer { ... }
 static IREE::Util::GlobalOp createExportBufferGlobalOp(std::string name,
                                                        BlockArgument arg,
-                                                       SymbolTable& symbolTable,
-                                                       OpBuilder& moduleBuilder,
-                                                       Explorer& explorer) {
+                                                       SymbolTable &symbolTable,
+                                                       OpBuilder &moduleBuilder,
+                                                       Explorer &explorer) {
   auto loc = arg.getLoc();
 
-  // Find a hal.tensor.export user.
-  IREE::HAL::TensorExportOp exportOp;
-  if (explorer.walkTransitiveUsers(arg, [&](Operation* op) -> WalkResult {
-        exportOp = dyn_cast<IREE::HAL::TensorExportOp>(op);
-        return exportOp ? WalkResult::interrupt() : WalkResult::advance();
+  // Find a hal.tensor.export or alias user and extract the encoding.
+  Type sourceType;
+  if (explorer.walkTransitiveUsers(arg, [&](Operation *op) -> WalkResult {
+        if (auto aliasOp = dyn_cast<IREE::HAL::TensorAliasOp>(op)) {
+          sourceType = aliasOp.getResult().getType();
+          return WalkResult::interrupt();
+        } else if (auto exportOp = dyn_cast<IREE::HAL::TensorExportOp>(op)) {
+          sourceType = exportOp.getSourceEncoding();
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
       }) == TraversalResult::INCOMPLETE) {
     // Analysis failed to find an export op. User needs to rework their program.
     mlir::emitError(loc) << "unsupported dynamic buffer view export on " << arg;
     return {};
   }
 
-  // Extract the type, which must be a static tensor.
-  auto sourceType = exportOp.getSourceEncoding();
-  auto tensorType = sourceType.dyn_cast<RankedTensorType>();
+  // The type must be a static tensor for this pass to work.
+  auto tensorType = llvm::dyn_cast<RankedTensorType>(sourceType);
   if (!tensorType || !tensorType.hasStaticShape()) {
     mlir::emitError(loc) << "unsupported buffer view export tensor type on "
                          << arg << " used as " << sourceType;
@@ -169,30 +179,37 @@ static IREE::Util::GlobalOp createExportBufferGlobalOp(std::string name,
                                   symbolTable, moduleBuilder);
 }
 
-static IREE::Util::GlobalOp createDummyInput(const std::string& namePrefix,
+static IREE::Util::GlobalOp createDummyInput(const std::string &namePrefix,
                                              BlockArgument arg,
-                                             SymbolTable& symbolTable,
-                                             OpBuilder& moduleBuilder,
-                                             Explorer& explorer) {
+                                             SymbolTable &symbolTable,
+                                             OpBuilder &moduleBuilder,
+                                             Explorer &explorer) {
   std::string name = namePrefix + "_arg" + std::to_string(arg.getArgNumber());
-  return TypeSwitch<Type, IREE::Util::GlobalOp>(arg.getType())
-      .Case([&](IREE::HAL::BufferViewType type) {
-        return createImportBufferViewGlobalOp(name, arg, symbolTable,
+  auto globalOp =
+      TypeSwitch<Type, IREE::Util::GlobalOp>(arg.getType())
+          .Case([&](IREE::HAL::BufferViewType type) {
+            return createImportBufferViewGlobalOp(name, arg, symbolTable,
+                                                  moduleBuilder, explorer);
+          })
+          .Case([&](IREE::HAL::BufferType type) {
+            return createExportBufferGlobalOp(name, arg, symbolTable,
                                               moduleBuilder, explorer);
-      })
-      .Case([&](IREE::HAL::BufferType type) {
-        return createExportBufferGlobalOp(name, arg, symbolTable, moduleBuilder,
-                                          explorer);
-      })
-      .Default([&](Type type) {
-        return createPrimitiveDefaultGlobalOp(name, arg.getLoc(), type,
-                                              symbolTable, moduleBuilder);
-      });
+          })
+          .Default([&](Type type) {
+            return createPrimitiveDefaultGlobalOp(name, arg.getLoc(), type,
+                                                  symbolTable, moduleBuilder);
+          });
+  if (globalOp) {
+    // Prevent globals from folding so that we have unique buffers for each arg.
+    globalOp->setAttr("flow.unique_id", moduleBuilder.getStringAttr(name));
+  }
+  return globalOp;
 }
 
-static LogicalResult createEntryPointBenchmarkFunc(
-    mlir::ModuleOp moduleOp, mlir::func::FuncOp entryFuncOp,
-    Explorer& explorer) {
+static LogicalResult
+createEntryPointBenchmarkFunc(mlir::ModuleOp moduleOp,
+                              IREE::Util::FuncOp entryFuncOp,
+                              Explorer &explorer) {
   auto symbolTable = explorer.getSymbolTables().getSymbolTable(moduleOp);
   OpBuilder moduleBuilder(moduleOp.getContext());
   moduleBuilder.setInsertionPointAfter(entryFuncOp);
@@ -202,43 +219,43 @@ static LogicalResult createEntryPointBenchmarkFunc(
 
   // Create one dummy input variable per input. We may need to do some
   // analysis to find the actual type and initial value.
-  SmallVector<IREE::Util::GlobalOp, 4> dummyInputVariableOps;
+  SmallVector<IREE::Util::GlobalOp> dummyInputVariableOps;
   for (auto arg : entryFuncOp.getArguments()) {
     auto dummyVar =
         createDummyInput(funcName, arg, symbolTable, moduleBuilder, explorer);
-    if (!dummyVar) return failure();
+    if (!dummyVar)
+      return failure();
     dummyInputVariableOps.push_back(dummyVar);
   }
 
   // Create a `() -> ()` entry point op the benchmark tool can run.
   Location loc = entryFuncOp.getLoc();
-  auto funcOp = moduleBuilder.create<mlir::func::FuncOp>(
+  auto funcOp = moduleBuilder.create<IREE::Util::FuncOp>(
       loc, funcName, moduleBuilder.getFunctionType({}, {}));
   funcOp.setPublic();
   funcOp->setAttr("iree.abi.stub", moduleBuilder.getUnitAttr());
-  SmallVector<NamedAttribute> reflectionAttrs = {
-      moduleBuilder.getNamedAttr("iree.benchmark",
-                                 moduleBuilder.getStringAttr("entry")),
-  };
+  NamedAttribute reflectionAttr("iree.benchmark",
+                                moduleBuilder.getStringAttr("entry"));
   funcOp->setAttr("iree.reflection",
-                  moduleBuilder.getDictionaryAttr(reflectionAttrs));
-  Block* block = funcOp.addEntryBlock();
+                  moduleBuilder.getDictionaryAttr(reflectionAttr));
+  Block *block = funcOp.addEntryBlock();
 
   // Call the existing function with dummy arguments.
   auto blockBuilder = OpBuilder::atBlockBegin(block);
-  SmallVector<Value, 4> args;
+  SmallVector<Value> args;
   for (int i = 0, e = entryFuncOp.getNumArguments(); i < e; ++i) {
-    args.push_back(blockBuilder.createOrFold<IREE::Util::GlobalLoadOp>(
-        loc, dummyInputVariableOps[i]));
+    args.push_back(dummyInputVariableOps[i]
+                       .createLoadOp(loc, blockBuilder)
+                       .getLoadedGlobalValue());
   }
-  auto callOp = blockBuilder.create<mlir::func::CallOp>(loc, entryFuncOp, args);
+  auto callOp = blockBuilder.create<IREE::Util::CallOp>(loc, entryFuncOp, args);
 
   // Sink all results with a barrier to ensure that DCE does not remove the
   // call.
   for (auto result : callOp.getResults()) {
     blockBuilder.create<IREE::Util::OptimizationBarrierOp>(loc, result);
   }
-  blockBuilder.create<mlir::func::ReturnOp>(loc);
+  blockBuilder.create<IREE::Util::ReturnOp>(loc);
 
   // Ensure the original function is not exported and not inlined.
   entryFuncOp->setAttr("noinline", moduleBuilder.getUnitAttr());
@@ -252,14 +269,9 @@ static LogicalResult createEntryPointBenchmarkFunc(
 // placeholder constant inputs instead of arguments and removes the exported
 // attribute from the old functions.
 // The input are provided using util.globals.
-class ExportBenchmarkFuncsPass
-    : public ExportBenchmarkFuncsBase<ExportBenchmarkFuncsPass> {
- public:
-  void getDependentDialects(DialectRegistry& registry) const override {
-    registry.insert<arith::ArithDialect, IREE::Flow::FlowDialect,
-                    IREE::HAL::HALDialect, IREE::Util::UtilDialect>();
-  }
-
+struct ExportBenchmarkFuncsPass
+    : public IREE::Flow::impl::ExportBenchmarkFuncsPassBase<
+          ExportBenchmarkFuncsPass> {
   void runOnOperation() override {
     auto moduleOp = getOperation();
 
@@ -269,8 +281,8 @@ class ExportBenchmarkFuncsPass
     // Gather the functions we want to wrap for benchmarking and wrap them.
     // Since we are inserting new functions as part of this pass we must perform
     // the wrapping for only the inputs.
-    SmallVector<mlir::func::FuncOp, 4> entryFuncOps;
-    for (auto entryFuncOp : moduleOp.getOps<mlir::func::FuncOp>()) {
+    SmallVector<IREE::Util::FuncOp> entryFuncOps;
+    for (auto entryFuncOp : moduleOp.getOps<IREE::Util::FuncOp>()) {
       if (entryFuncOp.isPublic()) {
         entryFuncOps.push_back(entryFuncOp);
       }
@@ -285,12 +297,4 @@ class ExportBenchmarkFuncsPass
   }
 };
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createExportBenchmarkFuncsPass() {
-  return std::make_unique<ExportBenchmarkFuncsPass>();
-}
-
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Flow

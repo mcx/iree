@@ -25,18 +25,6 @@ extern "C" {
 // Types and Enums
 //===----------------------------------------------------------------------===//
 
-// Returns the number of elements in an array as a compile-time constant, which
-// can be used in defining new arrays. Fails at compile-time if |arr| is not a
-// static array (such as if used on a pointer type). Similar to `countof()`.
-//
-// Example:
-//  uint8_t kConstantArray[512];
-//  assert(IREE_ARRAYSIZE(kConstantArray) == 512);
-#define IREE_ARRAYSIZE(arr) (sizeof(arr) / sizeof(arr[0]))
-
-#define iree_min(lhs, rhs) ((lhs) <= (rhs) ? (lhs) : (rhs))
-#define iree_max(lhs, rhs) ((lhs) <= (rhs) ? (rhs) : (lhs))
-
 #if IREE_STATISTICS_ENABLE
 // Evalutes the expression code only if statistics are enabled.
 //
@@ -74,7 +62,7 @@ static inline iree_byte_span_t iree_byte_span_empty() {
   return v;
 }
 
-static bool iree_byte_span_is_empty(iree_byte_span_t span) {
+static inline bool iree_byte_span_is_empty(iree_byte_span_t span) {
   return span.data == NULL || span.data_length == 0;
 }
 
@@ -95,8 +83,30 @@ static inline iree_const_byte_span_t iree_const_byte_span_empty() {
   return v;
 }
 
-static bool iree_const_byte_span_is_empty(iree_const_byte_span_t span) {
+static inline bool iree_const_byte_span_is_empty(iree_const_byte_span_t span) {
   return span.data == NULL || span.data_length == 0;
+}
+
+static inline iree_const_byte_span_t iree_const_cast_byte_span(
+    iree_byte_span_t span) {
+  return iree_make_const_byte_span(span.data, span.data_length);
+}
+
+static inline iree_byte_span_t iree_cast_const_byte_span(
+    iree_const_byte_span_t span) {
+  return iree_make_byte_span((uint8_t*)span.data, span.data_length);
+}
+
+// Copies |size| bytes from |src| to |dst| without polluting the cache with
+// |dst| lines. Used when streaming data that will not be read again.
+static inline void iree_memcpy_stream_dst(void* IREE_RESTRICT dst,
+                                          const void* IREE_RESTRICT src,
+                                          iree_host_size_t size) {
+  // TODO(benvanik): implement a proper non-temporal copy. This will be
+  // architecture-specific and may have compiler-specific paths in order to emit
+  // the proper instructions. On x64 this should be using MOVNTDQ (or something
+  // in that family).
+  memcpy(dst, src, size);
 }
 
 //===----------------------------------------------------------------------===//
@@ -104,7 +114,7 @@ static bool iree_const_byte_span_is_empty(iree_const_byte_span_t span) {
 //===----------------------------------------------------------------------===//
 // TODO(benvanik): remove our uses of this or make them more explicit.
 
-#if defined(IREE_COMPILER_MSVC)
+#if defined(IREE_PLATFORM_WINDOWS)
 // The safe malloca that may fall back to heap in the case of stack overflows:
 // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/malloca?view=vs-2019
 // Because that gets really annoying to deal with during error handling we just
@@ -142,7 +152,7 @@ typedef enum iree_allocator_command_e {
   // iree_allocator_ctl_fn_t:
   //   params: iree_allocator_alloc_params_t
   //   inout_ptr: set to allocated pointer
-  IREE_ALLOCATOR_COMMAND_CALLOC,
+  IREE_ALLOCATOR_COMMAND_CALLOC = 1,
 
   // Tries to resize an allocation provided via |inout_ptr|, if possible.
   // If the existing allocation is not reused then it is freed as if a call to
@@ -153,14 +163,14 @@ typedef enum iree_allocator_command_e {
   // iree_allocator_ctl_fn_t:
   //   params: iree_allocator_alloc_params_t
   //   inout_ptr: pointer of existing allocation; updated to realloced pointer
-  IREE_ALLOCATOR_COMMAND_REALLOC,
+  IREE_ALLOCATOR_COMMAND_REALLOC = 2,
 
   // Frees the memory pointed to by |inout_ptr|.
   //
   // iree_allocator_ctl_fn_t:
   //   params: unused
   //   inout_ptr: pointer to free
-  IREE_ALLOCATOR_COMMAND_FREE,
+  IREE_ALLOCATOR_COMMAND_FREE = 3,
 
   // TODO(benvanik): add optional IREE_ALLOCATOR_COMMAND_BIND like mbind:
   // https://man7.org/linux/man-pages/man2/mbind.2.html
@@ -224,6 +234,10 @@ iree_allocator_clone(iree_allocator_t allocator,
 // Frees a previously-allocated block of memory to the given allocator.
 IREE_API_EXPORT void iree_allocator_free(iree_allocator_t allocator, void* ptr);
 
+//===----------------------------------------------------------------------===//
+// Built-in iree_allocator_t implementations
+//===----------------------------------------------------------------------===//
+
 // Default C allocator controller using malloc/free.
 IREE_API_EXPORT iree_status_t
 iree_allocator_system_ctl(void* self, iree_allocator_command_t command,
@@ -246,6 +260,46 @@ static inline iree_allocator_t iree_allocator_null(void) {
 // Returns true if the allocator is `iree_allocator_null()`.
 static inline bool iree_allocator_is_null(iree_allocator_t allocator) {
   return allocator.ctl == NULL;
+}
+
+typedef struct {
+  iree_host_size_t capacity;
+  iree_host_size_t length;
+  iree_host_size_t head_size;
+  uint8_t* buffer;
+} iree_allocator_inline_storage_t;
+
+// Stack storage for an inline arena-style allocator.
+//
+// Usage:
+//  IREE_ALLOCATOR_INLINE_STORAGE(inline_storage, 2048);
+//  something_allocating(iree_allocator_inline_arena(&inline_storage.header));
+#define IREE_ALLOCATOR_INLINE_STORAGE(var, storage_capacity) \
+  struct {                                                   \
+    iree_allocator_inline_storage_t header;                  \
+    uint8_t data[storage_capacity];                          \
+  } var = {                                                  \
+      .header =                                              \
+          {                                                  \
+              .capacity = sizeof((var).data),                \
+              .length = 0,                                   \
+              .buffer = &(var).data[0],                      \
+          },                                                 \
+  };
+
+// Inline arena allocator controller used by iree_allocator_inline_arena.
+IREE_API_EXPORT iree_status_t
+iree_allocator_inline_arena_ctl(void* self, iree_allocator_command_t command,
+                                const void* params, void** inout_ptr);
+
+// Allocates with arena semantics within the given fixed-size |storage|.
+// Frees are ignored and all allocations will fail once the allocated length
+// exceeds the capacity. A special case for reallocations of the entire
+// outstanding memory is supported to allow the arena to be implicitly reset.
+static inline iree_allocator_t iree_allocator_inline_arena(
+    iree_allocator_inline_storage_t* storage) {
+  iree_allocator_t v = {storage, iree_allocator_inline_arena_ctl};
+  return v;
 }
 
 //===----------------------------------------------------------------------===//

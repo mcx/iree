@@ -17,38 +17,30 @@
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Transforms/LocationSnapshot.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
+
+#define GEN_PASS_DEF_DUMPEXECUTABLESOURCESPASS
+#include "iree/compiler/Dialect/HAL/Transforms/Passes.h.inc"
+
+namespace {
 
 static void dumpExecutableToStream(IREE::HAL::ExecutableOp executableOp,
                                    StringRef filePath, llvm::raw_ostream &os) {
   OpPrintingFlags flags;
   flags.useLocalScope();
   mlir::generateLocationsFromIR(os, filePath, executableOp, flags);
-  os << "\n";  // newline at end of file
+  os << "\n"; // newline at end of file
 }
 
-class DumpExecutableSourcesPass
-    : public PassWrapper<DumpExecutableSourcesPass, OperationPass<ModuleOp>> {
- public:
-  DumpExecutableSourcesPass() = default;
-  DumpExecutableSourcesPass(const DumpExecutableSourcesPass &pass) {}
-  DumpExecutableSourcesPass(StringRef path) { this->path = path.str(); }
+//===----------------------------------------------------------------------===//
+// --iree-hal-dump-executable-sources
+//===----------------------------------------------------------------------===//
 
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::HAL::HALDialect>();
-  }
-
-  StringRef getArgument() const override {
-    return "iree-hal-dump-executable-sources";
-  }
-
-  StringRef getDescription() const override {
-    return "Dumps individual hal.executable source listings to a path.";
-  }
-
+struct DumpExecutableSourcesPass
+    : public IREE::HAL::impl::DumpExecutableSourcesPassBase<
+          DumpExecutableSourcesPass> {
+  using IREE::HAL::impl::DumpExecutableSourcesPassBase<
+      DumpExecutableSourcesPass>::DumpExecutableSourcesPassBase;
   void runOnOperation() override {
     auto moduleOp = getOperation();
     auto moduleName = moduleOp.getName().value_or("module");
@@ -63,8 +55,11 @@ class DumpExecutableSourcesPass
       auto originalVisibility = executableOp.getVisibility();
       executableOp.setVisibility(SymbolTable::Visibility::Public);
 
+      std::string maybePrefix = prefix.empty() ? "" : prefix + "_";
+
       auto fileName =
-          (moduleName + "_" + executableOp.getName() + ".mlir").str();
+          (maybePrefix + moduleName + "_" + executableOp.getName() + ".mlir")
+              .str();
       if (path.empty() || path == "-") {
         dumpExecutableToStream(executableOp, fileName, llvm::outs());
       } else {
@@ -85,23 +80,8 @@ class DumpExecutableSourcesPass
       executableOp.setVisibility(originalVisibility);
     }
   }
-
- private:
-  Option<std::string> path{
-      *this, "path",
-      llvm::cl::desc("Path to write hal.executable source files into.")};
 };
 
-std::unique_ptr<OperationPass<ModuleOp>> createDumpExecutableSourcesPass(
-    StringRef path) {
-  return std::make_unique<DumpExecutableSourcesPass>(path);
-}
+} // namespace
 
-static PassRegistration<DumpExecutableSourcesPass> pass([] {
-  return std::make_unique<DumpExecutableSourcesPass>();
-});
-
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL

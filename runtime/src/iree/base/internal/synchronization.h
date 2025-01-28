@@ -17,8 +17,6 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/atomics.h"
-#include "iree/base/target_platform.h"
-#include "iree/base/tracing.h"
 
 // NOTE: clang cannot support thread annotations in C code due to some
 // representational bugs... which means that we can't use it here. Boo.
@@ -56,6 +54,12 @@
     defined(IREE_PLATFORM_LINUX) || defined(IREE_PLATFORM_WINDOWS)
 #define IREE_PLATFORM_HAS_FUTEX 1
 #endif  // IREE_PLATFORM_*
+
+#if defined(IREE_PLATFORM_HAS_FUTEX) && !defined(IREE_SANITIZER_THREAD)
+// TODO: If we have TSan instrumentation for futexes we can enabled them when
+// compiling with TSan.
+#define IREE_RUNTIME_USE_FUTEX 1
+#endif  // IREE_PLATFORM_HAS_FUTEX
 
 #if defined(IREE_PLATFORM_APPLE)
 #include <os/lock.h>
@@ -280,7 +284,7 @@ typedef struct iree_slim_mutex_t IREE_THREAD_ANNOTATION_ATTRIBUTE(
   os_unfair_lock value;
 #elif defined(IREE_PLATFORM_WINDOWS) && defined(IREE_MUTEX_USE_WIN32_SRW)
   SRWLOCK value;
-#elif defined(IREE_PLATFORM_HAS_FUTEX)
+#elif defined(IREE_RUNTIME_USE_FUTEX)
   iree_atomic_int32_t value;
 #else
   iree_mutex_t impl;  // fallback
@@ -319,6 +323,9 @@ void iree_slim_mutex_lock(iree_slim_mutex_t* mutex)
     IREE_THREAD_ANNOTATION_ATTRIBUTE(acquire_capability(mutex));
 
 // Tries to lock the |mutex| and returns true if the caller holds the lock.
+//
+// This function is allowed to fail spuriously, i.e. even if the lock isn't
+// held by another thread.
 bool iree_slim_mutex_try_lock(iree_slim_mutex_t* mutex)
     IREE_THREAD_ANNOTATION_ATTRIBUTE(try_acquire_capability(true, mutex));
 
@@ -341,13 +348,13 @@ void iree_slim_mutex_unlock(iree_slim_mutex_t* mutex)
 // http://www.1024cores.net/home/lock-free-algorithms/eventcounts
 // https://software.intel.com/en-us/forums/intel-threading-building-blocks/topic/299245
 // https://github.com/r10a/Event-Counts
-// https://github.com/facebook/folly/blob/master/folly/experimental/EventCount.h
+// https://github.com/facebook/folly/blob/main/folly/experimental/EventCount.h
 // https://github.com/concurrencykit/ck/blob/master/include/ck_ec.h
 typedef struct iree_notification_t {
 #if IREE_SYNCHRONIZATION_DISABLE_UNSAFE
   // Nothing required. Unused field to make compilers happy.
   int reserved;
-#elif !defined(IREE_PLATFORM_HAS_FUTEX)
+#elif !defined(IREE_RUNTIME_USE_FUTEX)
   // No futex on darwin/when using TSAN, so use mutex/condvar instead.
   pthread_mutex_t mutex;
   pthread_cond_t cond;
@@ -361,7 +368,7 @@ typedef struct iree_notification_t {
 #if IREE_SYNCHRONIZATION_DISABLE_UNSAFE
 #define IREE_NOTIFICATION_INIT \
   { IREE_ATOMIC_VAR_INIT(0) }
-#elif !defined(IREE_PLATFORM_HAS_FUTEX)
+#elif !defined(IREE_RUNTIME_USE_FUTEX)
 #define IREE_NOTIFICATION_INIT \
   { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0 }
 #else

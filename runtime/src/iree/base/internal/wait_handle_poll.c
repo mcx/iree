@@ -14,7 +14,6 @@
 #include <time.h>
 
 #include "iree/base/internal/wait_handle_posix.h"
-#include "iree/base/tracing.h"
 
 //===----------------------------------------------------------------------===//
 // Platform utilities
@@ -140,9 +139,9 @@ iree_status_t iree_wait_set_allocate(iree_host_size_t capacity,
   // Be reasonable; 64K objects is too high (even if poll supports it, which is
   // hard to tell if it does).
   if (capacity >= UINT16_MAX) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "wait set capacity of %zu is unreasonably large",
-                            capacity);
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "wait set capacity of %" PRIhsz " is unreasonably large", capacity);
   }
 
   IREE_TRACE_ZONE_BEGIN(z0);
@@ -338,7 +337,9 @@ iree_status_t iree_wait_any(iree_wait_set_t* set, iree_time_t deadline_ns,
   // Make the syscall only when we have at least one valid fd.
   // Don't use this as a sleep.
   if (set->handle_count <= 0) {
-    memset(out_wake_handle, 0, sizeof(*out_wake_handle));
+    if (out_wake_handle) {
+      memset(out_wake_handle, 0, sizeof(*out_wake_handle));
+    }
     return iree_ok_status();
   }
 
@@ -355,18 +356,20 @@ iree_status_t iree_wait_any(iree_wait_set_t* set, iree_time_t deadline_ns,
                             &signaled_count));
 
   // Find at least one signaled handle.
-  memset(out_wake_handle, 0, sizeof(*out_wake_handle));
-  if (signaled_count > 0) {
-    for (iree_host_size_t i = 0; i < set->handle_count; ++i) {
-      bool signaled = false;
-      IREE_RETURN_AND_END_ZONE_IF_ERROR(
-          z0, iree_wait_set_resolve_poll_events(set->poll_fds[i].revents,
-                                                &signaled));
-      if (signaled) {
-        memcpy(out_wake_handle, &set->user_handles[i],
-               sizeof(*out_wake_handle));
-        out_wake_handle->set_internal.index = i;
-        break;
+  if (out_wake_handle) {
+    memset(out_wake_handle, 0, sizeof(*out_wake_handle));
+    if (signaled_count > 0) {
+      for (iree_host_size_t i = 0; i < set->handle_count; ++i) {
+        bool signaled = false;
+        IREE_RETURN_AND_END_ZONE_IF_ERROR(
+            z0, iree_wait_set_resolve_poll_events(set->poll_fds[i].revents,
+                                                  &signaled));
+        if (signaled) {
+          memcpy(out_wake_handle, &set->user_handles[i],
+                 sizeof(*out_wake_handle));
+          out_wake_handle->set_internal.index = i;
+          break;
+        }
       }
     }
   }

@@ -7,16 +7,38 @@
 #ifndef IREE_COMPILER_CODEGEN_LLVMGPU_UTILS_LLVMGPUUTILS_H_
 #define IREE_COMPILER_CODEGEN_LLVMGPU_UTILS_LLVMGPUUTILS_H_
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 /// Helper to convert copy to shared memory to async copy. This creates groups
 /// of consecutive copies and emit wait operation right after.
-void createAsyncGroups(func::FuncOp funcOp, bool useMMASync);
+void createAsyncGroups(RewriterBase &rewriter, mlir::FunctionOpInterface funcOp,
+                       bool useMMASync);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+/// Function to reorder transposes and elementwise ops.
+void reorderTranspose(RewriterBase &rewriter, mlir::FunctionOpInterface funcOp);
+
+/// Look for allocs in shared memory space with overlapping liveness,
+/// group them, and then pack all the allocations in each group into one i8
+/// alloc.
+///
+/// Also adds barriers to make sure we are done writing/reading
+/// from the previous alias group before starting a new one.
+void packSharedMemoryAlloc(mlir::FunctionOpInterface funcOp);
+
+// Prefetches data written to shared memory for the next iteration. Returns the
+// new loop on success or failure when the `forOp` is not supported.
+FailureOr<scf::ForOp> prefetchSharedMemoryCopy(RewriterBase &rewriter,
+                                               scf::ForOp forOp);
+
+/// Insert barriers and wait operations if there are allocs of a different alias
+/// group before the given alloc.
+void addBarrier(mlir::FunctionOpInterface funcOp, Operation *alloc,
+                ArrayRef<Operation *> aliasGroup, bool hasAsyncCopies = true);
+
+} // namespace mlir::iree_compiler
 
 #endif

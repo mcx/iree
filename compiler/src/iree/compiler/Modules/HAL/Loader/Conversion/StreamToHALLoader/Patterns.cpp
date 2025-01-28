@@ -16,11 +16,10 @@
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderDialect.h"
 #include "iree/compiler/Modules/HAL/Loader/IR/HALLoaderOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 namespace {
 
@@ -28,7 +27,7 @@ namespace {
 // either a !util.buffer or an external !hal.buffer.
 static Value getResourceBuffer(Location loc, Value resource,
                                OpBuilder &builder) {
-  if (resource.getType().isa<IREE::HAL::BufferType>()) {
+  if (llvm::isa<IREE::HAL::BufferType>(resource.getType())) {
     // Get the storage of the buffer; the returned buffer is already a subspan.
     return builder.createOrFold<IREE::HAL::Inline::BufferStorageOp>(loc,
                                                                     resource);
@@ -41,14 +40,14 @@ struct CmdDispatchOpPattern
     : public OpConversionPattern<IREE::Stream::CmdDispatchOp> {
   CmdDispatchOpPattern(TypeConverter &typeConverter, MLIRContext *context)
       : OpConversionPattern(typeConverter, context, PatternBenefit(10000)) {}
-  LogicalResult matchAndRewrite(
-      IREE::Stream::CmdDispatchOp dispatchOp, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::Stream::CmdDispatchOp dispatchOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     auto loc = dispatchOp.getLoc();
 
     // TODO(benvanik): support a lightweight switch builder for picking variants
-    // that doesn't pull in the full HAL dialect - today the
-    // DeviceSwitchRewriter needs a !hal.device and its query methods.
+    // that doesn't pull in the full HAL dialect. We could make the match
+    // expressions take a callback that performs the query, for example.
     // For now we bail if there's multiple.
     auto entryPointAttrs = dispatchOp.getEntryPoints().getValue();
     if (entryPointAttrs.size() != 1) {
@@ -56,7 +55,7 @@ struct CmdDispatchOpPattern
                                          "multiple variant targets not yet "
                                          "supported in the inline HAL loader");
     }
-    auto entryPointAttr = entryPointAttrs.front().cast<SymbolRefAttr>();
+    auto entryPointAttr = llvm::cast<SymbolRefAttr>(entryPointAttrs.front());
 
     // Get the handle to the executable that is compatible with our device.
     auto executableOp =
@@ -76,10 +75,9 @@ struct CmdDispatchOpPattern
         loc, rewriter.getType<IREE::HAL::ExecutableType>(),
         executableOp.getName());
 
-    // TODO(benvanik): a real switch op. For now we inline what the
-    // hal.device.switch op does.
+    // TODO(benvanik): use scf.index_switch as with the full HAL.
     for (auto variantOp : variantOps) {
-      auto exportOps = variantOp.getOps<IREE::HAL::ExecutableExportOp>();
+      auto exportOps = variantOp.getExportOps();
       auto exportIt =
           llvm::find_if(exportOps, [&](IREE::HAL::ExecutableExportOp op) {
             return op.getNameAttr() == entryPointAttr.getLeafReference();
@@ -90,9 +88,6 @@ struct CmdDispatchOpPattern
                << entryPointAttr;
       }
       auto exportOp = *exportIt;
-
-      // TODO(benvanik): check variant target:
-      //   if (variantOp.target().getMatchExpression()) { dispatch }
       dispatchVariant(dispatchOp, adaptor, executableOp, variantOp, exportOp,
                       lookupOp.getResult(), rewriter);
     }
@@ -129,21 +124,25 @@ struct CmdDispatchOpPattern
       bindingLengths.push_back(adaptor.getResourceLengths()[i]);
     }
 
-    // Dispatch with a target-specific workgroup count.
-    auto exportSymRef =
+    auto entryPointAttr =
         SymbolRefAttr::get(builder.getContext(), executableOp.getName(),
                            {SymbolRefAttr::get(exportOp->getParentOp()),
                             SymbolRefAttr::get(exportOp)});
+    Value ordinal =
+        builder.create<IREE::HAL::Loader::ExecutableExportOrdinalOp>(
+            loc, builder.getIndexType(), entryPointAttr);
+
+    // Dispatch with a target-specific workgroup count.
     auto workgroupCount = exportOp.calculateWorkgroupCount(
         loc, /*device=*/nullptr, adaptor.getWorkload(), builder);
-    builder.create<IREE::HAL::Loader::ExecutableDispatchSymbolOp>(
-        loc, executable, exportSymRef, workgroupCount[0], workgroupCount[1],
+    builder.create<IREE::HAL::Loader::ExecutableDispatchOp>(
+        loc, executable, ordinal, workgroupCount[0], workgroupCount[1],
         workgroupCount[2], pushConstants, bindingBuffers, bindingOffsets,
         bindingLengths);
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateStreamToHALLoaderPatterns(MLIRContext *context,
                                        ConversionTarget &conversionTarget,
@@ -157,5 +156,4 @@ void populateStreamToHALLoaderPatterns(MLIRContext *context,
   patterns.insert<CmdDispatchOpPattern>(typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

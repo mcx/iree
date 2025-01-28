@@ -96,8 +96,8 @@ static iree_status_t module_a_sub_1(iree_vm_stack_t* stack, module_a_t* module,
 }
 
 static const iree_vm_native_export_descriptor_t module_a_exports_[] = {
-    {iree_make_cstring_view("add_1"), iree_make_cstring_view("0i_i"), 0, NULL},
-    {iree_make_cstring_view("sub_1"), iree_make_cstring_view("0i_i"), 0, NULL},
+    {IREE_SV("add_1"), IREE_SV("0i_i"), 0, NULL},
+    {IREE_SV("sub_1"), IREE_SV("0i_i"), 0, NULL},
 };
 static const iree_vm_native_function_ptr_t module_a_funcs_[] = {
     {(iree_vm_native_function_shim_t)call_shim_i32_i32,
@@ -109,7 +109,7 @@ static_assert(IREE_ARRAYSIZE(module_a_funcs_) ==
                   IREE_ARRAYSIZE(module_a_exports_),
               "function pointer table must be 1:1 with exports");
 static const iree_vm_native_module_descriptor_t module_a_descriptor_ = {
-    /*name=*/iree_make_cstring_view("module_a"),
+    /*name=*/IREE_SV("module_a"),
     /*version=*/0,
     /*attr_count=*/0,
     /*attrs=*/NULL,
@@ -152,7 +152,7 @@ typedef struct module_b_t {
   iree_allocator_t allocator;
   // Resolved types; these never change once queried and are safe to store on
   // the shared structure to avoid needing to look them up again.
-  const iree_vm_ref_type_descriptor_t* types[1];
+  iree_vm_ref_type_t types[1];
 } module_b_t;
 
 // Stores per-context state; at the minimum imports, but possibly other user
@@ -194,6 +194,21 @@ static void IREE_API_PTR
 module_b_free_state(void* self, iree_vm_module_state_t* module_state) {
   module_b_state_t* state = (module_b_state_t*)module_state;
   iree_allocator_free(state->allocator, state);
+}
+
+// Clones the module state and retains resources by-reference.
+static iree_status_t IREE_API_PTR module_b_fork_state(
+    void* self, iree_vm_module_state_t* parent_state,
+    iree_allocator_t allocator, iree_vm_module_state_t** out_child_state) {
+  module_b_state_t* child_state = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(allocator, sizeof(*child_state),
+                                             (void**)&child_state));
+  // Copy resolved imports and the counter value.
+  memcpy(child_state, parent_state, sizeof(*child_state));
+  // Reassign the allocator used.
+  child_state->allocator = allocator;
+  *out_child_state = (iree_vm_module_state_t*)child_state;
+  return iree_ok_status();
 }
 
 // Called once per import function so the module can store the function ref.
@@ -244,24 +259,24 @@ static const iree_vm_native_function_ptr_t module_b_funcs_[] = {
 };
 
 static const iree_vm_native_import_descriptor_t module_b_imports_[] = {
-    {IREE_VM_NATIVE_IMPORT_REQUIRED, iree_make_cstring_view("module_a.add_1")},
-    {IREE_VM_NATIVE_IMPORT_REQUIRED, iree_make_cstring_view("module_a.sub_1")},
+    {IREE_VM_NATIVE_IMPORT_REQUIRED, IREE_SV("module_a.add_1")},
+    {IREE_VM_NATIVE_IMPORT_REQUIRED, IREE_SV("module_a.sub_1")},
 };
-static_assert(IREE_ARRAYSIZE(module_b_state_t::imports) ==
+static_assert(IREE_ARRAYSIZE(((module_b_state_t*)NULL)->imports) ==
                   IREE_ARRAYSIZE(module_b_imports_),
               "import storage must be able to hold all imports");
 static const iree_string_pair_t module_b_entry_attrs_[] = {
-    {iree_make_cstring_view("key1"), iree_make_cstring_view("value1")},
+    {IREE_SV("key1"), IREE_SV("value1")},
 };
 static const iree_vm_native_export_descriptor_t module_b_exports_[] = {
-    {iree_make_cstring_view("entry"), iree_make_cstring_view("0i_i"),
-     IREE_ARRAYSIZE(module_b_entry_attrs_), module_b_entry_attrs_},
+    {IREE_SV("entry"), IREE_SV("0i_i"), IREE_ARRAYSIZE(module_b_entry_attrs_),
+     module_b_entry_attrs_},
 };
 static_assert(IREE_ARRAYSIZE(module_b_funcs_) ==
                   IREE_ARRAYSIZE(module_b_exports_),
               "function pointer table must be 1:1 with exports");
 static const iree_vm_native_module_descriptor_t module_b_descriptor_ = {
-    /*name=*/iree_make_cstring_view("module_b"),
+    /*name=*/IREE_SV("module_b"),
     /*version=*/0,
     /*attr_count=*/0,
     /*attrs=*/NULL,
@@ -286,9 +301,12 @@ static iree_status_t module_b_create(iree_vm_instance_t* instance,
   module->allocator = allocator;
 
   // Resolve types used by the module once so that we can share it across all
-  // instances of the module.
-  module->types[0] =
-      iree_vm_ref_lookup_registered_type(iree_make_cstring_view("vm.buffer"));
+  // instances of the module. Depending on the types here can be somewhat risky
+  // as it can lead to ordering issues. If possible resolving types on module
+  // state is better as all dependent modules are guaranteed to have been
+  // loaded.
+  module->types[0] = iree_vm_instance_lookup_type(
+      instance, iree_make_cstring_view("vm.buffer"));
   if (!module->types[0]) {
     iree_allocator_free(allocator, module);
     return iree_make_status(
@@ -307,6 +325,7 @@ static iree_status_t module_b_create(iree_vm_instance_t* instance,
   interface.destroy = module_b_destroy;
   interface.alloc_state = module_b_alloc_state;
   interface.free_state = module_b_free_state;
+  interface.fork_state = module_b_fork_state;
   interface.resolve_import = module_b_resolve_import;
   return iree_vm_native_module_create(&interface, &module_b_descriptor_,
                                       instance, allocator, out_module);

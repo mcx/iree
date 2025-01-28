@@ -51,8 +51,8 @@ class Util_IndexAttrBase<string descr> :
     TypedAttrBase<
       Index, "IntegerAttr",
       And<[
-        CPred<"$_self.isa<IntegerAttr>()">,
-        CPred<"$_self.cast<IntegerAttr>().getType().isIndex()">,
+        CPred<"isa<IntegerAttr>($_self)">,
+        CPred<"cast<IntegerAttr>($_self).getType().isIndex()">,
       ]>,
       descr> {
   let returnType = [{ APInt }];
@@ -67,16 +67,21 @@ def Util_TiedOpStorageAttr :
 defvar Util_GlobalRefAttr = FlatSymbolRefAttr;
 
 def Util_AnySerializableAttr : Attr<Or<[
-  CPred<"$_self.isa<mlir::DenseElementsAttr>()">,
-  CPred<"$_self.isa<mlir::DenseResourceElementsAttr>()">,
-  CPred<"$_self.isa<IREE::Util::SerializableAttrInterface>()">,
+  CPred<"isa<mlir::DenseElementsAttr>($_self)">,
+  CPred<"isa<mlir::DenseResourceElementsAttr>($_self)">,
+  CPred<"isa<IREE::Util::SerializableAttrInterface>($_self)">,
 ]>, "buffer-like constant attribute values"> {
   let storageType = [{ ::mlir::Attribute }];
   let returnType = [{ ::mlir::Attribute }];
   let convertFromStorage = "$_self";
 }
 
-class Util_AliasedSymbolRefAttr : Attr<CPred<"$_self.isa<FlatSymbolRefAttr>()">,
+def Util_AnySerializableArrayAttr :
+  TypedArrayAttrBase<Util_AnySerializableAttr,
+                     "array attribute of serializable attributes"
+  >;
+
+class Util_AliasedSymbolRefAttr : Attr<CPred<"isa<FlatSymbolRefAttr>($_self)">,
                                        "symbol reference attribute"> {
   let storageType = [{ FlatSymbolRefAttr }];
   let returnType = [{ StringRef }];
@@ -102,5 +107,10 @@ def Util_Unsafe : NativeOpTrait<"IREE::Util::Unsafe">;
 // Denotes that an operation is only valid in debug builds.
 // These ops are removed by the --iree-util-strip-debug-ops pass.
 def Util_DebugOnly : NativeOpTrait<"IREE::Util::DebugOnly">;
+
+// Denotes an op that represents an object-like declaration (class/table/etc).
+// Must be a symbol table (containing members) and isolated from above
+// (instantiatable and only referenced by symbols instead of SSA values).
+def Util_ObjectLike : NativeOpTrait<"IREE::Util::ObjectLike">;
 
 #endif  // IREE_DIALECT_UTIL_IR_UTIL_BASE

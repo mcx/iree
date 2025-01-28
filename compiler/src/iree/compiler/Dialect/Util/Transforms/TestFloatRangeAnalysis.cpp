@@ -8,19 +8,18 @@
 #include "iree/compiler/Dialect/Util/Analysis/DFX/Solver.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/State.h"
 #include "iree/compiler/Dialect/Util/Analysis/Explorer.h"
-#include "iree/compiler/Dialect/Util/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
+
+#define GEN_PASS_DEF_TESTFLOATRANGEANALYSISPASS
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h.inc"
 
 namespace {
 
 class TestFloatRangeAnalysisPass
-    : public TestFloatRangeAnalysisBase<TestFloatRangeAnalysisPass> {
- public:
+    : public impl::TestFloatRangeAnalysisPassBase<TestFloatRangeAnalysisPass> {
+public:
   void runOnOperation() override {
     Explorer explorer(getOperation(), TraversalAction::SHALLOW);
     llvm::BumpPtrAllocator allocator;
@@ -47,21 +46,13 @@ class TestFloatRangeAnalysisPass
 
     // Update.
     for (auto &it : queryOps) {
-      it.first->setAttr(
-          "analysis",
-          StringAttr::get(&getContext(),
-                          it.second->getAsStr(solver.getAsmState())));
+      it.first->setAttr("analysis", StringAttr::get(&getContext(),
+                                                    it.second->getAsStr(
+                                                        solver.getAsmState())));
     }
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<void>> createTestFloatRangeAnalysisPass() {
-  return std::make_unique<TestFloatRangeAnalysisPass>();
-}
-
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

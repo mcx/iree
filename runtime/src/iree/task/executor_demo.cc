@@ -7,7 +7,6 @@
 #include <cstddef>
 
 #include "iree/base/internal/prng.h"
-#include "iree/base/tracing.h"
 #include "iree/task/executor.h"
 
 // TODO(benvanik): clean this up into a reasonable demo; it's currently staging
@@ -38,16 +37,17 @@ static void simulate_work(const iree_task_tile_context_t* tile_context) {
   }
 }
 
-extern "C" int main(int argc, char* argv) {
-  IREE_TRACE_SCOPE0("ExecutorTest::Any");
+extern "C" int main(int argc, char* argv[]) {
+  IREE_TRACE_APP_ENTER();
+  IREE_TRACE_SCOPE_NAMED("ExecutorTest::Any");
 
   iree_allocator_t allocator = iree_allocator_system();
 
   iree_task_topology_t topology;
 #if 1
-  iree_task_topology_initialize_from_physical_cores(
-      IREE_TASK_TOPOLOGY_NODE_ID_ANY,
-      /*max_core_count=*/6, &topology);
+  IREE_CHECK_OK(iree_task_topology_initialize_from_physical_cores(
+      IREE_TASK_TOPOLOGY_NODE_ID_ANY, IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_ANY,
+      /*max_core_count=*/6, &topology));
 #else
   iree_task_topology_initialize_from_group_count(/*group_count=*/6, &topology);
 #endif
@@ -62,7 +62,8 @@ extern "C" int main(int argc, char* argv) {
 
   //
   iree_task_scope_t scope_a;
-  iree_task_scope_initialize(iree_make_cstring_view("a"), &scope_a);
+  iree_task_scope_initialize(iree_make_cstring_view("a"),
+                             IREE_TASK_SCOPE_FLAG_NONE, &scope_a);
 
   //
   iree_task_call_t call0;
@@ -70,7 +71,7 @@ extern "C" int main(int argc, char* argv) {
                             iree_task_make_call_closure(
                                 [](void* user_context, iree_task_t* task,
                                    iree_task_submission_t* pending_submission) {
-                                  IREE_TRACE_SCOPE0("call0");
+                                  IREE_TRACE_SCOPE_NAMED("call0");
                                   IREE_ASSERT_EQ(0, user_context);
                                   return iree_ok_status();
                                 },
@@ -85,11 +86,11 @@ extern "C" int main(int argc, char* argv) {
       iree_task_make_dispatch_closure(
           [](void* user_context, const iree_task_tile_context_t* tile_context,
              iree_task_submission_t* pending_submission) {
-            IREE_TRACE_SCOPE0("tile0");
+            IREE_TRACE_SCOPE_NAMED("tile0");
             IREE_ASSERT_EQ(0, user_context);
             simulate_work(tile_context);
-            iree_atomic_fetch_add_int32(&tile_context->statistics->reserved, 1,
-                                        iree_memory_order_relaxed);
+            iree_atomic_fetch_add(&tile_context->statistics->reserved, 1,
+                                  iree_memory_order_relaxed);
             return iree_ok_status();
           },
           0),
@@ -103,11 +104,11 @@ extern "C" int main(int argc, char* argv) {
       iree_task_make_dispatch_closure(
           [](void* user_context, const iree_task_tile_context_t* tile_context,
              iree_task_submission_t* pending_submission) {
-            IREE_TRACE_SCOPE0("tile1");
+            IREE_TRACE_SCOPE_NAMED("tile1");
             IREE_ASSERT_EQ(0, user_context);
             simulate_work(tile_context);
-            iree_atomic_fetch_add_int32(&tile_context->statistics->reserved, 1,
-                                        iree_memory_order_relaxed);
+            iree_atomic_fetch_add(&tile_context->statistics->reserved, 1,
+                                  iree_memory_order_relaxed);
             return iree_ok_status();
           },
           0),
@@ -119,7 +120,7 @@ extern "C" int main(int argc, char* argv) {
                             iree_task_make_call_closure(
                                 [](void* user_context, iree_task_t* task,
                                    iree_task_submission_t* pending_submission) {
-                                  IREE_TRACE_SCOPE0("call1");
+                                  IREE_TRACE_SCOPE_NAMED("call1");
                                   IREE_ASSERT_EQ((void*)1, user_context);
                                   return iree_ok_status();
                                 },
@@ -164,6 +165,7 @@ extern "C" int main(int argc, char* argv) {
 
   iree_task_scope_deinitialize(&scope_a);
   iree_task_executor_release(executor);
+  IREE_TRACE_APP_EXIT(0);
   return 0;
 }
 

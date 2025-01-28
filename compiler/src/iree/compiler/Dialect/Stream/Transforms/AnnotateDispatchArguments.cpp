@@ -8,7 +8,6 @@
 #include <utility>
 
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/Solver.h"
 #include "iree/compiler/Dialect/Util/Analysis/DFX/State.h"
@@ -17,21 +16,22 @@
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 #define DEBUG_TYPE "iree-stream-annotate-dispatch-arguments"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_ANNOTATEDISPATCHARGUMENTSPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
 namespace {
 
 //===----------------------------------------------------------------------===//
@@ -41,8 +41,8 @@ namespace {
 // TODO(benvanik): move to Util/Analysis/ as this would be useful in other
 // passes as well and only depends on util.align and upstream ops.
 
-static std::string getPVSAsStr(
-    const DFX::PotentialConstantIntValuesState &pvs) {
+static std::string
+getPVSAsStr(const DFX::PotentialConstantIntValuesState &pvs) {
   std::string str;
   llvm::raw_string_ostream sstream(str);
   sstream << "pvs: ";
@@ -69,7 +69,7 @@ static llvm::MaybeAlign commonAlignment(llvm::MaybeAlign A,
 class GlobalPVS : public DFX::StateWrapper<
                       DFX::PotentialConstantIntValuesState,
                       DFX::TypedOperationElement<IREE::Util::GlobalOp>> {
- public:
+public:
   using BaseType =
       DFX::StateWrapper<DFX::PotentialConstantIntValuesState,
                         DFX::TypedOperationElement<IREE::Util::GlobalOp>>;
@@ -90,7 +90,7 @@ class GlobalPVS : public DFX::StateWrapper<
     return getPVSAsStr(getState());
   }
 
- private:
+private:
   explicit GlobalPVS(const Position &pos) : BaseType(pos) {}
 
   void initializeOperation(IREE::Util::GlobalOp globalOp,
@@ -104,7 +104,7 @@ const char GlobalPVS::ID = 0;
 
 class ValuePVS : public DFX::StateWrapper<DFX::PotentialConstantIntValuesState,
                                           DFX::ValueElement> {
- public:
+public:
   using BaseType = DFX::StateWrapper<DFX::PotentialConstantIntValuesState,
                                      DFX::ValueElement>;
 
@@ -123,7 +123,7 @@ class ValuePVS : public DFX::StateWrapper<DFX::PotentialConstantIntValuesState,
     return getPVSAsStr(getState());
   }
 
- private:
+private:
   explicit ValuePVS(const Position &pos) : BaseType(pos) {}
 
   void initializeValue(Value value, DFX::Solver &solver) override {
@@ -201,8 +201,8 @@ void GlobalPVS::initializeOperation(IREE::Util::GlobalOp globalOp,
     // Cannot perform analysis.
     indicatePessimisticFixpoint();
   } else if (globalInfo) {
-    if (auto initialValue =
-            globalOp.getInitialValueAttr().dyn_cast_or_null<IntegerAttr>()) {
+    if (auto initialValue = llvm::dyn_cast_if_present<IntegerAttr>(
+            globalOp.getInitialValueAttr())) {
       // Initial value is available for use; stored values from the rest of the
       // program will come during iteration.
       unionAssumed(initialValue.getValue());
@@ -216,7 +216,8 @@ ChangeStatus GlobalPVS::updateOperation(IREE::Util::GlobalOp globalOp,
   auto *globalInfo = solver.getExplorer().getGlobalInfo(globalOp);
   for (auto use : globalInfo->uses) {
     auto storeOp = dyn_cast<IREE::Util::GlobalStoreOpInterface>(use);
-    if (!storeOp) continue;
+    if (!storeOp)
+      continue;
     auto value = solver.getElementFor<ValuePVS>(
         *this, Position::forValue(storeOp.getStoredGlobalValue()),
         DFX::Resolution::REQUIRED);
@@ -235,7 +236,7 @@ static constexpr uint64_t kMaximumAlignment = 1ull << 32;
 using AlignmentStateType = DFX::IncIntegerState<uint64_t, kMaximumAlignment, 1>;
 class ValueAlignment
     : public DFX::StateWrapper<AlignmentStateType, DFX::ValueElement> {
- public:
+public:
   using BaseType = DFX::StateWrapper<AlignmentStateType, DFX::ValueElement>;
 
   static ValueAlignment &createForPosition(const Position &pos,
@@ -263,7 +264,7 @@ class ValueAlignment
            std::to_string(getAssumedAlignment().valueOrOne().value());
   }
 
- private:
+private:
   explicit ValueAlignment(const Position &pos) : BaseType(pos) {}
 
   void initializeValue(Value value, DFX::Solver &solver) override {
@@ -274,7 +275,8 @@ class ValueAlignment
   }
 
   static llvm::MaybeAlign computeAlignment(const ValuePVS::SetTy &set) {
-    if (set.empty()) return llvm::MaybeAlign();
+    if (set.empty())
+      return llvm::MaybeAlign();
     llvm::MaybeAlign alignment;
     for (auto value : set) {
       APInt valueDivisor = (value & (~(value - 1)));
@@ -326,12 +328,12 @@ class ValueAlignment
 const char ValueAlignment::ID = 0;
 
 class ArgumentAnalysis {
- public:
+public:
   explicit ArgumentAnalysis(Operation *rootOp)
       : explorer(rootOp, TraversalAction::SHALLOW),
         solver(explorer, allocator) {
-    explorer.setOpAction<IREE::Util::InitializerOp>(TraversalAction::RECURSE);
-    explorer.setOpAction<mlir::func::FuncOp>(TraversalAction::RECURSE);
+    explorer.setOpInterfaceAction<mlir::FunctionOpInterface>(
+        TraversalAction::RECURSE);
     explorer.setDialectAction<IREE::Stream::StreamDialect>(
         TraversalAction::RECURSE);
     // Ignore the contents of executables (linalg goo, etc).
@@ -372,10 +374,11 @@ class ArgumentAnalysis {
 
   // Returns a list of dispatch sites in arbitrary order to the given
   // |exportOp|.
-  ArrayRef<IREE::Stream::CmdDispatchOp> getDispatchSites(
-      IREE::Stream::ExecutableExportOp exportOp) {
+  ArrayRef<IREE::Stream::CmdDispatchOp>
+  getDispatchSites(IREE::Stream::ExecutableExportOp exportOp) {
     auto it = entryDispatchMap.find(exportOp);
-    if (it == entryDispatchMap.end()) return {};
+    if (it == entryDispatchMap.end())
+      return {};
     return it->second;
   }
 
@@ -384,7 +387,8 @@ class ArgumentAnalysis {
   llvm::MaybeAlign getAlignmentFor(Value value) {
     auto element =
         solver.lookupElementFor<ValueAlignment>(Position::forValue(value));
-    if (!element) return llvm::MaybeAlign();
+    if (!element)
+      return llvm::MaybeAlign();
     return element->getAssumedAlignment();
   }
 
@@ -396,8 +400,9 @@ class ArgumentAnalysis {
 
   // Returns the potential constant values across all dispatch sites to
   // |exportOp| for the operand at |operandIdx|.
-  DFX::PotentialConstantIntValuesState getOperandPVS(
-      IREE::Stream::ExecutableExportOp exportOp, unsigned operandIdx) {
+  DFX::PotentialConstantIntValuesState
+  getOperandPVS(IREE::Stream::ExecutableExportOp exportOp,
+                unsigned operandIdx) {
     DFX::PotentialConstantIntValuesState state;
     for (auto dispatchOp : getDispatchSites(exportOp)) {
       auto element = solver.lookupElementFor<ValuePVS>(
@@ -414,13 +419,15 @@ class ArgumentAnalysis {
 
   // Returns the minimum alignment across all dispatch sites to |exportOp| for
   // the operand at |operandIdx|.
-  llvm::MaybeAlign getOperandAlignment(
-      IREE::Stream::ExecutableExportOp exportOp, unsigned operandIdx) {
+  llvm::MaybeAlign
+  getOperandAlignment(IREE::Stream::ExecutableExportOp exportOp,
+                      unsigned operandIdx) {
     llvm::MaybeAlign alignment;
     for (auto dispatchOp : getDispatchSites(exportOp)) {
       auto element = solver.lookupElementFor<ValueAlignment>(
           Position::forValue(dispatchOp.getUniformOperands()[operandIdx]));
-      if (!element || !element->isValidState()) return llvm::MaybeAlign();
+      if (!element || !element->isValidState())
+        return llvm::MaybeAlign();
       alignment = commonAlignment(alignment, element->getAssumedAlignment());
     }
     if (alignment.valueOrOne().value() == kMaximumAlignment) {
@@ -431,13 +438,15 @@ class ArgumentAnalysis {
 
   // Returns the minimum alignment across all dispatch sites to |exportOp| for
   // the resource offset at |resourceIdx|.
-  llvm::MaybeAlign getResourceOffsetAlignment(
-      IREE::Stream::ExecutableExportOp exportOp, unsigned resourceIdx) {
+  llvm::MaybeAlign
+  getResourceOffsetAlignment(IREE::Stream::ExecutableExportOp exportOp,
+                             unsigned resourceIdx) {
     llvm::MaybeAlign alignment;
     for (auto dispatchOp : getDispatchSites(exportOp)) {
       auto element = solver.lookupElementFor<ValueAlignment>(
           Position::forValue(dispatchOp.getResourceOffsets()[resourceIdx]));
-      if (!element || !element->isValidState()) return llvm::MaybeAlign();
+      if (!element || !element->isValidState())
+        return llvm::MaybeAlign();
       alignment = commonAlignment(alignment, element->getAssumedAlignment());
     }
     if (alignment.valueOrOne().value() == kMaximumAlignment) {
@@ -449,7 +458,7 @@ class ArgumentAnalysis {
     return alignment;
   }
 
- private:
+private:
   Explorer explorer;
   llvm::BumpPtrAllocator allocator;
   DFX::Solver solver;
@@ -472,6 +481,8 @@ static void annotateExport(IREE::Stream::ExecutableOp executableOp,
   // Operands/resources on the func are in an arbitrary order; get maps that
   // lets us go from dispatch site operand/resource to function argument.
   auto funcOp = exportOp.lookupFunctionRef();
+  if (!funcOp)
+    return;
   auto operandToArgMap =
       IREE::Stream::CmdDispatchOp::makeOperandToArgMap(funcOp);
   auto resourceToArgMap =
@@ -493,9 +504,10 @@ static void annotateExport(IREE::Stream::ExecutableOp executableOp,
         potentialValues.push_back(IntegerAttr::get(argType, value));
       }
       llvm::sort(potentialValues, [](Attribute lhs, Attribute rhs) {
-        auto lhsInt = lhs.dyn_cast<IntegerAttr>();
-        auto rhsInt = rhs.dyn_cast<IntegerAttr>();
-        if (!lhsInt || !rhsInt) return false;
+        auto lhsInt = llvm::dyn_cast<IntegerAttr>(lhs);
+        auto rhsInt = llvm::dyn_cast<IntegerAttr>(rhs);
+        if (!lhsInt || !rhsInt)
+          return false;
         return lhsInt.getValue().ult(rhsInt.getValue());
       });
       auto potentialValuesAttr = ArrayAttr::get(context, potentialValues);
@@ -526,18 +538,12 @@ static void annotateExport(IREE::Stream::ExecutableOp executableOp,
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-specialize-dispatches
+// --iree-stream-specialize-dispatches
 //===----------------------------------------------------------------------===//
 
-class AnnotateDispatchArgumentsPass
-    : public AnnotateDispatchArgumentsBase<AnnotateDispatchArgumentsPass> {
- public:
-  AnnotateDispatchArgumentsPass() = default;
-
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<IREE::Stream::StreamDialect>();
-  }
-
+struct AnnotateDispatchArgumentsPass
+    : public IREE::Stream::impl::AnnotateDispatchArgumentsPassBase<
+          AnnotateDispatchArgumentsPass> {
   void runOnOperation() override {
     // Perform argument value analysis.
     ArgumentAnalysis analysis(getOperation());
@@ -556,14 +562,6 @@ class AnnotateDispatchArgumentsPass
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<mlir::ModuleOp>>
-createAnnotateDispatchArgumentsPass() {
-  return std::make_unique<AnnotateDispatchArgumentsPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

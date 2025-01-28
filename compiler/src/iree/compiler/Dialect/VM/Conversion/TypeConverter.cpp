@@ -10,20 +10,20 @@
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #define DEBUG_TYPE "iree-vm"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 TypeConverter::TypeConverter(TargetOptions targetOptions)
     : targetOptions_(targetOptions) {
-  // Variant means opaque in VM.
+  addConversion([](IREE::Util::ObjectType type) {
+    // Objects are always opaque ref types.
+    return IREE::VM::RefType::get(IREE::VM::OpaqueType::get(type.getContext()));
+  });
   addConversion([](IREE::Util::VariantType type) {
+    // Variant means opaque in VM.
     return IREE::VM::OpaqueType::get(type.getContext());
   });
 
@@ -31,15 +31,15 @@ TypeConverter::TypeConverter(TargetOptions targetOptions)
   addConversion([](IREE::VM::RefType type) { return type; });
 
   // Wrap ref types.
-  addConversion([](Type type) -> Optional<Type> {
-    if (RefType::isCompatible(type)) {
-      return RefType::get(type);
+  addConversion([](Type type) -> std::optional<Type> {
+    if (IREE::VM::RefType::isCompatible(type)) {
+      return IREE::VM::RefType::get(type);
     }
     return std::nullopt;
   });
 
   // Pointer types remain as pointer types types are passed through unmodified.
-  addConversion([this](IREE::Util::PtrType type) -> Optional<Type> {
+  addConversion([this](IREE::Util::PtrType type) -> std::optional<Type> {
     // Recursively handle pointer target types (we want to convert ptr<index> to
     // ptr<i32>, for example).
     auto targetType = convertType(type.getTargetType());
@@ -50,7 +50,7 @@ TypeConverter::TypeConverter(TargetOptions targetOptions)
   });
 
   // Convert integer types.
-  addConversion([](IntegerType integerType) -> Optional<Type> {
+  addConversion([](IntegerType integerType) -> std::optional<Type> {
     if (integerType.isInteger(32) || integerType.isInteger(64)) {
       // i32 and i64 are always supported by the runtime.
       return integerType;
@@ -62,11 +62,11 @@ TypeConverter::TypeConverter(TargetOptions targetOptions)
   });
 
   // Convert floating-point types.
-  addConversion([this](FloatType floatType) -> Optional<Type> {
+  addConversion([this](FloatType floatType) -> std::optional<Type> {
     if (floatType.getIntOrFloatBitWidth() < 32) {
       if (targetOptions_.f32Extension) {
         // Promote f16 -> f32.
-        return FloatType::getF32(floatType.getContext());
+        return Float32Type::get(floatType.getContext());
       } else {
         // f32 is not supported; can't compile.
         return std::nullopt;
@@ -86,26 +86,27 @@ TypeConverter::TypeConverter(TargetOptions targetOptions)
                  targetOptions_.truncateUnsupportedFloats) {
         // f64 is not supported and we still want to compile, so truncate to
         // f32 (unsafe if all bits are actually required!).
-        return FloatType::getF32(floatType.getContext());
+        return Float32Type::get(floatType.getContext());
       }
     }
     return std::nullopt;
   });
 
   // Convert index types to the target bit width.
-  addConversion([this](IndexType indexType) -> Optional<Type> {
+  addConversion([this](IndexType indexType) -> std::optional<Type> {
     return IntegerType::get(indexType.getContext(), targetOptions_.indexBits);
   });
 
   // Vectors are used for arbitrary byte storage.
-  addConversion([](VectorType vectorType) -> Optional<Type> {
+  addConversion([](VectorType vectorType) -> std::optional<Type> {
     return IREE::VM::RefType::get(
         IREE::VM::BufferType::get(vectorType.getContext()));
   });
 
   addSourceMaterialization([](OpBuilder &builder, IndexType type,
                               ValueRange inputs, Location loc) -> Value {
-    if (inputs.size() != 1 || !inputs.front().getType().isa<IntegerType>()) {
+    if (inputs.size() != 1 ||
+        !llvm::isa<IntegerType>(inputs.front().getType())) {
       return nullptr;
     }
     return builder.create<arith::IndexCastOp>(loc, type, inputs.front());
@@ -116,7 +117,4 @@ TypeConverter::TypeConverter(TargetOptions targetOptions)
          Location loc) -> Value { return inputs.front(); });
 }
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

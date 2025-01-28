@@ -7,14 +7,12 @@
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
-#include "iree/compiler/Dialect/Stream/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "iree/compiler/Utils/IndexSet.h"
+#include "iree/compiler/Utils/IntegerSet.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
@@ -27,10 +25,11 @@
 
 #define DEBUG_TYPE "iree-stream-pack-constants"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Stream {
+namespace mlir::iree_compiler::IREE::Stream {
+
+#define GEN_PASS_DEF_PACKCONSTANTSPASS
+#include "iree/compiler/Dialect/Stream/Transforms/Passes.h.inc"
+
 namespace {
 
 //===----------------------------------------------------------------------===//
@@ -48,11 +47,8 @@ struct ConstantSlice {
   // Returns the length, in bytes, of the constant value prior to alignment or
   // padding.
   uint64_t getStorageSize() const {
-    if (auto serializableAttr =
-            value.dyn_cast<IREE::Util::SerializableAttrInterface>()) {
-      return serializableAttr.getStorageSize();
-    } else if (auto denseAttr = value.dyn_cast<DenseElementsAttr>()) {
-      return denseAttr.getRawData().size();
+    if (auto storageAttr = dyn_cast<IREE::Util::SizedStorageAttr>(value)) {
+      return storageAttr.getStorageSize();
     } else {
       assert(false && "invalid constant attr type");
       return 0;
@@ -63,33 +59,40 @@ struct ConstantSlice {
 struct PackedSpan {
   // Original slice this span represents.
   ConstantSlice slice;
-  // Byte offset within the storage buffer.
+  // Byte offset within the target storage buffer.
   uint64_t offset = 0;
-  // Length of the valid data when padded out.
+  // Length of the valid data when padded out in the target storage buffer.
   // This is only accounting for the padding of the valid data itself and not
   // any additional padding for other spans within the buffer (like start
   // offset alignment).
   uint64_t length = 0;
 };
 
+// A storage resource backed by data packed in storage.
+// A storage resource may be comprised of data packed by the compiler into its
+// at-rest form (allowing for easy single operation loads/mappings) or gathered
+// from disparate storage locations (more expensive). Degenerate resources
+// may only contain a single packed logical resource which allows for easier
+// parameter loading with zero-copies at the cost of more runtime overhead.
 struct StorageResource {
   // Fused location of all spans that make up this storage buffer.
   Location loc;
   // Total size in bytes (including padding).
   uint64_t totalSize = 0;
   // Constant spans packed into this resource.
-  SmallVector<PackedSpan, 8> spans;
+  SmallVector<PackedSpan> spans;
   // Packed byte data that must be embedded in the final module.
   // It must be written with an alignment as required by the constraints.
-  IREE::Util::CompositeAttr data;
+  // If not set then each span may have unique storage.
+  IREE::Util::CompositeAttr packedData;
 };
 
 // Buckets |slices| into 1+ storage resources based on |resourceConfig|.
-static SmallVector<StorageResource, 8> bucketValuesIntoStorageResources(
+static SmallVector<StorageResource> bucketValuesIntoStorageResources(
     ArrayRef<ConstantSlice> slices,
     IREE::Stream::ResourceConfigAttr resourceConfig) {
   // TODO(benvanik): replace with a better strategy (best-fit, etc).
-  SmallVector<StorageResource, 8> storageBuffers;
+  SmallVector<StorageResource> storageBuffers;
   storageBuffers.push_back({UnknownLoc::get(resourceConfig.getContext())});
   StorageResource *currentBuffer = &storageBuffers.back();
   for (auto slice : slices) {
@@ -126,11 +129,11 @@ static void packStorageResourceData(StorageResource &storageBuffer,
   // be useful if we wanted to map back a module size through data blobs.
   // With buffer <-> constant it's possible to build a tree map of
   // contributions in the source. TBD ;)
-  storageBuffer.loc =
-      FusedLoc::get(context, llvm::to_vector<8>(llvm::map_range(
-                                 storageBuffer.spans, [](PackedSpan &span) {
-                                   return span.slice.result.getLoc();
-                                 })));
+  storageBuffer.loc = FusedLoc::get(
+      context,
+      llvm::map_to_vector<8>(storageBuffer.spans, [](PackedSpan &span) {
+        return span.slice.result.getLoc();
+      }));
 
   // Construct a composite attribute that contains references to the original
   // uniqued storage values. This avoids needing to reallocate/unique/copy
@@ -142,7 +145,8 @@ static void packStorageResourceData(StorageResource &storageBuffer,
   SmallVector<Attribute> values;
   int64_t offset = 0;
   for (auto &constantSpan : storageBuffer.spans) {
-    if (constantSpan.length == 0) continue;
+    if (constantSpan.length == 0)
+      continue;
 
     int64_t start = constantSpan.offset;
     int64_t end = start + constantSpan.length;
@@ -177,17 +181,18 @@ static void packStorageResourceData(StorageResource &storageBuffer,
     offset += tailPadding;
   }
 
-  storageBuffer.data = IREE::Util::CompositeAttr::get(context, values);
-  assert(storageBuffer.data && "unable to build composite attr");
+  storageBuffer.packedData = IREE::Util::CompositeAttr::get(context, values);
+  assert(storageBuffer.packedData && "unable to build composite attr");
 }
 
 // Returns zero or more storage resources and the spans values map into.
 // Assume that |slices| have been ordered by prior passes and that order may
 // have some performance-sensitivity (constants are grouped by
 // locality/lifetime/etc).
-static SmallVector<StorageResource, 8> computePackingMap(
-    ArrayRef<ConstantSlice> slices,
-    IREE::Stream::ResourceConfigAttr resourceConfig, MLIRContext *context) {
+static SmallVector<StorageResource>
+computePackingMap(ArrayRef<ConstantSlice> slices,
+                  IREE::Stream::ResourceConfigAttr resourceConfig,
+                  MLIRContext *context) {
   // This is literally all my brain has brain for right now. The ideal here is
   // that we have a basic static (and ideally profile-guided) sorting pass
   // that keeps constant values that are accessed sorted together.
@@ -235,264 +240,403 @@ static SmallVector<StorageResource, 8> computePackingMap(
 // Upload materialization
 //===----------------------------------------------------------------------===//
 
-struct AllocatedStorage {
-  // Resource storing all packed constants.
+struct TimepointResource {
+  Value timepoint;
   Value resource;
-  // Total size, in bytes, of the storage resource.
   Value resourceSize;
 };
 
-struct UploadResult {
-  // Timepoint when the storage is initialized with the constant values.
-  Value timepoint;
-  // Each (resource, resourceSize) allocated.
-  SmallVector<AllocatedStorage> allocations;
+struct ParameterSlice {
+  IREE::Stream::NamedParameterAttr parameterAttr;
+  Value sourceOffset;
+  Value sourceLength;
 };
 
-// Maps constants as a staging buffer and then issues copy commands.
-// Per-storage resource we map the source rodata, allocate the result, and then
-// issue an async copy from source to result. To avoid a bunch of overhead when
-// there are multiple storage buffers we invert the logic so that we put all the
-// async copies into a single region.
-static UploadResult buildStagingUpload(
-    Location loc, IREE::Stream::AffinityAttr affinityAttr,
-    IREE::Stream::ResourceType resourceType,
-    ArrayRef<StorageResource> storageResources, ArrayRef<Value> storageBuffers,
-    IndexSet &indexSet, OpBuilder &builder) {
-  UploadResult uploadResult;
-  auto stagingType = builder.getType<IREE::Stream::ResourceType>(
-      IREE::Stream::Lifetime::Staging);
-
-  // Map all of the storage data and allocate the result buffers.
-  // This will produce a list of copies we should perform from staging->final.
-  struct Copy {
-    Location loc;
-    Value source;
-    Value sourceSize;
-    Value sourceOffset;
-    Value target;
-    Value targetSize;
-    Value targetOffset;
-    Value length;
-  };
-  SmallVector<Copy> copies;
-  SmallVector<Value> capturedResources;
-  SmallVector<Value> capturedResourceSizes;
-  for (auto [storageResource, storageBuffer] :
-       llvm::zip_equal(storageResources, storageBuffers)) {
-    // Today we assume 1:1 lengths of storage data and uploaded data, but this
-    // need not be the case if we want to pad the buffer for runtime.
-    auto totalLength = indexSet.get(storageResource.totalSize);
-
-    // Map the source staging resource rodata.
-    auto mapOp = builder.create<IREE::Stream::ResourceMapOp>(
-        storageResource.loc, stagingType, storageBuffer, indexSet.get(0),
-        totalLength, affinityAttr);
-
-    // Allocate the resulting storage resource of the final resource type.
-    auto allocOp = builder.create<IREE::Stream::ResourceAllocOp>(
-        storageResource.loc, resourceType, mapOp.getResultSize(),
-        /*uninitialized=*/builder.getUnitAttr(), affinityAttr);
-
-    uploadResult.allocations.push_back({
-        allocOp.getResults().front(),
-        allocOp.getStorageSizes().front(),
-    });
-
-    // Queue copy for processing below.
-    Copy copy{
-        storageResource.loc,
-        mapOp.getResult(),
-        mapOp.getResultSize(),
-        indexSet.get(0),
-        allocOp.getResults().front(),
-        allocOp.getStorageSizes().front(),
-        indexSet.get(0),
-        totalLength,
-    };
-    capturedResources.push_back(copy.source);
-    capturedResourceSizes.push_back(copy.sourceSize);
-    capturedResources.push_back(copy.target);
-    capturedResourceSizes.push_back(copy.targetSize);
-    copies.push_back(std::move(copy));
+static ParameterSlice getParameterSlice(Location loc, Attribute value,
+                                        IntegerSet<int64_t> &i64Set,
+                                        IndexSet &indexSet,
+                                        OpBuilder &builder) {
+  auto parameterAttr = cast<IREE::Stream::NamedParameterAttr>(value);
+  Value sourceOffset;
+  Value sourceLength;
+  if (auto configAttr = parameterAttr.getConfig()) {
+    if (auto offsetAttr = configAttr.getAs<IntegerAttr>("offset")) {
+      sourceOffset = i64Set.get(offsetAttr.getValue());
+    }
+    if (auto lengthAttr = configAttr.getAs<IntegerAttr>("length")) {
+      sourceLength = indexSet.get(lengthAttr.getInt());
+    }
   }
-
-  // Create the execution op capturing the resources.
-  auto executeOp = builder.create<IREE::Stream::CmdExecuteOp>(
-      loc, /*awaitTimepoint=*/Value{}, capturedResources,
-      capturedResourceSizes);
-  if (affinityAttr) executeOp.setAffinityAttr(affinityAttr);
-  uploadResult.timepoint = executeOp.getResultTimepoint();
-
-  // Map captured resources into the execution region.
-  IRMapping mapping;
-  auto *entryBlock = new Block();
-  executeOp.getBody().push_back(entryBlock);
-  for (auto outerValue : capturedResources) {
-    auto arg =
-        entryBlock->addArgument(outerValue.getType(), outerValue.getLoc());
-    mapping.map(outerValue, arg);
+  if (!sourceOffset) {
+    sourceOffset = i64Set.get(0);
   }
-
-  // Issue copies. Note that we use the captured resources.
-  auto executionBuilder = OpBuilder::atBlockBegin(entryBlock);
-  for (auto &copy : copies) {
-    executionBuilder.create<IREE::Stream::CmdCopyOp>(
-        copy.loc, mapping.lookup(copy.source), copy.sourceSize,
-        copy.sourceOffset, mapping.lookup(copy.target), copy.targetSize,
-        copy.targetOffset, copy.length);
+  if (!sourceLength) {
+    sourceLength = indexSet.get(parameterAttr.getStorageSize());
   }
-  executionBuilder.create<IREE::Stream::YieldOp>(executeOp.getLoc());
-
-  return uploadResult;
+  return ParameterSlice{parameterAttr, sourceOffset, sourceLength};
 }
 
-// Emits IR to first try mapping the storage resources directly into usable
-// constant resources. If the mapping fails (the target can't use the memory)
-// then fall back to staging uploads.
-static UploadResult buildTryMapConstantResources(
-    Location loc, IREE::Stream::AffinityAttr affinityAttr,
-    IREE::Stream::ResourceType resourceType,
-    ArrayRef<StorageResource> storageResources, ArrayRef<Value> storageBuffers,
-    IndexSet &indexSet, OpBuilder &builder) {
-  // Try mapping each resource. We do this as an all-or-nothing across the
-  // storage: if any fails we fallback to the allocation path. This is mostly
-  // just to get more predictable behavior in the face of weird platform
-  // requirements: we want something like misaligned mappings to be easily
-  // visible in tracing.
-  SmallVector<Value> mappedResources;
-  SmallVector<Type> resultTypes;
-  Value ok;
-  auto zero = indexSet.get(0);
-  for (auto [storageResource, storageBuffer] :
-       llvm::zip_equal(storageResources, storageBuffers)) {
-    auto tryMapOp = builder.create<IREE::Stream::ResourceTryMapOp>(
-        storageResource.loc, builder.getI1Type(), resourceType, storageBuffer,
-        zero, indexSet.get(storageResource.totalSize), affinityAttr);
-    if (!ok) {
-      ok = tryMapOp.getDidMap();
-    } else {
-      ok = builder.createOrFold<arith::AndIOp>(tryMapOp.getLoc(), ok,
-                                               tryMapOp.getDidMap());
+static Value buildParameterLoad(Value awaitTimepoint,
+                                IREE::Stream::AffinityAttr affinityAttr,
+                                Type targetType, StringAttr scope,
+                                ArrayRef<StorageResource *> storageResources,
+                                IntegerSet<int64_t> &i64Set, IndexSet &indexSet,
+                                OpBuilder &builder) {
+  SmallVector<Location> spanLocs;
+  SmallVector<Attribute> sourceKeys;
+  SmallVector<Value> sourceOffsets;
+  SmallVector<Type> targetTypes;
+  SmallVector<Value> targetLengths;
+  for (auto *storageResource : storageResources) {
+    assert(storageResource->spans.size() == 1 &&
+           "expected single span per resource for load");
+    for (auto &packedSpan : storageResource->spans) {
+      auto spanLoc = packedSpan.slice.result.getLoc();
+      auto parameterSlice = getParameterSlice(spanLoc, packedSpan.slice.value,
+                                              i64Set, indexSet, builder);
+      spanLocs.push_back(spanLoc);
+      sourceKeys.push_back(parameterSlice.parameterAttr.getKey());
+      sourceOffsets.push_back(parameterSlice.sourceOffset);
+      targetTypes.push_back(targetType);
+      targetLengths.push_back(indexSet.get(packedSpan.length));
     }
-    mappedResources.push_back(tryMapOp.getResult());
-    resultTypes.push_back(tryMapOp.getResult().getType());
   }
+
+  // Load all in a batch. One resource is returned per parameter but they may
+  // alias depending on the runtime implementation.
+  auto loadOp = builder.create<IREE::Stream::ParameterLoadOp>(
+      builder.getFusedLoc(spanLocs), targetTypes,
+      builder.getType<IREE::Stream::TimepointType>(), scope,
+      builder.getArrayAttr(sourceKeys), sourceOffsets, targetLengths,
+      awaitTimepoint, affinityAttr);
+
+  // Slice out each span from the allocation.
+  // Note that access must be guarded by the final ready timepoint.
+  unsigned resultIndex = 0;
+  for (auto *storageResource : storageResources) {
+    for (auto &packedSpan : storageResource->spans) {
+      auto subviewOp = builder.create<IREE::Stream::ResourceSubviewOp>(
+          packedSpan.slice.result.getLoc(), loadOp.getResult(resultIndex),
+          loadOp.getResultSize(resultIndex), indexSet.get(packedSpan.offset),
+          packedSpan.slice.resultSize);
+      packedSpan.slice.result.replaceAllUsesWith(subviewOp.getResult());
+      ++resultIndex;
+    }
+  }
+
+  return loadOp.getResultTimepoint();
+}
+
+static TimepointResource buildParameterGather(
+    Location loc, Value awaitTimepoint, IREE::Stream::AffinityAttr affinityAttr,
+    Type targetType, Value targetSize, MutableArrayRef<PackedSpan> packedSpans,
+    IntegerSet<int64_t> &i64Set, IndexSet &indexSet, OpBuilder &builder) {
+  // Allocate the resulting storage resource of the final resource type.
+  auto allocOp = builder.create<IREE::Stream::ResourceAllocOp>(
+      loc, targetType, targetSize,
+      /*uninitialized=*/builder.getUnitAttr(), affinityAttr);
+
+  // Parameters may be from multiple scopes - bucket by scope and gather from
+  // each in turn.
+  llvm::MapVector<StringAttr, SmallVector<PackedSpan>> scopeSpans;
+  for (auto &packedSpan : packedSpans) {
+    auto parameterAttr =
+        cast<IREE::Stream::NamedParameterAttr>(packedSpan.slice.value);
+    scopeSpans[parameterAttr.getScope()].push_back(packedSpan);
+  }
+
+  // Gather from each unique scope.
+  SmallVector<Value> gatherTimepoints;
+  for (auto &[scope, packedSpans] : scopeSpans) {
+    SmallVector<Attribute> sourceKeys;
+    SmallVector<Value> sourceOffsets;
+    SmallVector<Value> targetOffsets;
+    SmallVector<Value> targetLengths;
+    sourceKeys.reserve(packedSpans.size());
+    for (auto &packedSpan : packedSpans) {
+      auto parameterSlice = getParameterSlice(loc, packedSpan.slice.value,
+                                              i64Set, indexSet, builder);
+      sourceKeys.push_back(parameterSlice.parameterAttr.getKey());
+      sourceOffsets.push_back(parameterSlice.sourceOffset);
+      targetOffsets.push_back(indexSet.get(packedSpan.offset));
+      targetLengths.push_back(indexSet.get(packedSpan.length));
+    }
+    auto gatherOp = builder.create<IREE::Stream::ParameterGatherOp>(
+        loc, builder.getType<IREE::Stream::TimepointType>(), scope,
+        builder.getArrayAttr(sourceKeys), sourceOffsets, allocOp.getResult(),
+        allocOp.getResultSize(0), targetOffsets, targetLengths, awaitTimepoint,
+        affinityAttr);
+    gatherTimepoints.push_back(gatherOp.getResultTimepoint());
+  }
+
+  // Slice out each span from the allocation.
+  // Note that access must be guarded by the final ready timepoint.
+  for (auto &packedSpan : packedSpans) {
+    auto subviewOp = builder.create<IREE::Stream::ResourceSubviewOp>(
+        packedSpan.slice.result.getLoc(), allocOp.getResult(),
+        allocOp.getResultSize(0), indexSet.get(packedSpan.offset),
+        packedSpan.slice.resultSize);
+    packedSpan.slice.result.replaceAllUsesWith(subviewOp.getResult());
+  }
+
+  // Wait until all gathers have completed.
+  Value readyTimepoint =
+      IREE::Stream::TimepointJoinOp::join(gatherTimepoints, builder);
+  return TimepointResource{readyTimepoint, allocOp.getResult(),
+                           allocOp.getResultSize(0)};
+}
+
+static TimepointResource buildFileRead(
+    Location loc, Value awaitTimepoint, IREE::Stream::AffinityAttr affinityAttr,
+    IREE::Stream::ResourceType resourceType, Value storageResourceSize,
+    Value storageBuffer, Value storageBufferSize, IntegerSet<int64_t> &i64Set,
+    IndexSet &indexSet, OpBuilder &builder) {
+  // Allocate the resulting storage resource of the final resource type.
+  auto allocOp = builder.create<IREE::Stream::ResourceAllocOp>(
+      loc, resourceType, storageResourceSize,
+      /*uninitialized=*/builder.getUnitAttr(), affinityAttr);
+
+  // Create the file backed by the constant resource buffer.
+  auto fileOp = builder.create<IREE::Stream::FileConstantOp>(
+      loc, storageBuffer, storageBufferSize, indexSet.get(0),
+      storageResourceSize, affinityAttr);
+
+  // Issue asynchronous file read into the buffer.
+  auto zeroI64 = i64Set.get(0);
+  auto readOp = builder.create<IREE::Stream::FileReadOp>(
+      loc, fileOp.getResult(), zeroI64, allocOp.getResult(),
+      allocOp.getResultSize(0), indexSet.get(0), storageResourceSize,
+      awaitTimepoint, affinityAttr);
+
+  return TimepointResource{readOp.getResultTimepoint(), readOp.getTarget(),
+                           readOp.getTargetSize()};
+}
+
+// Emits IR to first try mapping the storage resource directly into a usable
+// constant resource. If the mapping fails (the target can't use the memory)
+// then fall back to staging uploads.
+// Returns a timepoint indicating the operation has completed.
+static TimepointResource buildTryMapConstantResource(
+    Location loc, Value awaitTimepoint, IREE::Stream::AffinityAttr affinityAttr,
+    IREE::Stream::ResourceType resourceType, Value storageResourceSize,
+    Value storageBuffer, Value storageBufferSize, IntegerSet<int64_t> &i64Set,
+    IndexSet &indexSet, OpBuilder &builder) {
+  // Try mapping; this may fail if the device can't use the storage buffer as
+  // the type of resource requested.
+  auto tryMapOp = builder.create<IREE::Stream::ResourceTryMapOp>(
+      loc, builder.getI1Type(), resourceType, storageBuffer, indexSet.get(0),
+      storageResourceSize, affinityAttr);
 
   // If we are able to directly map the resources then we don't need to wait.
-  auto timepointType = builder.getType<IREE::Stream::TimepointType>();
-  resultTypes.push_back(timepointType);
-
-  // if ok: return mapped resources
-  // else: allocate and upload
+  // Otherwise we need to stage the storage buffer into memory via the file
+  // streaming API.
   auto ifOp = builder.create<scf::IfOp>(
-      loc, ok,
+      loc, tryMapOp.getDidMap(),
       [&](OpBuilder &thenBuilder, Location loc) {
         // Just return the resources + an immediate timepoint.
-        SmallVector<Value> ifResults = mappedResources;
-        ifResults.push_back(
-            thenBuilder.create<IREE::Stream::TimepointImmediateOp>(loc));
-        thenBuilder.create<scf::YieldOp>(loc, ifResults);
+        thenBuilder.create<scf::YieldOp>(loc, ValueRange{
+                                                  awaitTimepoint,
+                                                  tryMapOp.getResult(),
+                                              });
       },
       [&](OpBuilder &elseBuilder, Location loc) {
-        // Fallback to upload and then
-        auto stagingResult = buildStagingUpload(
-            loc, affinityAttr, resourceType, storageResources, storageBuffers,
-            indexSet, builder);
-        SmallVector<Value> ifResults;
-        for (auto &allocation : stagingResult.allocations) {
-          ifResults.push_back(allocation.resource);
-        }
-        ifResults.push_back(stagingResult.timepoint);
-        elseBuilder.create<scf::YieldOp>(loc, ifResults);
+        auto readResult =
+            buildFileRead(loc, awaitTimepoint, affinityAttr, resourceType,
+                          storageResourceSize, storageBuffer, storageBufferSize,
+                          i64Set, indexSet, elseBuilder);
+        elseBuilder.create<scf::YieldOp>(loc, ValueRange{
+                                                  readResult.timepoint,
+                                                  readResult.resource,
+                                              });
       });
-  auto ifTimepoint = ifOp.getResults().back();
-  auto ifResources = ifOp.getResults().slice(0, ifOp.getResults().size() - 1);
-
-  // Use the result of either the direct mapping or the staging upload.
-  UploadResult uploadResult;
-  uploadResult.timepoint = ifTimepoint;
-  for (auto [storageResource, ifResource] :
-       llvm::zip_equal(storageResources, ifResources)) {
-    uploadResult.allocations.push_back({
-        ifResource,
-        indexSet.get(storageResource.totalSize),
-    });
-  }
-  return uploadResult;
+  auto ifTimepoint = ifOp.getResults().front();
+  auto ifResource = ifOp.getResults().back();
+  return TimepointResource{ifTimepoint, ifResource, storageResourceSize};
 }
 
-static Value generateUpload(IREE::Stream::ResourceConstantsOp constantsOp,
-                            IREE::Stream::Lifetime lifetime,
-                            IREE::Stream::ResourceConfigAttr resourceConfig,
-                            IndexSet &indexSet, OpBuilder &builder) {
-  // Gather the slices produced by this constant pooling op.
-  SmallVector<ConstantSlice> slices;
-  slices.reserve(constantsOp.getResults().size());
-  for (auto [result, resultSize, value] :
-       llvm::zip_equal(constantsOp.getResults(), constantsOp.getResultSizes(),
-                       constantsOp.getValues())) {
-    auto resourceType = result.getType().cast<IREE::Stream::ResourceType>();
-    if (resourceType.getLifetime() != lifetime) continue;
-    slices.push_back(ConstantSlice{
-        result,
-        resultSize,
-        value,
-    });
-  }
-
+static Value generateSerializedUpload(
+    Value awaitTimepoint, IREE::Stream::AffinityAttr affinityAttr,
+    IREE::Stream::ResourceConfigAttr resourceConfig,
+    ArrayRef<ConstantSlice> slices, IntegerSet<int64_t> &i64Set,
+    IndexSet &indexSet, OpBuilder &builder) {
   // Perform the packing of dense values to compute the storage resources we
   // will need and where each value will be placed.
   auto storageResources =
-      computePackingMap(slices, resourceConfig, constantsOp.getContext());
-  if (storageResources.empty()) return nullptr;
+      computePackingMap(slices, resourceConfig, builder.getContext());
+  if (storageResources.empty())
+    return nullptr;
+
+  // TODO(benvanik): should be able to have a single buffer constant and
+  // subrange it so that we don't need so many files.
+
+  auto anyResult = slices.front().result;
+  auto resourceType =
+      llvm::cast<IREE::Stream::ResourceType>(anyResult.getType());
 
   // Emit rodata storage for the constant values.
   // As our upload paths may vary this ensures that we are only emitting
   // them once regardless of how many strategies we emit IR for.
-  SmallVector<Value> storageBuffers;
+  Value currentTimepoint = awaitTimepoint;
   for (auto &storageResource : storageResources) {
-    auto rodataOp = builder.create<IREE::Util::BufferConstantOp>(
-        storageResource.loc, /*name=*/nullptr, storageResource.data,
+    // Serialized resources are stored as packed host data.
+    Value storageBuffer = builder.create<IREE::Util::BufferConstantOp>(
+        storageResource.loc, /*name=*/nullptr, storageResource.packedData,
         builder.getIndexAttr(resourceConfig.getMinBufferOffsetAlignment()),
         /*mimeType=*/nullptr);
-    storageBuffers.push_back(rodataOp);
-  }
 
-  // If this is producing constants (vs variables) we can try to go on a
-  // fast-path where we directly map the constant memory. If producing
-  // variables then we always need to stage and clone.
-  auto anyResult = slices.front().result;
-  auto resourceType = anyResult.getType().cast<IREE::Stream::ResourceType>();
-  UploadResult uploadResult;
-  if (resourceType.getLifetime() == IREE::Stream::Lifetime::Constant) {
-    uploadResult = buildTryMapConstantResources(
-        constantsOp.getLoc(), constantsOp.getAffinityAttr(), resourceType,
-        storageResources, storageBuffers, indexSet, builder);
-  } else {
-    uploadResult = buildStagingUpload(
-        constantsOp.getLoc(), constantsOp.getAffinityAttr(), resourceType,
-        storageResources, storageBuffers, indexSet, builder);
-  }
+    // If this is producing constants (vs variables) we can try to go on a
+    // fast-path where we directly map the constant memory. If producing
+    // variables then we always need to stage and clone.
+    TimepointResource uploadedResource;
+    auto resourceSize = indexSet.get(storageResource.totalSize);
+    if (resourceType.getLifetime() == IREE::Stream::Lifetime::Constant) {
+      uploadedResource = buildTryMapConstantResource(
+          storageResource.loc, currentTimepoint, affinityAttr, resourceType,
+          resourceSize, storageBuffer, resourceSize, i64Set, indexSet, builder);
+    } else {
+      uploadedResource = buildFileRead(
+          storageResource.loc, currentTimepoint, affinityAttr, resourceType,
+          resourceSize, storageBuffer, resourceSize, i64Set, indexSet, builder);
+    }
 
-  // Build subviews for all packed spans back into storage buffers.
-  for (auto [storageResource, allocatedStorage] :
-       llvm::zip_equal(storageResources, uploadResult.allocations)) {
     for (auto &span : storageResource.spans) {
       auto loc = span.slice.result.getLoc();
       auto subviewOp = builder.create<IREE::Stream::ResourceSubviewOp>(
-          loc, allocatedStorage.resource, allocatedStorage.resourceSize,
+          loc, uploadedResource.resource, uploadedResource.resourceSize,
           indexSet.get(span.offset), span.slice.resultSize);
       span.slice.result.replaceAllUsesWith(subviewOp.getResult());
     }
+
+    currentTimepoint = uploadedResource.timepoint;
   }
 
   // Join on storage timepoints for our transitive dependencies to await.
-  return uploadResult.timepoint;
+  return currentTimepoint;
+}
+
+static Value generateParameterUpload(
+    Value awaitTimepoint, IREE::Stream::AffinityAttr affinityAttr,
+    IREE::Stream::ResourceConfigAttr resourceConfig,
+    ArrayRef<ConstantSlice> slices, IntegerSet<int64_t> &i64Set,
+    IndexSet &indexSet, OpBuilder &builder) {
+  auto anyResult = slices.front().result;
+  auto resourceType =
+      llvm::cast<IREE::Stream::ResourceType>(anyResult.getType());
+
+  // Perform the packing of dense values to compute the storage resources we
+  // will need and where each value will be placed unless we have a chance to
+  // reuse parameter storage. This is a big switch today (either we try to
+  // emit one resource per parameter for loading _or_ we gather everything) but
+  // could be refined to only try loading large resources while we pack the
+  // small resources. e.g. try to reuse a 1GB parameter but pack 1000 128B
+  // parameters together.
+  SmallVector<StorageResource> storageResources;
+  if (resourceType.getLifetime() == IREE::Stream::Lifetime::Constant &&
+      resourceConfig.getMemoryModel() == IREE::Stream::MemoryModel::Unified) {
+    for (auto &slice : slices) {
+      uint64_t sliceSize = slice.getStorageSize();
+      storageResources.push_back(StorageResource{slice.result.getLoc(),
+                                                 sliceSize,
+                                                 {
+                                                     PackedSpan{
+                                                         slice,
+                                                         /*offset=*/0,
+                                                         /*length=*/sliceSize,
+                                                     },
+                                                 }});
+    }
+  } else {
+    storageResources =
+        computePackingMap(slices, resourceConfig, builder.getContext());
+  }
+  if (storageResources.empty())
+    return nullptr;
+
+  // Sort resources by type so we can batch them.
+  // Loads are only possible if we are using the parameter as a constant and
+  // it is a single span as we can't pack externally owned parameters.
+  // A batch of loads happens from a single source scope so we bucket here.
+  // Note that we do this separate from the walk above as we may pack parameters
+  // such that they have a single parameter per resource and introduce more that
+  // we can load than if just looking at the original pre-packed state.
+  llvm::MapVector<StringAttr, SmallVector<StorageResource *>> resourceLoads;
+  SmallVector<StorageResource *> resourceGathers;
+  for (auto &storageResource : storageResources) {
+    if (storageResource.spans.size() == 1) {
+      auto parameterAttr = cast<IREE::Stream::NamedParameterAttr>(
+          storageResource.spans.front().slice.value);
+      resourceLoads[parameterAttr.getScope()].push_back(&storageResource);
+    } else {
+      resourceGathers.push_back(&storageResource);
+    }
+  }
+
+  // Emit all loads as a single operation per scope.
+  SmallVector<Value> uploadTimepoints;
+  for (auto &[scope, scopeResources] : resourceLoads) {
+    uploadTimepoints.push_back(
+        buildParameterLoad(awaitTimepoint, affinityAttr, resourceType, scope,
+                           scopeResources, i64Set, indexSet, builder));
+  }
+
+  // Emit gathers, of which there may be multiple batches based on the target
+  // resource as gathers are 1:1 per target.
+  for (auto *storageResource : resourceGathers) {
+    auto resourceSize = indexSet.get(storageResource->totalSize);
+    auto uploadedResource = buildParameterGather(
+        storageResource->loc, awaitTimepoint, affinityAttr, resourceType,
+        resourceSize, storageResource->spans, i64Set, indexSet, builder);
+    uploadTimepoints.push_back(uploadedResource.timepoint);
+  }
+
+  // Join on storage timepoints for our transitive dependencies to await.
+  return IREE::Stream::TimepointJoinOp::join(uploadTimepoints, builder);
+}
+
+static Value generateUploads(Value awaitTimepoint,
+                             IREE::Stream::ResourceConstantsOp constantsOp,
+                             IREE::Stream::ResourceConfigAttr resourceConfig,
+                             IntegerSet<int64_t> &i64Set, IndexSet &indexSet,
+                             OpBuilder &builder) {
+  // Split the slices based on whether they are sourced from serialized data or
+  // externally-defined parameters.
+  // TODO(benvanik): remove stream.resource.constants and this coupling;
+  // parameters should be handled by a dedicated pass. This is a hack that
+  // allows us to reuse the packing code for performing variable parameter packs
+  // and have everything happen atomically but is pretty terrible.
+  SmallVector<ConstantSlice> serializedSlices;
+  SmallVector<ConstantSlice> parameterSlices;
+  for (auto [result, resultSize, value] :
+       llvm::zip_equal(constantsOp.getResults(), constantsOp.getResultSizes(),
+                       constantsOp.getValues())) {
+    auto slice = ConstantSlice{
+        result,
+        resultSize,
+        value,
+    };
+    if (isa<IREE::Stream::NamedParameterAttr>(value)) {
+      parameterSlices.push_back(slice);
+    } else {
+      serializedSlices.push_back(slice);
+    }
+  }
+
+  SmallVector<Value> uploadTimepoints;
+  if (!serializedSlices.empty()) {
+    uploadTimepoints.push_back(generateSerializedUpload(
+        awaitTimepoint, constantsOp.getAffinityAttr(), resourceConfig,
+        serializedSlices, i64Set, indexSet, builder));
+  }
+  if (!parameterSlices.empty()) {
+    uploadTimepoints.push_back(generateParameterUpload(
+        awaitTimepoint, constantsOp.getAffinityAttr(), resourceConfig,
+        parameterSlices, i64Set, indexSet, builder));
+  }
+  return IREE::Stream::TimepointJoinOp::join(uploadTimepoints, builder);
 }
 
 //===----------------------------------------------------------------------===//
-// -iree-stream-pack-constants
+// --iree-stream-pack-constants
 //===----------------------------------------------------------------------===//
 
 // NOTE: this pass currently produces suboptimal packing when multiple constant
@@ -505,16 +649,8 @@ static Value generateUpload(IREE::Stream::ResourceConstantsOp constantsOp,
 // would be much nicer. For now, though, we don't do multi-device so there's
 // never a case where this matters by construction; which is a feature :P
 
-class PackConstantsPass : public PackConstantsBase<PackConstantsPass> {
- public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::func::FuncDialect>();
-    registry.insert<mlir::arith::ArithDialect>();
-    registry.insert<mlir::scf::SCFDialect>();
-    registry.insert<IREE::Stream::StreamDialect>();
-    registry.insert<IREE::Util::UtilDialect>();
-  }
-
+struct PackConstantsPass
+    : public IREE::Stream::impl::PackConstantsPassBase<PackConstantsPass> {
   void runOnOperation() override {
     auto parentOp = getOperation();
     if (!parentOp || !parentOp.getCallableRegion() ||
@@ -527,48 +663,27 @@ class PackConstantsPass : public PackConstantsBase<PackConstantsPass> {
       auto resourceConfig =
           IREE::Stream::ResourceConfigAttr::lookup(constantsOp);
 
+      // Packing creates a lot of index values given that all the sizes are
+      // statically-known - CSE would collapse them but we use an IndexSet to
+      // reduce the IR churn.
       OpBuilder builder(constantsOp);
+      IntegerSet<int64_t> i64Set(constantsOp.getLoc(), builder);
       IndexSet indexSet(constantsOp.getLoc(), builder);
       indexSet.populate(constantsOp.getResultSizes());
 
       // Perform upload/processing for immutable and mutable constants.
-      SmallVector<Value> timepoints;
-      if (auto timepoint =
-              generateUpload(constantsOp, IREE::Stream::Lifetime::Constant,
-                             resourceConfig, indexSet, builder)) {
-        timepoints.push_back(timepoint);
-      }
-      if (auto timepoint =
-              generateUpload(constantsOp, IREE::Stream::Lifetime::Variable,
-                             resourceConfig, indexSet, builder)) {
-        timepoints.push_back(timepoint);
-      }
-      if (timepoints.empty()) return;
-
-      // Join on storage timepoints for our transitive dependencies to await.
-      // We could do this at a finer granularity if we were to split the
-      // constants op into multiple units earlier on.
-      Value joinTimepoint;
-      if (timepoints.size() > 1) {
-        joinTimepoint = builder.create<IREE::Stream::TimepointJoinOp>(
-            constantsOp.getLoc(), timepoints.front().getType(), timepoints);
-      } else {
-        joinTimepoint = timepoints.front();
-      }
-      constantsOp.getResultTimepoint().replaceAllUsesWith(joinTimepoint);
+      Value awaitTimepoint = builder.create<IREE::Stream::TimepointImmediateOp>(
+          constantsOp.getLoc());
+      auto uploadTimepoint =
+          generateUploads(awaitTimepoint, constantsOp, resourceConfig, i64Set,
+                          indexSet, builder);
+      constantsOp.getResultTimepoint().replaceAllUsesWith(uploadTimepoint);
 
       constantsOp.erase();
     });
   }
 };
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<InterfacePass<CallableOpInterface>> createPackConstantsPass() {
-  return std::make_unique<PackConstantsPass>();
-}
-
-}  // namespace Stream
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Stream

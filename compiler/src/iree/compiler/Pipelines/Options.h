@@ -9,8 +9,7 @@
 
 #include "iree/compiler/Utils/OptionUtils.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 struct BindingOptions {
   // Whether to include runtime support functions for the IREE native ABI.
@@ -30,40 +29,98 @@ struct BindingOptions {
 // needs to be created in order to represent whole-module level framework
 // quirks. These are just about the ops in the functions.
 struct InputDialectOptions {
+  // Built-in input types, represented by an enum.
   enum class Type {
     // Applies no input transformation. Only supported core and extension ops
     // are supported.
     none,
-#ifdef IREE_HAVE_MHLO_INPUT
-    // Legalizes input defined over MHLO ops.
-    mhlo,
-    // Special case of 'mhlo' legalization which also performs some XLA
-    // cleanup activities.
-    xla,
-#endif  // IREE_HAVE_MHLO_INPUT
-#ifdef IREE_HAVE_TORCH_INPUT
-    // Legalizes input defined over TMTensor ops.
-    tm_tensor,
-#endif  // IREE_HAVE_TORCH_INPUT
-#ifdef IREE_HAVE_TOSA_INPUT
-    // Legalizes input defined over TOSA ops.
-    tosa,
-#endif  // IREE_HAVE_TOSA_INPUT
+    // Analyses the input to determine what input dialect pipeline to use.
+    auto_detect,
+    // A named input pipeline from a plugin. If set, then 'pluginInputPipeline'
+    // must be set.
+    plugin,
   };
-  Type type = Type::none;
+  // The flag value is captured into spec by the CL system and it must be
+  // interpreted by parseInputTypeSpec.
+  std::string inputTypeMnemonic{"auto"};
+
+  // Parses the user-provided inputTypeMnemonic, returning a recognized Type
+  // enumeration as appropriate. If the returned type is `plugin`, then it is
+  // a custom input type and the raw inputTypeMnemonic should be passed to the
+  // plugin system for resolution.
+  Type parseInputTypeMnemonic();
+
+  // Gate various type based demotion passes that run before anything else.
+  bool demoteI64ToI32 = false;
+  bool demoteF32ToF16 = false;
+  bool demoteF64ToF32 = true;
+  bool promoteF16ToF32 = false;
+  bool promoteBF16ToF32 = false;
+
+  // Perfoms early optimizations geared towards optimizing/simplifying the
+  // types of integer arithmetic inefficiencies that frontends typically
+  // include and which are implicated in blocking downstream optimizations.
+  bool optimizeIndexArithmetic = true;
 
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<InputDialectOptions>;
 };
 
+// Allows specifying one of several ways of doing custom transformations at the
+// pre-processing phase, multiple ways may be used and they are run in order:
+//   1. Through a preprocessing pass pipeline.
+//   2. Through a Transform dialect spec file.
+//   3. Through a PDL spec file.
+struct PreprocessingOptions {
+  std::string preprocessingPassPipeline;
+  std::string preprocessingTransformSpecFilename;
+  std::string preprocessingPDLSpecFilename;
+
+  void bindOptions(OptionsBinder &binder);
+  using FromFlags = OptionsFromFlags<PreprocessingOptions>;
+};
+
 // Options controlling high level optimizations.
-struct HighLevelOptimizationOptions {
+struct GlobalOptimizationOptions {
+  // Maximum byte size increase allowed for constant expr hoisting policy to
+  // allow hoisting. The threshold is 1MB by default.
+  int64_t constExprMaxSizeIncreaseThreshold = 1024 * 1024;
+
+  // File paths to archives to import parameters from with an optional
+  // `scope=` prefix.
+  std::vector<std::string> parameterImportPaths;
+  // List of parameter keys to import. Any matching keys from any scope will be
+  // imported.
+  std::vector<std::string> parameterImportKeys;
+  // Maximum size of parameters to import or 0 to disable automatic import.
+  int64_t parameterImportMaximumSize = 0;
+
+  // File path to an archive to export parameters to with an optional
+  // `scope=` prefix.
+  std::string parameterExportPath;
+  // Minimum size of constants to export as parameters.
+  int64_t parameterExportMinimumSize = 0;
+
+  // File path to create a splat parameter archive out of all parameters in the
+  // module.
+  std::string parameterSplatExportFile = "";
+
+  // Enables aggressive propagation of transposes to the inputs of named ops,
+  // rewriting named ops as fused generics.
+  bool aggressiveTransposePropagation = false;
+
+  // Enables transposing all concatenations to the outer most dimension.
+  bool outerDimConcat = false;
+
+  // Enables data tiling.
+  bool dataTiling = true;
+
   // Enables const-expr hoisting into globals.
-  bool constExprHoisting = false;
+  bool constExprHoisting = true;
 
   // Enables recursive evaluation of immutable globals using the compiler
   // and runtime.
-  bool constEval = false;
+  bool constEval = true;
 
   // Optimizations to reduce numeric precision where it is safe to do so.
   bool numericPrecisionReduction = false;
@@ -71,8 +128,11 @@ struct HighLevelOptimizationOptions {
   // Strips debug assertions after any useful information has been extracted.
   bool stripAssertions = false;
 
+  // Converts linalg named matmul ops to linalg generic ops.
+  bool generalizeMatmul = false;
+
   void bindOptions(OptionsBinder &binder);
-  using FromFlags = OptionsFromFlags<HighLevelOptimizationOptions>;
+  using FromFlags = OptionsFromFlags<GlobalOptimizationOptions>;
 };
 
 // Options controlling scheduling across host/device.
@@ -99,8 +159,29 @@ struct SchedulingOptions {
   // Program execution model specifying scheduling behavior.
   ExecutionModel executionModel = ExecutionModel::AsyncInternal;
 
+  // Defines the behavior of initialization.
+  enum class InitializationMode {
+    // Synchronously initialize all parameters and globals prior to returning
+    // from the module initializer.
+    Synchronous = 0,
+    // Asynchronously initialize all parameters and globals and return
+    // immediately from the module initializer without waiting for them to
+    // complete. Subsequent invocations will queue waiting for any dependencies
+    // they have on the initialized values.
+    Asynchronous = 1,
+  };
+  // Initialization mode for parameters and globals.
+  InitializationMode initializationMode = InitializationMode::Synchronous;
+
+  // TODO(benvanik): favor size/speed/etc for partitioning.
+  // TODO(benvanik): execution model to optimize for (unified/discrete memory,
+  //                 single/multiple processors, etc).
+
+  // Enables fusing bindings with the same underlying storage.
+  bool optimizeBindings = true;
+
   // TODO(benvanik): find a way to share this with
-  // Stream/Transforms/PassDetail.h w/o circular deps.
+  // Stream/Transforms/Passes.h w/o circular deps.
   // Defines the output format of a dump pass.
   enum class DumpOutputFormat {
     // Dumping disabled.
@@ -120,21 +201,10 @@ struct SchedulingOptions {
   // File path to write statistics to; or `` for stderr or `-` for stdout.
   std::string dumpStatisticsFile = "";
 
-  // TODO(benvanik): favor size/speed/etc for partitioning.
-  // TODO(benvanik): execution model to optimize for (unified/discrete memory,
-  //                 single/multiple processors, etc).
-
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<SchedulingOptions>;
 };
 
-struct PreprocessingOptions {
-  std::string preprocessingPassPipeline;
-  void bindOptions(OptionsBinder &binder);
-  using FromFlags = OptionsFromFlags<PreprocessingOptions>;
-};
+} // namespace mlir::iree_compiler
 
-}  // namespace iree_compiler
-}  // namespace mlir
-
-#endif  // IREE_COMPILER_PIPELINES_OPTIONS_H_
+#endif // IREE_COMPILER_PIPELINES_OPTIONS_H_

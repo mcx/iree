@@ -6,16 +6,13 @@
 
 // CHECK-NOT: hal.executable
 hal.executable private @ex {
-  hal.executable.variant public @vmvx_ir, target = <"vmvx-inline", "vmvx-ir"> {
+  hal.executable.variant public @vmvx_ir target(<"vmvx-inline", "vmvx-ir">) {
     hal.executable.export public @dispatch_0 ordinal(0) layout(
-         #hal.pipeline.layout<push_constants = 2,
-                                sets = [
-                                  <0, bindings = [
-                                    <0, storage_buffer>,
-                                    <1, storage_buffer>,
-                                    <2, storage_buffer>
-                                  ]>
-                                ]>) {
+      #hal.pipeline.layout<constants = 2, bindings = [
+        #hal.pipeline.binding<storage_buffer>,
+        #hal.pipeline.binding<storage_buffer>,
+        #hal.pipeline.binding<storage_buffer>
+      ]>) {
     ^bb0(%arg0: !hal.device, %workload_x: index, %workload_y: index):
       %count_x = affine.apply affine_map<()[s0] -> (s0 ceildiv 4)>()[%workload_x]
       %count_y = affine.apply affine_map<()[s0] -> (s0 ceildiv 4)>()[%workload_y]
@@ -27,9 +24,9 @@ hal.executable private @ex {
       util.initializer {
         %buffer_cst = util.buffer.constant : !util.buffer = dense<[1, 2, 3, 4, 5]> : tensor<5xi32>
         util.global.store %buffer_cst, @global_constant : !util.buffer
-        util.initializer.return
+        util.return
       }
-      func.func @dispatch_0(
+      func.func public @dispatch_0(
           %local_memory: !util.buffer,
           %constants: !util.buffer,
           %bindings: !util.list<!util.buffer>,
@@ -68,7 +65,7 @@ hal.executable private @ex {
           %scaled = arith.mulf %mul, %constant1_f32 : f32
           util.buffer.store %scaled, %buffer2[%idx for %c4] : f32 -> !util.buffer{%buffer2_size}
         }
-        return
+        func.return
       }
     }
   }
@@ -83,9 +80,9 @@ util.global private  @global_constant : i32
 // CHECK:   util.global.store %[[CONSTANT]], @global_constant
 
 // Ensures that we properly rename the dispatch function we inline:
-func.func private @dispatch_0()
+util.func private @dispatch_0()
 
-// CHECK-LABEL: func private @dispatch_0_0
+// CHECK-LABEL: func.func private @dispatch_0_0
 // CHECK-SAME: (%[[LOCAL_MEMORY:.+]]: !util.buffer, %[[CONSTANT0:.+]]: i32, %[[CONSTANT1:.+]]: i32,
 // CHECK-SAME:  %[[BINDING0:.+]]: !util.buffer, %[[BINDING1:.+]]: !util.buffer, %[[BINDING2:.+]]: !util.buffer,
 // CHECK-SAME:  %[[X:[a-z0-9]+]]: index, %[[Y:[a-z0-9]+]]: index, %[[Z:[a-z0-9]+]]: index,
@@ -117,7 +114,7 @@ func.func private @dispatch_0()
 // CHECK:   util.buffer.store %[[SCALED]], %[[BINDING2]][%[[ELEMENT_OFFSET]] for {{.+}}] : f32 -> !util.buffer{%[[BINDING2_SIZE]]}
 // CHECK: return
 
-// CHECK-LABEL: func private @__dispatch_ex_dispatch_0
+// CHECK-LABEL: util.func private @__dispatch_ex_dispatch_0
 // CHECK-SAME: (%[[WORKLOAD_X:.+]]: index, %[[WORKLOAD_Y:.+]]: index, %[[CONSTANT0:.+]]: i32, %[[CONSTANT1:.+]]: i32,
 // CHECK-SAME:  %[[BINDING0:.+]]: !util.buffer, %[[BINDING1:.+]]: !util.buffer, %[[BINDING2:.+]]: !util.buffer,
 // CHECK-SAME:  %[[OFFSET0:[a-z0-9]+]]: index, %[[OFFSET1:[a-z0-9]+]]: index, %[[OFFSET2:[a-z0-9]+]]: index,
@@ -151,13 +148,13 @@ func.func private @dispatch_0()
 // CHECK-SAME:         %[[X]], %[[Y]], %[[Z]],
 // CHECK-SAME:         %[[SIZE_XYZ]], %[[SIZE_XYZ]], %[[SIZE_XYZ]],
 // CHECK-SAME:         %[[COUNT_X]], %[[COUNT_Y]], %[[COUNT_Z]])
-// CHECK:   return
+// CHECK:   util.return
 
 // CHECK-LABEL: @dispatch0
 // CHECK-SAME: (%[[RESOURCE0:.+]]: !stream.resource<constant>,
 // CHECK-SAME:  %[[RESOURCE1:.+]]: !stream.resource<transient>,
 // CHECK-SAME:  %[[RESOURCE2:.+]]: !stream.resource<external>)
-func.func private @dispatch0(%resource0: !stream.resource<constant>, %resource1: !stream.resource<transient>, %resource2: !stream.resource<external>) {
+util.func private @dispatch0(%resource0: !stream.resource<constant>, %resource1: !stream.resource<transient>, %resource2: !stream.resource<external>) {
   %workload_x = arith.constant 1000 : index
   %workload_y = arith.constant 1001 : index
   %constant0 = arith.constant 4 : i32
@@ -174,17 +171,11 @@ func.func private @dispatch0(%resource0: !stream.resource<constant>, %resource1:
                                %resource2 as %resource2_inner: !stream.resource<external>{%resource_size}) {
     // CHECK: stream.cmd.dispatch
     // CHECK: hal_inline.target = @__dispatch_ex_dispatch_0
-    stream.cmd.dispatch @ex::@dispatch_0[%workload_x, %workload_y](%constant0, %constant1 : i32, i32) {
+    stream.cmd.dispatch @ex::@vmvx_ir::@dispatch_0[%workload_x, %workload_y](%constant0, %constant1 : i32, i32) {
       ro %resource0_inner[%binding0_offset for %binding0_length] : !stream.resource<constant>{%resource_size},
       ro %resource1_inner[%binding1_offset for %binding1_length] : !stream.resource<transient>{%resource_size},
       wo %resource2_inner[%binding2_offset for %binding2_length] : !stream.resource<external>{%resource_size}
-    } attributes {
-      hal.interface.bindings = [
-        #hal.interface.binding<0, 0>,
-        #hal.interface.binding<0, 1>,
-        #hal.interface.binding<0, 2>
-      ]
     }
   } => !stream.timepoint
-  return
+  util.return
 }

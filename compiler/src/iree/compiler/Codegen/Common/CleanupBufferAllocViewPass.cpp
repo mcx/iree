@@ -12,8 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
@@ -24,31 +23,25 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_CLEANUPBUFFERALLOCVIEWPASS
+#include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
 
 /// Runs canonicalization patterns on interface load/store ops.
-struct CleanupBufferAllocViewPass
-    : public CleanupBufferAllocViewBase<CleanupBufferAllocViewPass> {
+struct CleanupBufferAllocViewPass final
+    : impl::CleanupBufferAllocViewPassBase<CleanupBufferAllocViewPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     populateReshapeToInterfaceTensorPatterns(patterns);
     populateRemoveDeadMemAllocPatterns(patterns);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();
     }
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<func::FuncOp>>
-createCleanupBufferAllocViewPass() {
-  return std::make_unique<CleanupBufferAllocViewPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

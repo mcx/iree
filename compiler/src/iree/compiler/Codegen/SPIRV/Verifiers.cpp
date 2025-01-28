@@ -4,20 +4,19 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
-#include "iree/compiler/Codegen/SPIRV/KernelConfig.h"
-#include "iree/compiler/Codegen/SPIRV/Utils.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/SPIRV/Passes.h"
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "llvm/Support/Debug.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 
 #define DEBUG_TYPE "iree-spirv-verifier"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
 
 constexpr unsigned kWorkgroupTileLevel = 0;
 constexpr unsigned kThreadTileLevel = 1;
@@ -29,16 +28,14 @@ LogicalResult verifySPIRVMatmulPromoteVectorizePassPipeline(
     ArrayRef<int64_t> workgroupSize) {
   // Verify that the translation info is using the right pipeline.
   if (translationInfo.getDispatchLoweringPassPipeline() !=
-      IREE::Codegen::DispatchLoweringPassPipeline::
-          SPIRVMatmulPromoteVectorize) {
+      CodeGenPipeline::SPIRVMatmulPromoteVectorize) {
     return op->emitOpError("expected pipeline in translation_info to be ")
-           << stringifyEnum(IREE::Codegen::DispatchLoweringPassPipeline::
-                                SPIRVMatmulPromoteVectorize);
+           << stringifyEnum(CodeGenPipeline::SPIRVMatmulPromoteVectorize);
   }
 
-  if (!isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op)) {
+  if (!isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op))
     return success();
-  }
+
   LLVM_DEBUG({
     llvm::dbgs() << "verifying op: " << *op << "\n";
     llvm::dbgs() << "chosen workgroup size: [";
@@ -46,20 +43,30 @@ LogicalResult verifySPIRVMatmulPromoteVectorizePassPipeline(
     llvm::dbgs() << "]\n";
   });
 
-  // Get spirv.target_env attributes
-  const spirv::TargetEnvAttr targetEnvAttr = getSPIRVTargetEnvAttr(op);
-  const spirv::TargetEnv targetEnv(targetEnvAttr);
-  const auto limits = targetEnv.getResourceLimits();
-  LLVM_DEBUG(llvm::dbgs() << "target environment: " << targetEnvAttr << "\n");
+  FailureOr<int64_t> maybeDepth =
+      getSoftwarePipelineDepth(translationInfo.getConfiguration());
+  FailureOr<int64_t> maybeStage =
+      getSoftwarePipelineStoreStage(translationInfo.getConfiguration());
+  if (failed(maybeDepth) || failed(maybeStage)) {
+    return op->emitOpError(
+        "invalid matmul configuration without pipelining config");
+  }
 
-  auto funcOp = op->getParentOfType<func::FuncOp>();
-  const Optional<int> subgroupSize = getSPIRVSubgroupSize(funcOp);
-  if (!subgroupSize) return funcOp->emitError("failed to query subgroup size");
-  const int maxSharedMemory = limits.getMaxComputeSharedMemorySize();
-  const int maxThreads = limits.getMaxComputeWorkgroupInvocations();
-  const auto maxWorkGroupSize = llvm::to_vector<3>(llvm::map_range(
-      limits.getMaxComputeWorkgroupSize().getAsValueRange<IntegerAttr>(),
-      [](const APInt &dim) { return dim.getSExtValue(); }));
+  IREE::GPU::TargetAttr target = getGPUTargetAttr(op);
+  LLVM_DEBUG(llvm::dbgs() << "target: " << target << "\n");
+
+  auto funcOp = op->getParentOfType<mlir::FunctionOpInterface>();
+  std::optional<int> subgroupSize = getGPUSubgroupSize(funcOp);
+  if (!subgroupSize)
+    return funcOp->emitError("failed to query subgroup size");
+  const int maxThreads = target.getWgp().getMaxThreadCountPerWorkgroup();
+  const auto maxWorkGroupSize =
+      target.getWgp().getMaxWorkgroupSizes().asArrayRef();
+
+  if (workgroupSize.size() < 3) {
+    return funcOp->emitOpError("expected workgroup size to have three "
+                               "dimensions for SPIR-V pipelines");
+  }
 
   // Verify each dimension of workgroupSize should be power of two.
   if (!llvm::isPowerOf2_64(workgroupSize[0]) ||
@@ -95,66 +102,35 @@ LogicalResult verifySPIRVMatmulPromoteVectorizePassPipeline(
   }
 
   ArrayRef<int64_t> lhsShape =
-      op->getOperand(0).getType().cast<ShapedType>().getShape();
+      llvm::cast<ShapedType>(op->getOperand(0).getType()).getShape();
   ArrayRef<int64_t> rhsShape =
-      op->getOperand(1).getType().cast<ShapedType>().getShape();
-  Type inputType = op->getOperand(0).getType();
+      llvm::cast<ShapedType>(op->getOperand(1).getType()).getShape();
 
-  SmallVector<int64_t> workgroupTileSizes =
-      loweringConfig.getTileSizeVals(kWorkgroupTileLevel);
-  SmallVector<int64_t> threadTileSizes =
-      loweringConfig.getTileSizeVals(kThreadTileLevel);
-  SmallVector<int64_t> reductionTileSizes =
-      loweringConfig.getTileSizeVals(kReductionTileLevel);
-
-  if (loweringConfig.getTileSizes().size() != 3) {
-    return op->emitOpError("expected 3 levels of tiling sizes, got ")
-           << loweringConfig.getTileSizes().size();
+  if (loweringConfig.getTilingLevels().size() != 1) {
+    return op->emitOpError("expected 1 levels of tiling sizes, got ")
+           << loweringConfig.getTilingLevels().size();
   }
+
+  SmallVector<int64_t> tileSizes =
+      loweringConfig.getTileSizeVals(kWorkgroupTileLevel);
 
   // For BatchMatmul, the first dimension is the batch dimension.
   // We don't check the batch.
   if (isa<linalg::BatchMatmulOp>(op)) {
     lhsShape = lhsShape.drop_front(1);
     rhsShape = rhsShape.drop_front(1);
-    workgroupTileSizes.erase(workgroupTileSizes.begin());
-    threadTileSizes.erase(threadTileSizes.begin());
-    reductionTileSizes.erase(reductionTileSizes.begin());
+    tileSizes.erase(tileSizes.begin());
   }
 
   // Verify the tile size divides the matmul inputs A [M x K] & B [K x N].
   const int64_t dimM = lhsShape[0], dimN = rhsShape[1], dimK = lhsShape[1];
-  if (dimM % workgroupTileSizes[0] != 0 || dimK % reductionTileSizes[2] != 0) {
+  if (dimM % tileSizes[0] != 0 || dimK % tileSizes[2] != 0) {
     return op->emitOpError("LHS shape is indivisible by first level tile size");
   }
-  if (dimK % reductionTileSizes[2] != 0 || dimN % workgroupTileSizes[1] != 0) {
+  if (dimK % tileSizes[2] != 0 || dimN % tileSizes[1] != 0) {
     return op->emitOpError("RHS shape is indivisible by first level tile size");
   }
 
-  // Verify that workgroup_tile_size = thread_tile_size * workgroup_size.
-  if (threadTileSizes[0] * workgroupSize[1] != workgroupTileSizes[0] ||
-      threadTileSizes[1] * workgroupSize[0] != workgroupTileSizes[1]) {
-    return op->emitOpError(
-        "expected workgroup tile sizes to be the product of thread tile "
-        "sizes and workgroup sizes");
-  }
-
-  auto pipelineDepth = translationInfo.getSoftwarePipelineDepth();
-  pipelineDepth = pipelineDepth ? pipelineDepth : 1;
-
-  // Verify shared memory usage of operands after tiling <= maxSharedMemory.
-  unsigned tilingSharedMemSizeBytes = getTileBytes(
-      workgroupTileSizes[0], workgroupTileSizes[1], reductionTileSizes[2],
-      inputType.cast<ShapedType>().getElementType().getIntOrFloatBitWidth(),
-      false);
-  unsigned totalSharedMemSizeBytes = getMultiBufferMemoryUsage(
-      tilingSharedMemSizeBytes, pipelineDepth,
-      translationInfo.getSoftwarePipelineStoreStage());
-
-  if (totalSharedMemSizeBytes > maxSharedMemory) {
-    return op->emitOpError("expected shared memory usage <= ")
-           << maxSharedMemory << ", got " << totalSharedMemSizeBytes;
-  }
   return success();
 }
 
@@ -164,11 +140,9 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
     ArrayRef<int64_t> workgroupSize) {
   // Verify that the translation info is using the right pipeline.
   if (translationInfo.getDispatchLoweringPassPipeline() !=
-      IREE::Codegen::DispatchLoweringPassPipeline::
-          SPIRVCooperativeMatrixVectorize) {
+      CodeGenPipeline::SPIRVCooperativeMatrixVectorize) {
     return op->emitOpError("expected pipeline in translation_info to be ")
-           << stringifyEnum(IREE::Codegen::DispatchLoweringPassPipeline::
-                                SPIRVCooperativeMatrixVectorize);
+           << stringifyEnum(CodeGenPipeline::SPIRVCooperativeMatrixVectorize);
   }
 
   if (!isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op)) {
@@ -181,20 +155,25 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
     llvm::dbgs() << "]\n";
   });
 
-  // Get spirv.target_env attributes
-  const spirv::TargetEnvAttr targetEnvAttr = getSPIRVTargetEnvAttr(op);
-  const spirv::TargetEnv targetEnv(targetEnvAttr);
-  const auto limits = targetEnv.getResourceLimits();
-  LLVM_DEBUG(llvm::dbgs() << "target environment: " << targetEnvAttr << "\n");
+  FailureOr<int64_t> maybeDepth =
+      getSoftwarePipelineDepth(translationInfo.getConfiguration());
+  FailureOr<int64_t> maybeStage =
+      getSoftwarePipelineStoreStage(translationInfo.getConfiguration());
+  if (failed(maybeDepth) || failed(maybeStage)) {
+    return op->emitOpError(
+        "invalid cooperative matrix configuration without pipelining config");
+  }
 
-  auto funcOp = op->getParentOfType<func::FuncOp>();
-  const Optional<int> subgroupSize = getSPIRVSubgroupSize(funcOp);
-  if (!subgroupSize) return funcOp->emitError("failed to query subgroup size");
-  const int maxSharedMemory = limits.getMaxComputeSharedMemorySize();
-  const int maxThreads = limits.getMaxComputeWorkgroupInvocations();
-  const auto maxWorkGroupSize = llvm::to_vector<3>(llvm::map_range(
-      limits.getMaxComputeWorkgroupSize().getAsValueRange<IntegerAttr>(),
-      [](const APInt &dim) { return dim.getSExtValue(); }));
+  IREE::GPU::TargetAttr target = getGPUTargetAttr(op);
+  LLVM_DEBUG(llvm::dbgs() << "target: " << target << "\n");
+
+  auto funcOp = op->getParentOfType<mlir::FunctionOpInterface>();
+  std::optional<int> subgroupSize = getGPUSubgroupSize(funcOp);
+  if (!subgroupSize)
+    return funcOp->emitError("failed to query subgroup size");
+  const int maxThreads = target.getWgp().getMaxThreadCountPerWorkgroup();
+  const auto maxWorkGroupSize =
+      target.getWgp().getMaxWorkgroupSizes().asArrayRef();
 
   // Verify each dimension of workgroupSize should be power of two.
   if (!llvm::isPowerOf2_64(workgroupSize[0]) ||
@@ -230,15 +209,15 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
   }
 
   // Verify that there are four level of tile sizes.
-  if (loweringConfig.getTileSizes().size() != 4) {
+  if (loweringConfig.getTilingLevels().size() != 4) {
     return op->emitOpError("expected 4 levels of tiling sizes, got ")
-           << loweringConfig.getTileSizes().size();
+           << loweringConfig.getTilingLevels().size();
   }
 
   ArrayRef<int64_t> lhsShape =
-      op->getOperand(0).getType().cast<ShapedType>().getShape();
+      llvm::cast<ShapedType>(op->getOperand(0).getType()).getShape();
   ArrayRef<int64_t> rhsShape =
-      op->getOperand(1).getType().cast<ShapedType>().getShape();
+      llvm::cast<ShapedType>(op->getOperand(1).getType()).getShape();
 
   SmallVector<int64_t> workgroupTileSizes =
       loweringConfig.getTileSizeVals(kWorkgroupTileLevel);
@@ -260,35 +239,31 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
   }
 
   auto getElementType = [](Value v) {
-    return v.getType().cast<ShapedType>().getElementType();
+    return llvm::cast<ShapedType>(v.getType()).getElementType();
   };
 
   Type lhsType = getElementType(op->getOperand(0));
   Type rhsType = getElementType(op->getOperand(1));
   Type resultType = getElementType(op->getOperand(2));
 
-  auto properties = limits.getCooperativeMatrixPropertiesNv()
-                        .getAsRange<spirv::CooperativeMatrixPropertiesNVAttr>();
-
   // Verify that the fourth level tile sizes match cooperative matrix,
   // and subgroup tile sizes should be multiple of cooperative matrix (M, N, K)
   // sizes.
   bool isNativeVectorSizeAccepted = false;
-  for (auto p : properties) {
-    if (p.getAType() == lhsType && p.getBType() == rhsType &&
-        p.getCType() == resultType &&
-        p.getScope().getValue() == spirv::Scope::Subgroup &&
-        p.getMSize() == nativeVectorSizes[0] &&
-        p.getNSize() == nativeVectorSizes[1] &&
-        p.getKSize() == nativeVectorSizes[2]) {
+  for (IREE::GPU::MMAAttr mma : target.getWgp().getMma()) {
+    auto [mSize, nSize, kSize] = mma.getMNKShape();
+    auto [aType, bType, cType] = mma.getABCElementTypes();
+
+    if (aType == lhsType && bType == rhsType && cType == resultType &&
+        mSize == nativeVectorSizes[0] && nSize == nativeVectorSizes[1] &&
+        kSize == nativeVectorSizes[2]) {
       isNativeVectorSizeAccepted = true;
-      if (subgroupTileSizes[0] % p.getMSize() != 0 ||
-          subgroupTileSizes[1] % p.getNSize() != 0 ||
-          reductionTileSizes[2] % p.getKSize() != 0) {
+      if (subgroupTileSizes[0] % mSize != 0 ||
+          subgroupTileSizes[1] % nSize != 0 ||
+          reductionTileSizes[2] % kSize != 0) {
         return op->emitOpError(
                    "expected subgroup tile sizes to be multiple of ")
-               << "[" << p.getMSize() << ", " << p.getNSize() << ", "
-               << p.getKSize() << "]";
+               << "[" << mSize << ", " << nSize << ", " << kSize << "]";
       }
     }
   }
@@ -323,24 +298,6 @@ LogicalResult verifySPIRVCooperativeMatrixVectorizePassPipeline(
         "subgroup_tile_m)");
   }
 
-  // Check if the C matrix will be promoted for computing shared memory usage.
-  auto matmulResult = cast<linalg::LinalgOp>(op).getDpsInitOperand(0)->get();
-  bool promoteC =
-      !matmulResult.hasOneUse() ||
-      !isa<IREE::Flow::DispatchTensorStoreOp>(*matmulResult.getUsers().begin());
-
-  // Verify shared memory usage of operands after tiling <= maxSharedMemory.
-  unsigned tilingSharedMemSizeBytes = getTileBytes(
-      workgroupTileSizes[0], workgroupTileSizes[1], reductionTileSizes[2],
-      lhsType.getIntOrFloatBitWidth(), promoteC);
-  unsigned totalSharedMemSizeBytes = getMultiBufferMemoryUsage(
-      tilingSharedMemSizeBytes, translationInfo.getSoftwarePipelineDepth(),
-      translationInfo.getSoftwarePipelineStoreStage());
-
-  if (totalSharedMemSizeBytes > maxSharedMemory) {
-    return op->emitOpError("expected shared memory usage <= ")
-           << maxSharedMemory << ", got " << totalSharedMemSizeBytes;
-  }
   return success();
 }
 
@@ -350,17 +307,16 @@ LogicalResult verifySPIRVBaseVectorizePassPipeline(
     ArrayRef<int64_t> workgroupSize) {
   // Verify that the translation info is using the right pipeline.
   if (translationInfo.getDispatchLoweringPassPipeline() !=
-      IREE::Codegen::DispatchLoweringPassPipeline::SPIRVBaseVectorize) {
+      CodeGenPipeline::SPIRVBaseVectorize) {
     return op->emitOpError("expected pipeline in translation_info to be ")
-           << stringifyEnum(IREE::Codegen::DispatchLoweringPassPipeline::
-                                SPIRVBaseVectorize);
+           << stringifyEnum(CodeGenPipeline::SPIRVBaseVectorize);
   }
 
   if (!isa<linalg::Conv2DNhwcHwcfOp, linalg::DepthwiseConv2DNhwcHwcOp>(op)) {
     return success();
   }
 
-  const int numTileSizeLevels = loweringConfig.getTileSizes().size();
+  const int numTileSizeLevels = loweringConfig.getTilingLevels().size();
   SmallVector<int64_t> workgroupTileSizes =
       loweringConfig.getTileSizeVals(kWorkgroupTileLevel);
   SmallVector<int64_t> threadTileSizes =
@@ -374,7 +330,7 @@ LogicalResult verifySPIRVBaseVectorizePassPipeline(
   }
 
   ArrayRef<int64_t> outputShape =
-      op->getOperand(2).getType().cast<ShapedType>().getShape();
+      llvm::cast<ShapedType>(op->getOperand(2).getType()).getShape();
   const int64_t oh = outputShape[1], ow = outputShape[2], oc = outputShape[3];
 
   // Verify the first level tile size divides the Convolution
@@ -410,5 +366,4 @@ LogicalResult verifySPIRVBaseVectorizePassPipeline(
   return success();
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

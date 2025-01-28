@@ -1,9 +1,9 @@
 // RUN: iree-opt --split-input-file %s \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(iree-hal-preprocess-executables{pipeline=\"builtin.module(iree-codegen-test-executable-preprocessing)\"}))" | \
+// RUN:   --pass-pipeline="builtin.module(hal.executable(iree-hal-preprocess-executables-with-pipeline{pipeline=\"builtin.module(iree-codegen-test-executable-preprocessing)\"}))" | \
 // RUN: FileCheck %s
 
 // RUN: iree-opt --split-input-file %s \
-// RUN:   --pass-pipeline="builtin.module(hal.executable(iree-hal-preprocess-executables{command=\"iree-opt --iree-codegen-test-executable-preprocessing\"}))" | \
+// RUN:   --pass-pipeline="builtin.module(hal.executable(iree-hal-preprocess-executables-with-tool{command=\"iree-opt --iree-codegen-test-executable-preprocessing\"}))" | \
 // RUN: FileCheck %s
 
 // Uses a test pass to simulate an external user pipeline or tool that
@@ -20,8 +20,10 @@
 // CHECK: hal.executable private @executable_a
 hal.executable private @executable_a {
   // CHECK: hal.executable.variant public @variant_a
-  hal.executable.variant public @variant_a, target = #hal.executable.target<"cuda", "cuda-nvptx-fb", {replace_i64 = 123 : i64}> {
-    hal.executable.export public @dispatch_a ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [<0, bindings = [<0, storage_buffer>]>]>) {
+  hal.executable.variant public @variant_a target(#hal.executable.target<"cuda", "cuda-nvptx-fb", {replace_i64 = 123 : i64}>) {
+    hal.executable.export public @dispatch_a ordinal(0) layout(#hal.pipeline.layout<bindings = [
+      #hal.pipeline.binding<storage_buffer>
+    ]>) {
     ^bb0(%arg0: !hal.device, %arg1: index):
       %c1 = arith.constant 1 : index
       hal.return %c1, %c1, %c1 : index, index, index
@@ -36,8 +38,10 @@ hal.executable private @executable_a {
     }
   }
   // CHECK: hal.executable.variant public @variant_unmodified
-  hal.executable.variant public @variant_unmodified, target = #hal.executable.target<"cuda", "cuda-nvptx-fb", {}> {
-    hal.executable.export public @dispatch_unmodified ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [<0, bindings = [<0, storage_buffer>]>]>) {
+  hal.executable.variant public @variant_unmodified target(#hal.executable.target<"cuda", "cuda-nvptx-fb", {}>) {
+    hal.executable.export public @dispatch_unmodified ordinal(0) layout(#hal.pipeline.layout<bindings = [
+      #hal.pipeline.binding<storage_buffer>
+    ]>) {
     ^bb0(%arg0: !hal.device, %arg1: index):
       %c1 = arith.constant 1 : index
       hal.return %c1, %c1, %c1 : index, index, index
@@ -56,8 +60,10 @@ hal.executable private @executable_a {
 // CHECK: hal.executable private @executable_b
 hal.executable private @executable_b {
   // CHECK: hal.executable.variant public @variant_b
-  hal.executable.variant public @variant_b, target = #hal.executable.target<"cuda", "cuda-nvptx-fb", {replace_i64 = 456 : i64}> {
-    hal.executable.export public @dispatch_b ordinal(0) layout(#hal.pipeline.layout<push_constants = 0, sets = [<0, bindings = [<0, storage_buffer>]>]>) {
+  hal.executable.variant public @variant_b target(#hal.executable.target<"cuda", "cuda-nvptx-fb", {replace_i64 = 456 : i64}>) {
+    hal.executable.export public @dispatch_b ordinal(0) layout(#hal.pipeline.layout<bindings = [
+      #hal.pipeline.binding<storage_buffer>
+    ]>) {
     ^bb0(%arg0: !hal.device):
       %c1 = arith.constant 1 : index
       hal.return %c1, %c1, %c1 : index, index, index

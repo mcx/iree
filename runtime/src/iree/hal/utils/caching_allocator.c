@@ -7,7 +7,6 @@
 #include "iree/hal/utils/caching_allocator.h"
 
 #include "iree/base/internal/synchronization.h"
-#include "iree/base/tracing.h"
 
 // Default capacity of a pool free list when not specified by the user.
 #define IREE_HAL_CACHING_ALLOCATOR_DEFAULT_FREE_LIST_CAPACITY 64
@@ -193,7 +192,7 @@ static iree_hal_buffer_t* iree_hal_caching_allocator_pool_find_and_take_buffer(
 static void iree_hal_caching_allocator_pool_trim_to_size(
     iree_hal_caching_allocator_pool_t* pool, iree_device_size_t target_size) {
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, (int64_t)target_size);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)target_size);
 
   iree_slim_mutex_lock(&pool->mutex);
 
@@ -241,9 +240,9 @@ static void iree_hal_caching_allocator_pool_trim(
 static iree_status_t iree_hal_caching_allocator_pool_acquire(
     iree_hal_caching_allocator_pool_t* pool,
     const iree_hal_buffer_params_t* params, iree_device_size_t allocation_size,
-    iree_const_byte_span_t initial_data, iree_hal_buffer_t** out_buffer) {
+    iree_hal_buffer_t** out_buffer) {
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, (int64_t)allocation_size);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)allocation_size);
 
   // Scan the free list to find an appropriate block.
   // If found we pop it off the list and return it without needing to allocate.
@@ -258,7 +257,7 @@ static iree_status_t iree_hal_caching_allocator_pool_acquire(
   }
   iree_slim_mutex_unlock(&pool->mutex);
   if (existing_buffer) {
-    // Found a buffer - return it.
+    // Found a buffer! Return it uninitialized.
     *out_buffer = existing_buffer;
     IREE_TRACE_ZONE_END(z0);
     return iree_ok_status();
@@ -274,16 +273,7 @@ static iree_status_t iree_hal_caching_allocator_pool_acquire(
   // to the pool by another thread while we're allocating here but that's OK.
   iree_hal_buffer_t* buffer = NULL;
   iree_status_t status = iree_hal_allocator_allocate_buffer(
-      pool->device_allocator, *params, allocation_size, initial_data, &buffer);
-
-  // If initial data was provided then write it into the buffer.
-  // We can only do this if the buffer supports mapping and expect unmappable
-  // buffers to have been filtered out earlier up.
-  if (iree_status_is_ok(status) &&
-      !iree_const_byte_span_is_empty(initial_data)) {
-    status = iree_hal_buffer_map_write(buffer, 0, initial_data.data,
-                                       initial_data.data_length);
-  }
+      pool->device_allocator, *params, allocation_size, &buffer);
 
   // If the allocation failed then remove the size from the total.
   if (iree_status_is_ok(status)) {
@@ -305,7 +295,7 @@ static iree_status_t iree_hal_caching_allocator_pool_acquire(
 static void iree_hal_caching_allocator_pool_release(
     iree_hal_caching_allocator_pool_t* pool, iree_hal_buffer_t* buffer) {
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(
       z0, (int64_t)iree_hal_buffer_allocation_size(buffer));
 
   // Try to add the buffer to the pool. If the pool is at capacity we'll just
@@ -688,7 +678,7 @@ static iree_hal_caching_allocator_pool_t* iree_hal_caching_allocator_find_pool(
 static iree_status_t iree_hal_caching_allocator_allocate_buffer(
     iree_hal_allocator_t* IREE_RESTRICT base_allocator,
     const iree_hal_buffer_params_t* IREE_RESTRICT params,
-    iree_device_size_t allocation_size, iree_const_byte_span_t initial_data,
+    iree_device_size_t allocation_size,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   iree_hal_caching_allocator_t* allocator =
       iree_hal_caching_allocator_cast(base_allocator);
@@ -705,24 +695,10 @@ static iree_status_t iree_hal_caching_allocator_allocate_buffer(
     can_pool = false;
   }
 
-  // Performance warning: if the initial_data is non-empty and the memory type
-  // does not support mapping we bypass the pool and go straight to the
-  // underlying allocator. This is because initial data uploads require transfer
-  // operations and we don't want to require a device as that would prevent us
-  // from sharing the same pool across several devices. We could pass in a
-  // device per allocation request if it becomes a heavily used pattern but in
-  // most cases where initial_data is used it's for a CONSTANT buffer that we
-  // aren't pooling anyway.
-  if (!iree_const_byte_span_is_empty(initial_data) &&
-      !iree_all_bits_set(params->usage, IREE_HAL_BUFFER_USAGE_MAPPING)) {
-    can_pool = false;
-  }
-
   // If we don't want to pool then early-exit to the backing allocator.
   if (!can_pool) {
-    return iree_hal_allocator_allocate_buffer(allocator->device_allocator,
-                                              *params, allocation_size,
-                                              initial_data, out_buffer);
+    return iree_hal_allocator_allocate_buffer(
+        allocator->device_allocator, *params, allocation_size, out_buffer);
   }
 
   // We need to ensure we have the same parameters the allocator will use so
@@ -746,15 +722,20 @@ static iree_status_t iree_hal_caching_allocator_allocate_buffer(
     // Fallback to the underlying allocator.
     return iree_hal_allocator_allocate_buffer(allocator->device_allocator,
                                               compat_params, allocation_size,
-                                              initial_data, out_buffer);
+                                              out_buffer);
   }
 
   // Acquire the buffer from the pool.
   IREE_RETURN_IF_ERROR(iree_hal_caching_allocator_pool_acquire(
-      pool, &compat_params, allocation_size, initial_data, out_buffer));
+      pool, &compat_params, allocation_size, out_buffer));
 
   // Point the buffer back to us for deallocation.
-  (*out_buffer)->device_allocator = base_allocator;
+  //
+  // TODO(#19159): remove iree_hal_allocator_deallocate_buffer when pooling no
+  // longer requires the pooling_allocator on iree_hal_buffer_t. We should
+  // instead be creating a new iree_hal_cached_buffer_t that we return as if it
+  // were an allocated buffer and that can store a reference back to the pool.
+  (*out_buffer)->pooling_allocator = base_allocator;
 
   return iree_ok_status();
 }
@@ -774,6 +755,9 @@ static void iree_hal_caching_allocator_deallocate_buffer(
           iree_hal_buffer_allowed_usage(buffer));
   IREE_ASSERT(pool, "pool to return cached buffer to not found");
   if (!pool) return;
+
+  // TODO(#19159): remove iree_hal_allocator_deallocate_buffer when pooling no
+  // longer requires the pooling_allocator on iree_hal_buffer_t.
 
   // Release back to pool (which may deallocate).
   iree_hal_caching_allocator_pool_release(pool, buffer);

@@ -4,70 +4,54 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-//===- Utils.cpp - Utility functions used in Linalg to SPIR-V lowering ----===//
-//
-// Implementaiton of utility functions used while lowering from Linalg to SPIRV.
-//
-//===----------------------------------------------------------------------===//
-
 #include "iree/compiler/Codegen/SPIRV/Utils.h"
 
-#include "iree/compiler/Codegen/Dialect/LoweringConfig.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
-#include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRV.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
-#include "mlir/Support/LogicalResult.h"
+#include "mlir/IR/BuiltinAttributes.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+bool usesSPIRVCodeGen(IREE::HAL::ExecutableVariantOp variantOp) {
+  if (variantOp.getObjects().has_value()) {
+    // Variants containing external executables do not go through CodeGen.
+    return false;
+  }
+
+  DictionaryAttr configuration = variantOp.getTargetAttr().getConfiguration();
+  // The spirv.target_env attribute is attached if going down SPIR-V CodeGen
+  // pipelines. Later we turn spirv.target_env into iree.spirv.features after
+  // materializing device queries.
+  return configuration.contains(spirv::getTargetEnvAttrName()) ||
+         configuration.contains("iree.spirv.features");
+}
 
 const char *getSPIRVDistributeAttrName() { return "iree.spirv.distribute_dim"; }
 
-spirv::TargetEnvAttr getSPIRVTargetEnvAttr(Operation *op) {
-  auto variant = op->getParentOfType<IREE::HAL::ExecutableVariantOp>();
-  if (!variant) return nullptr;
-  IREE::HAL::ExecutableTargetAttr targetAttr = variant.getTarget();
-  if (!targetAttr) return nullptr;
-  auto config = targetAttr.getConfiguration();
-  if (!config) return nullptr;
-  return config.getAs<spirv::TargetEnvAttr>(spirv::getTargetEnvAttrName());
+DictionaryAttr getTargetConfigAttr(Operation *op) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(op);
+  if (!targetAttr)
+    return nullptr;
+  return targetAttr.getConfiguration();
 }
 
-/// Returns true if the given MemRef is in workgroup memory.
-bool isInWorkgroupMemory(MemRefType memrefType) {
-  auto attribute =
-      memrefType.getMemorySpace().dyn_cast_or_null<gpu::AddressSpaceAttr>();
-  if (attribute &&
-      attribute.getValue() == gpu::GPUDialect::getWorkgroupAddressSpace())
-    return true;
-  return false;
+bool usesIndirectBindingsAttr(Operation *op) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(op);
+  return targetAttr ? targetAttr.getFormat().getValue().ends_with("-ptr")
+                    : false;
 }
 
-llvm::Optional<int> getSPIRVSubgroupSize(func::FuncOp funcOp) {
-  auto moduleOp = funcOp->getParentOfType<ModuleOp>();
-  llvm::StringMap<IREE::HAL::ExecutableExportOp> exportOps =
-      getAllEntryPoints(moduleOp);
-  auto exportOp = exportOps.lookup(funcOp.getName());
-  if (!exportOp) return std::nullopt;
-  if (auto size = exportOp.getSubgroupSize()) return size->getSExtValue();
-
-  spirv::TargetEnvAttr target = getSPIRVTargetEnvAttr(funcOp);
-  if (!target) return std::nullopt;
-  return target.getResourceLimits().getSubgroupSize();
-}
-
-FailureOr<SmallVector<int64_t>> getSPIRVTileSize(func::FuncOp funcOp,
-                                                 int tilingLevel) {
-  SmallVector<Operation *> computeOps;
-  if (failed(getComputeOps(funcOp, computeOps))) {
-    return funcOp.emitOpError("failed to get compute ops");
-  }
-
-  auto config = getLoweringConfig(computeOps);
+FailureOr<SmallVector<int64_t>>
+getSPIRVTileSize(mlir::FunctionOpInterface funcOp, int tilingLevel) {
+  SmallVector<Operation *> computeOps = getComputeOps(funcOp);
+  FailureOr<IREE::Codegen::LoweringConfigAttr> config =
+      getFirstLoweringConfig<IREE::Codegen::LoweringConfigAttr>(computeOps);
   if (failed(config)) {
     return funcOp.emitOpError("failed to get lowering configuration");
   }
@@ -75,24 +59,43 @@ FailureOr<SmallVector<int64_t>> getSPIRVTileSize(func::FuncOp funcOp,
   return config->getTileSizeVals(tilingLevel);
 }
 
-FailureOr<linalg::TileSizeComputationFunction> getSPIRVTileSizeComputeFn(
-    func::FuncOp funcOp, int tilingLevel) {
+FailureOr<linalg::TileSizeComputationFunction>
+getSPIRVTileSizeComputeFn(mlir::FunctionOpInterface funcOp, int tilingLevel) {
   auto tileSizes = getSPIRVTileSize(funcOp, tilingLevel);
-  if (failed(tileSizes)) return failure();
+  if (failed(tileSizes))
+    return failure();
   linalg::TileSizeComputationFunction computeFn =
       [tileSizes](OpBuilder &builder, Operation *op) {
         auto range = llvm::map_range(*tileSizes, [&](int64_t size) -> Value {
           return builder.create<arith::ConstantIndexOp>(op->getLoc(), size);
         });
-        return llvm::to_vector<4>(range);
+        return llvm::to_vector(range);
       };
   return computeFn;
 }
 
+FailureOr<scf::SCFTileSizeComputationFunction>
+getSPIRVScfTileSizeComputeFn(mlir::FunctionOpInterface funcOp,
+                             int tilingLevel) {
+  FailureOr<SmallVector<int64_t>> tileSizes =
+      getSPIRVTileSize(funcOp, tilingLevel);
+  if (failed(tileSizes))
+    return failure();
+  scf::SCFTileSizeComputationFunction computeFn =
+      [tileSizes](OpBuilder &builder,
+                  Operation *op) -> SmallVector<OpFoldResult> {
+    auto tileSizesOfr = getAsIndexOpFoldResult(op->getContext(), *tileSizes);
+    auto zeroAttr = builder.getIndexAttr(0);
+    int numLoops = cast<TilingInterface>(op).getLoopIteratorTypes().size();
+    tileSizesOfr.resize(numLoops, zeroAttr);
+    return tileSizesOfr;
+  };
+  return computeFn;
+}
+
 template <typename GPUIdOp, typename GPUCountOp>
-static linalg::ProcInfo getGPUProcessorIdAndCountImpl(OpBuilder &builder,
-                                                      Location loc,
-                                                      unsigned dim) {
+static linalg::ProcInfo
+getGPUProcessorIdAndCountImpl(OpBuilder &builder, Location loc, unsigned dim) {
   assert(dim < kNumGPUDims && "processor index out of range!");
 
   std::array<gpu::Dimension, kNumGPUDims> dimAttr{
@@ -104,8 +107,9 @@ static linalg::ProcInfo getGPUProcessorIdAndCountImpl(OpBuilder &builder,
 }
 
 template <typename GPUIdOp, typename GPUCountOp>
-static SmallVector<linalg::ProcInfo, 2> getGPUProcessorIdsAndCountsImpl(
-    OpBuilder &builder, Location loc, unsigned numDims) {
+static SmallVector<linalg::ProcInfo, 2>
+getGPUProcessorIdsAndCountsImpl(OpBuilder &builder, Location loc,
+                                unsigned numDims) {
   SmallVector<linalg::ProcInfo, 2> procInfo(numDims);
   for (unsigned i = 0; i < numDims; ++i) {
     procInfo[numDims - 1 - i] =
@@ -127,5 +131,4 @@ template SmallVector<linalg::ProcInfo, 2>
 getGPUProcessorIdsAndCounts<gpu::ThreadIdOp, gpu::BlockDimOp>(
     OpBuilder &builder, Location loc, unsigned numDims);
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

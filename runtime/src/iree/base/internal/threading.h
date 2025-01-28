@@ -12,7 +12,6 @@
 #include <stdint.h>
 
 #include "iree/base/api.h"
-#include "iree/base/target_platform.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,12 +54,15 @@ typedef enum iree_thread_priority_class_e {
 //   group threads that having matching values together and (hopefully) schedule
 //   them on cores that may share some level of the cache hierarchy. The API is
 //   effectively just asking nicely and hoping the kernel is on the same
-//   wavelength.
+//   wavelength. It rarely is. As a workaround for the lack of specific pinning
+//   we use the smt bit of 1 to indicate that _only_ efficiency cores should be
+//   used by effectively changing the QoS of the thread to one in the range
+//   where only efficiency cores will be used.
 //
 //   Mapping:
 //    group: (unused)
 //       id: used for THREAD_AFFINITY_POLICY to request exclusive cores.
-//      smt: (unused)
+//      smt: 1 if only efficiency cores should be used (QOS_CLASS_BACKGROUND).
 //
 // Linux/Android:
 //   sched_setaffinity is used to pin the thread to the core with the given ID.
@@ -167,6 +169,11 @@ typedef struct iree_thread_override_t iree_thread_override_t;
 // The priority of the thread will be the max of the base priority and the
 // overridden priority. Callers must pass the returned override token to
 // iree_thread_override_end.
+//
+// This is only a hint to the OS and may be ignored. Implementations may
+// non-deterministically return NULL and callers must gracefully handle that.
+// It's safe to pass NULL to iree_thread_override_end and in most cases as
+// callers aren't checking the returned value they won't notice.
 iree_thread_override_t* iree_thread_priority_class_override_begin(
     iree_thread_t* thread, iree_thread_priority_class_t priority_class);
 
@@ -197,6 +204,9 @@ void iree_thread_request_affinity(iree_thread_t* thread,
 // Resumes |thread| if it was created suspended.
 // This has no effect if the thread is not suspended.
 void iree_thread_resume(iree_thread_t* thread);
+
+// Blocks the current thread until |thread| has finished its execution.
+void iree_thread_join(iree_thread_t* thread);
 
 void iree_thread_yield(void);
 

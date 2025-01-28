@@ -12,34 +12,34 @@
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "iree/compiler/Utils/PassUtils.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Loader {
+namespace mlir::iree_compiler::IREE::HAL::Loader {
 
-using FunctionLikeNest = MultiOpNest<func::FuncOp, IREE::Util::InitializerOp>;
+using FunctionLikeNest =
+    MultiOpNest<func::FuncOp, IREE::Util::InitializerOp, IREE::Util::FuncOp>;
 
 //===----------------------------------------------------------------------===//
 // Utilities
 //===----------------------------------------------------------------------===//
 
 static void addCleanupPatterns(OpPassManager &passManager) {
-  // Standard MLIR cleanup.
-  passManager.addPass(mlir::createCanonicalizerPass());
-  passManager.addPass(mlir::createCSEPass());
-
   FunctionLikeNest(passManager)
+      // Standard MLIR cleanup.
+      .addPass(mlir::createCanonicalizerPass)
+      .addPass(mlir::createCSEPass)
+
       // Simplify util.global accesses; this can help with data flow tracking as
       // redundant store-loads are removed.
-      .addPass(IREE::Util::createSimplifyGlobalAccessesPass);
+      .addPass(IREE::Util::createSimplifyGlobalAccessesPass)
+
+      // Aggressive cleanup.
+      .addPass(IREE::Util::createApplyPatternsPass);
 
   // Cleanup and canonicalization of util.global (and other util ops).
-  passManager.addPass(IREE::Util::createApplyPatternsPass());
   passManager.addPass(IREE::Util::createFoldGlobalsPass());
   passManager.addPass(IREE::Util::createFuseGlobalsPass());
 }
@@ -49,12 +49,20 @@ static void addCleanupPatterns(OpPassManager &passManager) {
 //===----------------------------------------------------------------------===//
 
 void buildHALInlineDynamicTransformPassPipeline(
-    OpPassManager &passManager, const TargetOptions &targetOptions) {
+    OpPassManager &passManager, const TargetRegistry &targetRegistry,
+    const TargetOptions &targetOptions) {
   //----------------------------------------------------------------------------
   // Device assignment and interface materialization
   //----------------------------------------------------------------------------
 
-  IREE::HAL::buildHALConfigurationPassPipeline(passManager, targetOptions);
+  IREE::HAL::AssignmentOptions assignmentOptions;
+  assignmentOptions.legacyTargetBackends = targetOptions.legacyTargetBackends;
+  assignmentOptions.targetDevices = targetOptions.targetDevices;
+  assignmentOptions.defaultDevice = targetOptions.defaultDevice;
+  IREE::HAL::buildHALDeviceAssignmentPassPipeline(passManager, targetRegistry,
+                                                  assignmentOptions);
+  IREE::HAL::buildHALConfigurationPassPipeline(passManager, targetRegistry,
+                                               targetOptions);
 
   //----------------------------------------------------------------------------
   // Executable translation
@@ -67,7 +75,9 @@ void buildHALInlineDynamicTransformPassPipeline(
   // After this point the executables are opaque blobs and we cannot change
   // their interfaces.
   passManager.addNestedPass<IREE::HAL::ExecutableOp>(
-      IREE::HAL::createTranslateExecutablesPass());
+      IREE::HAL::createConfigureExecutablesPass({targetRegistry}));
+  passManager.addNestedPass<IREE::HAL::ExecutableOp>(
+      IREE::HAL::createTranslateAllExecutablesPass({targetRegistry}));
 
   //----------------------------------------------------------------------------
   // Conversion
@@ -81,7 +91,8 @@ void buildHALInlineDynamicTransformPassPipeline(
   //----------------------------------------------------------------------------
 
   // Link executables together.
-  passManager.addPass(IREE::HAL::createLinkExecutablesPass());
+  passManager.addPass(
+      IREE::HAL::createLinkAllExecutablesPass({targetRegistry}));
 
   // Resolve export ordinals from nested symbol references prior to
   // serialization.
@@ -89,9 +100,10 @@ void buildHALInlineDynamicTransformPassPipeline(
 
   // Serialize executables to their binary forms.
   passManager.addNestedPass<IREE::HAL::ExecutableOp>(
-      IREE::HAL::createSerializeExecutablesPass(
-          targetOptions.debugLevel, targetOptions.executableIntermediatesPath,
-          targetOptions.executableBinariesPath));
+      IREE::HAL::createSerializeAllExecutablesPass(
+          {&targetRegistry, targetOptions.debugLevel,
+           targetOptions.executableIntermediatesPath,
+           targetOptions.executableBinariesPath}));
 
   // NOTE: symbol DCE will destroy executable target contents.
   passManager.addPass(mlir::createSymbolDCEPass());
@@ -113,7 +125,7 @@ void buildHALInlineDynamicTransformPassPipeline(
 namespace {
 #define GEN_PASS_REGISTRATION
 #include "iree/compiler/Modules/HAL/Loader/Transforms/Passes.h.inc"
-}  // namespace
+} // namespace
 
 void registerHALLoaderPasses() {
   // Generated.
@@ -124,12 +136,9 @@ void registerHALLoaderPasses() {
       "Runs the inline HAL executable loader dialect transformation pipeline",
       [](OpPassManager &passManager) {
         buildHALInlineDynamicTransformPassPipeline(
-            passManager, TargetOptions::FromFlags::get());
+            passManager, TargetRegistry::getGlobal(),
+            TargetOptions::FromFlags::get());
       });
 }
 
-}  // namespace Loader
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL::Loader

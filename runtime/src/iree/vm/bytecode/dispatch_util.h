@@ -87,10 +87,10 @@ typedef struct iree_vm_bytecode_frame_storage_t {
 } iree_vm_bytecode_frame_storage_t;
 
 // Maps a type ID to a type def with clamping for out of bounds values.
-static inline const iree_vm_type_def_t* iree_vm_map_type(
+static inline iree_vm_type_def_t iree_vm_map_type(
     iree_vm_bytecode_module_t* module, int32_t type_id) {
   type_id = type_id >= module->type_count ? 0 : type_id;
-  return &module->type_table[type_id];
+  return module->type_table[type_id];
 }
 
 //===----------------------------------------------------------------------===//
@@ -106,10 +106,10 @@ static inline const iree_vm_type_def_t* iree_vm_map_type(
 #endif  // IREE_VM_EXECUTION_TRACING_FORCE_ENABLE
 
 #if IREE_VM_EXECUTION_TRACING_ENABLE
-#define IREE_DISPATCH_TRACE_INSTRUCTION(pc_offset, op_name)  \
-  if (IREE_IS_DISPATCH_TRACING_ENABLED()) {                  \
-    IREE_RETURN_IF_ERROR(iree_vm_bytecode_trace_disassembly( \
-        current_frame, (pc - (pc_offset)), &regs, stderr));  \
+#define IREE_DISPATCH_TRACE_INSTRUCTION(pc_offset, op_name) \
+  if (IREE_IS_DISPATCH_TRACING_ENABLED()) {                 \
+    IREE_IGNORE_ERROR(iree_vm_bytecode_trace_disassembly(   \
+        current_frame, (pc - (pc_offset)), &regs, stderr)); \
   }
 
 #else
@@ -135,6 +135,9 @@ static inline const iree_vm_type_def_t* iree_vm_map_type(
 #define VM_DecConstI8(name) \
   OP_I8(0);                 \
   ++pc;
+#define VM_DecConstI16(name) \
+  OP_I16(0);                 \
+  pc += 2;
 #define VM_DecConstI32(name) \
   OP_I32(0);                 \
   pc += 4;
@@ -154,10 +157,10 @@ static inline const iree_vm_type_def_t* iree_vm_map_type(
   iree_vm_map_type(module, OP_I32(0)); \
   pc += 4;
 #define VM_DecTypeOf(name) VM_DecType(name)
-#define VM_DecIntAttr32(name) VM_DecConstI32(name)
-#define VM_DecIntAttr64(name) VM_DecConstI64(name)
-#define VM_DecFloatAttr32(name) VM_DecConstF32(name)
-#define VM_DecFloatAttr64(name) VM_DecConstF64(name)
+#define VM_DecAttrI32(name) VM_DecConstI32(name)
+#define VM_DecAttrI64(name) VM_DecConstI64(name)
+#define VM_DecAttrF32(name) VM_DecConstF32(name)
+#define VM_DecAttrF64(name) VM_DecConstF64(name)
 #define VM_DecStrAttr(name, out_str)                     \
   (out_str)->size = (iree_host_size_t)OP_I16(0);         \
   (out_str)->data = (const char*)&bytecode_data[pc + 2]; \
@@ -281,7 +284,7 @@ static inline const iree_vm_register_list_t* VM_DecVariadicOperandsImpl(
   DEFINE_DISPATCH_TABLE_EXT_F64();
 
 #define DISPATCH_UNHANDLED_CORE()                                           \
-  _dispatch_unhandled : {                                                   \
+  _dispatch_unhandled /*verifier should prevent this*/ : {                  \
     IREE_ASSERT(0);                                                         \
     return iree_make_status(IREE_STATUS_UNIMPLEMENTED, "unhandled opcode"); \
   }
@@ -293,7 +296,7 @@ static inline const iree_vm_register_list_t* VM_DecVariadicOperandsImpl(
   }
 
 #define DISPATCH_OP(ext, op_name, body)                               \
-  _dispatch_##ext##_##op_name:;                                       \
+  _dispatch_##ext##_##op_name :;                                      \
   IREE_DISPATCH_TRACE_INSTRUCTION(IREE_VM_PC_OFFSET_##ext, #op_name); \
   body;                                                               \
   goto* kDispatchTable_CORE[bytecode_data[pc++]];

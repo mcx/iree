@@ -4,6 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Dialect/Util/Analysis/Explorer.h"
 #include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "iree/compiler/Dialect/VM/Transforms/Passes.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -18,10 +19,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/InliningUtils.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 namespace {
 
@@ -29,9 +27,9 @@ namespace {
 // The returned op builder will be set at an insertion point where new
 // operations can be added that are guaranteed to execute in the CFG. The
 // caller must insert a return op at the insertion point when done.
-static std::tuple<IREE::VM::FuncOp, OpBuilder> appendOrCreateInitFuncOp(
-    IREE::VM::ModuleOp moduleOp, StringRef name, SymbolTable &symbolTable,
-    OpBuilder &moduleBuilder) {
+static std::tuple<IREE::VM::FuncOp, OpBuilder>
+appendOrCreateInitFuncOp(IREE::VM::ModuleOp moduleOp, StringRef name,
+                         SymbolTable &symbolTable, OpBuilder &moduleBuilder) {
   IREE::VM::FuncOp funcOp = symbolTable.lookup<IREE::VM::FuncOp>(name);
   OpBuilder funcBuilder(moduleOp.getContext());
   if (!funcOp) {
@@ -52,7 +50,7 @@ static std::tuple<IREE::VM::FuncOp, OpBuilder> appendOrCreateInitFuncOp(
   auto *newBlock = funcOp.addBlock();
 
   // Find all extant return points and redirect them to the new block.
-  auto returnOps = llvm::to_vector<4>(funcOp.getOps<IREE::VM::ReturnOp>());
+  auto returnOps = llvm::to_vector(funcOp.getOps<IREE::VM::ReturnOp>());
   for (auto returnOp :
        llvm::make_early_inc_range(funcOp.getOps<IREE::VM::ReturnOp>())) {
     OpBuilder(returnOp).create<IREE::VM::BranchOp>(returnOp.getLoc(), newBlock);
@@ -83,50 +81,37 @@ static void exportFuncIfNeeded(IREE::VM::ModuleOp moduleOp,
   moduleBuilder.create<IREE::VM::ExportOp>(funcOp.getLoc(), funcOp);
 }
 
-// TODO(benvanik): make this a generic pass.
-// Updates the mutability of globals based on whether they are stored outside of
-// initializers. A more sophisticated analysis is required as initializers can
-// call functions and this will miss that (but that's ok).
+// Updates the mutability of globals based on whether they are stored anywhere
+// in the program. The mutability here is not for program analysis but because
+// the runtime needs to allocate rwdata for the global instead of embedding it
+// as a rodata constant.
 static void fixupGlobalMutability(Operation *moduleOp,
                                   SymbolTable &symbolTable) {
+  Explorer explorer(moduleOp, TraversalAction::SHALLOW);
+  explorer.setOpInterfaceAction<mlir::FunctionOpInterface>(
+      TraversalAction::RECURSE);
+  explorer.initialize();
   SmallVector<Operation *> deadOps;
-  for (auto &op : moduleOp->getRegion(0).front()) {
-    auto globalOp = dyn_cast<IREE::Util::GlobalOpInterface>(op);
-    if (!globalOp) continue;
-    if (!cast<SymbolOpInterface>(op).isPrivate()) {
-      // May be used outside the module; treat as used and mutable.
-      globalOp.setGlobalMutable(true);
-      continue;
-    }
-    auto uses = symbolTable.getSymbolUses(globalOp, moduleOp);
-    if (!uses.has_value()) {
-      // No uses - erase the global entirely.
-      deadOps.push_back(globalOp);
-      continue;
-    }
-    bool maybeStored = false;
-    for (auto use : uses.value()) {
-      auto *user = use.getUser();
-      if (isa<IREE::Util::GlobalAddressOpInterface>(user)) {
-        // Can't analyze indirect variables; assume mutated.
-        maybeStored = true;
-        break;
-      } else if (isa<IREE::Util::GlobalStoreOpInterface>(user)) {
-        maybeStored = true;
+  explorer.forEachGlobal([&](const Explorer::GlobalInfo *globalInfo) {
+    if (globalInfo->uses.empty())
+      return;
+    // TODO(benvanik): verify we want this behavior - we likely want to change
+    // this to be mutable only if stores exist outside of initializers.
+    //
+    // If there are stores mark the global as mutable. We need to update all
+    // of the loads if this changes anything.
+    bool hasStores = !globalInfo->getStores().empty();
+    bool didChange = globalInfo->op.isGlobalMutable() != hasStores;
+    if (didChange) {
+      globalInfo->op.setGlobalMutable(hasStores);
+      for (auto loadOp : globalInfo->getLoads()) {
+        loadOp.setGlobalImmutable(!hasStores);
       }
     }
-    // NOTE: we could erase globals never loaded if we know that computing
-    // their value has no side effects.
-    if (maybeStored) {
-      globalOp.setGlobalMutable(true);
-    }
-  }
-  for (auto *deadOp : deadOps) {
-    deadOp->erase();
-  }
+  });
 }
 
-}  // namespace
+} // namespace
 
 // Finds all global variables and moves their inital values/initializer calls
 // into a single function. Relies on the inliner to later make the uber function
@@ -143,7 +128,7 @@ static void fixupGlobalMutability(Operation *moduleOp,
 class GlobalInitializationPass
     : public PassWrapper<GlobalInitializationPass,
                          OperationPass<IREE::VM::ModuleOp>> {
- public:
+public:
   StringRef getArgument() const override {
     return "iree-vm-global-initialization";
   }
@@ -180,9 +165,8 @@ class GlobalInitializationPass
     InlinerInterface inlinerInterface(&getContext());
     SmallVector<Operation *> deadOps;
     for (auto &op : moduleOp.getBlock().getOperations()) {
-      if (auto globalOp = dyn_cast<IREE::VM::GlobalRefOp>(op)) {
-      } else if (auto globalOp = dyn_cast<IREE::Util::GlobalOpInterface>(op)) {
-        if (globalOp.getGlobalType().isa<IREE::VM::RefType>()) {
+      if (auto globalOp = dyn_cast<IREE::Util::GlobalOpInterface>(op)) {
+        if (llvm::isa<IREE::VM::RefType>(globalOp.getGlobalType())) {
           if (failed(appendRefInitialization(globalOp, initBuilder))) {
             globalOp.emitOpError()
                 << "ref-type global unable to be initialized";
@@ -222,9 +206,10 @@ class GlobalInitializationPass
     exportFuncIfNeeded(moduleOp, deinitFuncOp);
   }
 
- private:
-  LogicalResult appendPrimitiveInitialization(
-      IREE::Util::GlobalOpInterface globalOp, OpBuilder &builder) {
+private:
+  LogicalResult
+  appendPrimitiveInitialization(IREE::Util::GlobalOpInterface globalOp,
+                                OpBuilder &builder) {
     auto initialValue = globalOp.getGlobalInitialValue();
     Value value = {};
     if (initialValue) {
@@ -250,35 +235,35 @@ class GlobalInitializationPass
   // Returns {} if the constant is zero.
   std::pair<LogicalResult, Value> createConst(Location loc, Attribute value,
                                               OpBuilder &builder) {
-    if (auto integerAttr = value.dyn_cast<IntegerAttr>()) {
+    if (auto integerAttr = llvm::dyn_cast<IntegerAttr>(value)) {
       if (integerAttr.getValue().isZero()) {
         // Globals are zero-initialized by default.
         return {success(), {}};
       }
       switch (integerAttr.getType().getIntOrFloatBitWidth()) {
-        case 32:
-          return {success(),
-                  builder.createOrFold<IREE::VM::ConstI32Op>(loc, integerAttr)};
-        case 64:
-          return {success(),
-                  builder.createOrFold<IREE::VM::ConstI64Op>(loc, integerAttr)};
-        default:
-          return {failure(), {}};
+      case 32:
+        return {success(),
+                builder.createOrFold<IREE::VM::ConstI32Op>(loc, integerAttr)};
+      case 64:
+        return {success(),
+                builder.createOrFold<IREE::VM::ConstI64Op>(loc, integerAttr)};
+      default:
+        return {failure(), {}};
       }
-    } else if (auto floatAttr = value.dyn_cast<FloatAttr>()) {
+    } else if (auto floatAttr = llvm::dyn_cast<FloatAttr>(value)) {
       if (floatAttr.getValue().isZero()) {
         // Globals are zero-initialized by default.
         return {success(), {}};
       }
       switch (floatAttr.getType().getIntOrFloatBitWidth()) {
-        case 32:
-          return {success(),
-                  builder.createOrFold<IREE::VM::ConstF32Op>(loc, floatAttr)};
-        case 64:
-          return {success(),
-                  builder.createOrFold<IREE::VM::ConstF64Op>(loc, floatAttr)};
-        default:
-          return {failure(), {}};
+      case 32:
+        return {success(),
+                builder.createOrFold<IREE::VM::ConstF32Op>(loc, floatAttr)};
+      case 64:
+        return {success(),
+                builder.createOrFold<IREE::VM::ConstF64Op>(loc, floatAttr)};
+      default:
+        return {failure(), {}};
       }
     }
     return {failure(), {}};
@@ -287,27 +272,27 @@ class GlobalInitializationPass
   // Stores a value to a global; the global must be mutable.
   LogicalResult storePrimitiveGlobal(Location loc, StringRef symName,
                                      Value value, OpBuilder &builder) {
-    if (auto integerType = value.getType().dyn_cast<IntegerType>()) {
+    if (auto integerType = llvm::dyn_cast<IntegerType>(value.getType())) {
       switch (integerType.getIntOrFloatBitWidth()) {
-        case 32:
-          builder.create<IREE::VM::GlobalStoreI32Op>(loc, value, symName);
-          return success();
-        case 64:
-          builder.create<IREE::VM::GlobalStoreI64Op>(loc, value, symName);
-          return success();
-        default:
-          return failure();
+      case 32:
+        builder.create<IREE::VM::GlobalStoreI32Op>(loc, value, symName);
+        return success();
+      case 64:
+        builder.create<IREE::VM::GlobalStoreI64Op>(loc, value, symName);
+        return success();
+      default:
+        return failure();
       }
-    } else if (auto floatType = value.getType().dyn_cast<FloatType>()) {
+    } else if (auto floatType = llvm::dyn_cast<FloatType>(value.getType())) {
       switch (floatType.getIntOrFloatBitWidth()) {
-        case 32:
-          builder.create<IREE::VM::GlobalStoreF32Op>(loc, value, symName);
-          return success();
-        case 64:
-          builder.create<IREE::VM::GlobalStoreF64Op>(loc, value, symName);
-          return success();
-        default:
-          return failure();
+      case 32:
+        builder.create<IREE::VM::GlobalStoreF32Op>(loc, value, symName);
+        return success();
+      case 64:
+        builder.create<IREE::VM::GlobalStoreF64Op>(loc, value, symName);
+        return success();
+      default:
+        return failure();
       }
     }
     return failure();
@@ -341,7 +326,4 @@ createGlobalInitializationPass() {
 
 static PassRegistration<GlobalInitializationPass> pass;
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

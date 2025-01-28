@@ -75,12 +75,10 @@ glslc -fshader-stage=compute simple_mul.glsl -o simple_mul.spv
       ]
     }>
     hal.executable.export public @simple_mul ordinal(0)
-        layout(#hal.pipeline.layout<push_constants = 1, sets = [
-          <0, bindings = [
-              <0, storage_buffer, ReadOnly>,
-              <1, storage_buffer, ReadOnly>,
-              <2, storage_buffer>
-          ]>
+        layout(#hal.pipeline.layout<constants = 1, bindings = [
+          #hal.pipeline.binding<storage_buffer, ReadOnly>,
+          #hal.pipeline.binding<storage_buffer, ReadOnly>,
+          #hal.pipeline.binding<storage_buffer>
         ]>) {
     ^bb0(%device: !hal.device, %workload: index):
       %x = affine.apply affine_map<()[s0] -> (s0 ceildiv 64)>()[%workload]
@@ -105,7 +103,7 @@ glslc -fshader-stage=compute simple_mul.glsl -o simple_mul.spv
 ## Instructions
 
 This presumes that `iree-compile` and `iree-run-module` have been installed or
-built. [See here](https://openxla.github.io/iree/building-from-source/getting-started/)
+built. [See here](https://iree.dev/building-from-source/getting-started/)
 for instructions for CMake setup and building from source.
 
 0. Ensure that `glslc` is on your PATH (comes with the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)):
@@ -144,4 +142,20 @@ for instructions for CMake setup and building from source.
         --input=8xf32=2 \
         --input=8xf32=4 \
         /tmp/example.vmfb
+    ```
+
+## Custom Kernel Match and Replace Scripting Instructions
+
+This is a flow for authoring custom dispatches externally alongside match and
+replace logic that can be fed directly into a pre-built version of the compiler.
+
+In addition to the above steps, when compiling the module, pass in both the
+target module and the transform library implementing the matcher + kernel.
+
+    ```
+    iree-compile \
+        --iree-hal-executable-object-search-path=../iree-build/ \
+        samples/custom_dispatch/vulkan/shaders/example_transform.mlir \
+        --iree-preprocessing-transform-library=samples/custom_dispatch/vulkan/shaders/example_transform_spec.mlir \
+        -o=/tmp/example.vmfb
     ```

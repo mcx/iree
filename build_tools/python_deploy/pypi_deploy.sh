@@ -6,10 +6,23 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-# For deploying an IREE release to PyPI. You will need the account password,
-# which Googlers can access at http://go/iree-pypi-password.
+# For deploying to PyPI, you will need to have credentials set up.
+# Googlers can access the shared releasing account "google-iree-pypi-deploy"
+# at http://go/iree-pypi-password
+#
+# Typical usage is to use keyring or create a ~/.pypirc file with:
+#
+#   [pypi]
+#   username = __token__
+#   password = <<API TOKEN>>
+#
+# You must have `gh` installed and authenticated (run `gh auth`).
+#
 # Usage:
-# ./pypi_deploy.sh candidate-20220930.282
+#   python -m venv .venv
+#   source .venv/bin/activate
+#   python -m pip install -r ./pypi_deploy_requirements.txt
+#   ./pypi_deploy.sh candidate-20220930.282
 
 set -euo pipefail
 
@@ -19,15 +32,22 @@ SCRIPT_DIR="$(dirname -- "$( readlink -f -- "$0"; )")";
 REQUIREMENTS_FILE="${SCRIPT_DIR}/pypi_deploy_requirements.txt"
 TMPDIR="$(mktemp --directory --tmpdir iree_pypi_wheels.XXXXX)"
 
-function check_exists() {
+function check_command_exists() {
   if ! command -v "$1" > /dev/null; then
     echo "$1 not found."
-    exit 1
+    return 1
   fi
+  return 0
 }
 
-# It really *seems* like there should be a pip command to do this, but there's
-# not, apparently.
+function check_python_package_installed() {
+  if ! pip show "$1" > /dev/null; then
+    echo "$1 not installed."
+    return 1
+  fi
+  return 0
+}
+
 function check_requirements() {
   while read line; do
     # Read in the package, ignoring everything after the first '='
@@ -38,7 +58,7 @@ function check_requirements() {
       echo "Reading requirements file '${REQUIREMENTS_FILE}' failed."
       exit "${ret}"
     fi
-    if ! check_exists "${package}"; then
+    if ! check_python_package_installed "${package}"; then
       echo "Recommend installing python dependencies in a venv using pypi_deploy_requirements.txt"
       exit 1
     fi
@@ -48,40 +68,49 @@ function check_requirements() {
 
 function download_wheels() {
   echo ""
-  echo "Downloading wheels from '${RELEASE}'"
-  gh release download "${RELEASE}" --repo openxla/iree --pattern "*.whl"
+  echo "Downloading wheels from '${RELEASE}'..."
+  gh release download "${RELEASE}" --repo iree-org/iree --pattern "*.whl"
+
+  echo ""
+  echo "Downloaded wheels:"
+  ls
 }
 
-# For some reason auditwheel detects these as not manylinux compliant even
-# though they are (we think). Use repair to fix the platform
-function repair_wheels() {
+function edit_release_versions() {
   echo ""
-  echo "Repairing tool wheels"
-  for f in iree_tools_*linux_x86_64*; do
-    auditwheel repair --plat manylinux_2_17_x86_64 --wheel-dir . "$f"
-    echo "Deleting non-compliant wheel '$f'"
-    rm "$f"
+  echo "Editing release versions..."
+  for file in *
+  do
+    ${SCRIPT_DIR}/promote_whl_from_rc_to_final.py ${file} --delete-old-wheel
   done
+
+  echo "Edited wheels:"
+  ls
 }
 
 function upload_wheels() {
-  twine upload --verbose -u google-iree-pypi-deploy *
+  echo ""
+  echo "Uploading wheels..."
+  twine upload --verbose *
 }
 
 
 function main() {
   echo "Changing into ${TMPDIR}"
   cd "${TMPDIR}"
+
+  set +e
   check_requirements
 
-  if ! check_exists gh; then
+  if ! check_command_exists gh; then
     echo "The GitHub CLI 'gh' is required. See https://github.com/cli/cli#installation."
     echo " Googlers, the PPA should already be on your linux machine."
     exit 1
   fi
+  set -e
 
   download_wheels
-  repair_wheels
+  edit_release_versions
   upload_wheels
 }
 

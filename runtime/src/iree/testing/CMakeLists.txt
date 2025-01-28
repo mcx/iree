@@ -19,7 +19,6 @@ if(IREE_ENABLE_THREADING)
     DEPS
       benchmark
       iree::base
-      iree::base::tracing
     PUBLIC
   )
 else()
@@ -32,7 +31,6 @@ else()
       "benchmark_nop.c"
     DEPS
       iree::base
-      iree::base::tracing
     PUBLIC
   )
 endif()
@@ -72,6 +70,7 @@ iree_cc_library(
     ::gtest
     gmock
     gtest
+    iree::base
     iree::base::internal::flags
   TESTONLY
   PUBLIC

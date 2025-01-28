@@ -34,8 +34,11 @@ IREE_EMBED_EXPORTED int ireeMlirLspServerRunMain(int argc, char **argv);
 /// by linking against the CAPI.
 IREE_EMBED_EXPORTED int ireeCompilerRunLldMain(int argc, char **argv);
 
+/// Runs the IREE reducer main function.
+IREE_EMBED_EXPORTED int ireeReduceRunMain(int argc, char **argv);
+
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // IREE_COMPILER_TOOL_ENTRY_POINTS_API_H
+#endif // IREE_COMPILER_TOOL_ENTRY_POINTS_API_H

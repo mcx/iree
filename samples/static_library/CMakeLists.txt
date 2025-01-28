@@ -14,6 +14,7 @@ endif()
 # Setup args for iree-compile.
 set(_COMPILE_ARGS)
 list(APPEND _COMPILE_ARGS "--iree-hal-target-backends=llvm-cpu")
+list(APPEND _COMPILE_ARGS "--iree-llvmcpu-target-cpu=generic")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-link-embedded=false")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-link-static")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-static-library-output-path=simple_mul.o")
@@ -55,7 +56,7 @@ iree_c_embed_data(
     simple_mul_c
   IDENTIFIER
     iree_samples_static_library_simple_mul
-  GENERATED_SRCS
+  SRCS
     simple_mul.vmfb
   C_FILE_OUTPUT
     simple_mul_c.c
@@ -100,6 +101,7 @@ endif()
 set(_COMPILE_ARGS)
 list(APPEND _COMPILE_ARGS "--output-format=vm-c")
 list(APPEND _COMPILE_ARGS "--iree-hal-target-backends=llvm-cpu")
+list(APPEND _COMPILE_ARGS "--iree-llvmcpu-target-cpu=generic")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-link-embedded=false")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-link-static")
 list(APPEND _COMPILE_ARGS "--iree-llvmcpu-static-library-output-path=simple_mul_c_module.o")

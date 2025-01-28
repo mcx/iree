@@ -26,7 +26,9 @@ PyObject* ApiStatusToPyExcClass(iree_status_t status) {
   }
 }
 
-static std::string ApiStatusToString(iree_status_t status) {
+}  // namespace
+
+std::string ApiStatusToString(iree_status_t status) {
   iree_host_size_t buffer_length = 0;
   if (IREE_UNLIKELY(!iree_status_format(status, /*buffer_capacity=*/0,
                                         /*buffer=*/NULL, &buffer_length))) {
@@ -41,10 +43,8 @@ static std::string ApiStatusToString(iree_status_t status) {
              : "";
 }
 
-}  // namespace
-
-pybind11::error_already_set ApiStatusToPyExc(iree_status_t status,
-                                             const char* message) {
+nanobind::python_error ApiStatusToPyExc(iree_status_t status,
+                                        const char* message) {
   assert(!iree_status_is_ok(status));
   std::string full_message;
 
@@ -58,13 +58,12 @@ pybind11::error_already_set ApiStatusToPyExc(iree_status_t status,
 
   PyErr_SetString(ApiStatusToPyExcClass(status), full_message.c_str());
   iree_status_ignore(status);
-  return pybind11::error_already_set();
+  return nanobind::python_error();
 }
 
-pybind11::error_already_set RaisePyError(PyObject* exc_class,
-                                         const char* message) {
+nanobind::python_error RaisePyError(PyObject* exc_class, const char* message) {
   PyErr_SetString(exc_class, message);
-  return pybind11::error_already_set();
+  return nanobind::python_error();
 }
 
 }  // namespace python

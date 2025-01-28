@@ -13,134 +13,90 @@
 
 #include <memory>
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #define DEBUG_TYPE "iree-codegen-erase-hal-descriptor-type"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_ERASEHALDESCRIPTORTYPEFROMMEMREFPASS
+#define GEN_PASS_DEF_CONVERTHALDESCRIPTORTYPETOGPUADDRESSSPACEPASS
+#include "iree/compiler/Codegen/Common/Passes.h.inc"
+
 namespace {
-
-//===----------------------------------------------------------------------===//
-// Type Converter
-//===----------------------------------------------------------------------===//
-
-struct MemRefTypeConverter final : public TypeConverter {
-  MemRefTypeConverter() {
-    // Pass through for all other types.
-    addConversion([](Type type) { return type; });
-
-    addConversion([](BaseMemRefType memRefType) -> Optional<Type> {
-      // Expect #hal.descriptor_type memory spaces.
-      Attribute spaceAttr = memRefType.getMemorySpace();
-      if (!spaceAttr) return std::nullopt;
-      auto dtAttr = spaceAttr.dyn_cast<IREE::HAL::DescriptorTypeAttr>();
-      if (!dtAttr) return std::nullopt;
-
-      // Erase the #hal.descriptor_type memory space.
-      if (auto rankedType = memRefType.dyn_cast<MemRefType>()) {
-        return MemRefType::get(memRefType.getShape(),
-                               memRefType.getElementType(),
-                               rankedType.getLayout());
-      }
-      return UnrankedMemRefType::get(memRefType.getElementType(),
-                                     /*memorySpace=*/0);
-    });
-  }
-};
-
-//===----------------------------------------------------------------------===//
-// Conversion Target
-//===----------------------------------------------------------------------===//
 
 /// Returns true if the given `type` is considered as legal.
 static bool isLegalType(Type type) {
-  if (auto memRefType = type.dyn_cast<BaseMemRefType>()) {
+  if (auto memRefType = llvm::dyn_cast<BaseMemRefType>(type)) {
     Attribute spaceAttr = memRefType.getMemorySpace();
-    return !spaceAttr || !spaceAttr.isa<IREE::HAL::DescriptorTypeAttr>();
+    return !spaceAttr || !llvm::isa<IREE::HAL::DescriptorTypeAttr>(spaceAttr);
   }
   return true;
 }
 
-/// Returns true if the given `op` is considered as legal.
-static bool isLegalOp(Operation *op) {
-  return llvm::all_of(op->getOperandTypes(), isLegalType) &&
-         llvm::all_of(op->getResultTypes(), isLegalType);
-}
-
-//===----------------------------------------------------------------------===//
-// Conversion Pattern
-//===----------------------------------------------------------------------===//
-
-struct EraseMemorySpacePattern final : public ConversionPattern {
-  EraseMemorySpacePattern(MLIRContext *context, TypeConverter &converter)
-      : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, context) {}
-
-  LogicalResult matchAndRewrite(
-      Operation *op, ArrayRef<Value> operands,
-      ConversionPatternRewriter &rewriter) const override;
-};
-
-LogicalResult EraseMemorySpacePattern::matchAndRewrite(
-    Operation *op, ArrayRef<Value> operands,
-    ConversionPatternRewriter &rewriter) const {
-  llvm::SmallVector<Type, 4> newResults;
-  (void)getTypeConverter()->convertTypes(op->getResultTypes(), newResults);
-
-  OperationState state(op->getLoc(), op->getName().getStringRef(), operands,
-                       newResults, op->getAttrs(), op->getSuccessors());
-
-  for (Region &region : op->getRegions()) {
-    Region *newRegion = state.addRegion();
-    rewriter.inlineRegionBefore(region, *newRegion, newRegion->begin());
-    TypeConverter::SignatureConversion result(newRegion->getNumArguments());
-    (void)getTypeConverter()->convertSignatureArgs(
-        newRegion->getArgumentTypes(), result);
-    rewriter.applySignatureConversion(newRegion, result);
-  }
-
-  Operation *newOp = rewriter.create(state);
-  rewriter.replaceOp(op, newOp->getResults());
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
-// Conversion Pass
-//===----------------------------------------------------------------------===//
-
 struct EraseHALDescriptorTypeFromMemRefPass final
-    : public EraseHALDescriptorTypeFromMemRefBase<
+    : impl::EraseHALDescriptorTypeFromMemRefPassBase<
           EraseHALDescriptorTypeFromMemRefPass> {
   void runOnOperation() override {
-    func::FuncOp op = getOperation();
-    if (failed(eraseHALDescriptorTypeFromMemRef(op)))
-      return signalPassFailure();
+    AttrTypeReplacer replacer;
+    replacer.addReplacement(
+        [](BaseMemRefType memRefType) -> std::optional<BaseMemRefType> {
+          if (isLegalType(memRefType))
+            return std::nullopt;
+
+          // Erase the #hal.descriptor_type memory space.
+          if (auto rankedType = llvm::dyn_cast<MemRefType>(memRefType)) {
+            return MemRefType::get(memRefType.getShape(),
+                                   memRefType.getElementType(),
+                                   rankedType.getLayout());
+          }
+          return UnrankedMemRefType::get(memRefType.getElementType(),
+                                         /*memorySpace=*/0);
+        });
+
+    Operation *op = getOperation();
+
+    replacer.recursivelyReplaceElementsIn(op, /*replaceAttrs=*/false,
+                                          /*replaceLocs=*/false,
+                                          /*replaceTypes=*/true);
   }
 };
 
-}  // namespace
+struct ConvertHALDescriptorTypeToGPUAddressSpacePass final
+    : impl::ConvertHALDescriptorTypeToGPUAddressSpacePassBase<
+          ConvertHALDescriptorTypeToGPUAddressSpacePass> {
+  void runOnOperation() override {
+    AttrTypeReplacer replacer;
+    replacer.addReplacement(
+        [](BaseMemRefType memRefType) -> std::optional<BaseMemRefType> {
+          if (isLegalType(memRefType))
+            return std::nullopt;
 
-LogicalResult eraseHALDescriptorTypeFromMemRef(func::FuncOp funcOp) {
-  MLIRContext *context = funcOp.getContext();
-  ConversionTarget target(*context);
-  target.markUnknownOpDynamicallyLegal(isLegalOp);
+          Attribute globalSpace = gpu::AddressSpaceAttr::get(
+              memRefType.getContext(), gpu::AddressSpace::Global);
 
-  MemRefTypeConverter typeConverter;
-  RewritePatternSet patterns(context);
-  patterns.add<EraseMemorySpacePattern>(context, typeConverter);
+          // Erase the #hal.descriptor_type memory space.
+          if (auto rankedType = llvm::dyn_cast<MemRefType>(memRefType)) {
+            return MemRefType::get(memRefType.getShape(),
+                                   memRefType.getElementType(),
+                                   rankedType.getLayout(), globalSpace);
+          }
+          return UnrankedMemRefType::get(memRefType.getElementType(),
+                                         /*memorySpace=*/globalSpace);
+        });
 
-  return applyFullConversion(funcOp, target, std::move(patterns));
-}
+    Operation *op = getOperation();
 
-std::unique_ptr<OperationPass<func::FuncOp>>
-createEraseHALDescriptorTypeFromMemRefPass() {
-  return std::make_unique<EraseHALDescriptorTypeFromMemRefPass>();
-}
+    replacer.recursivelyReplaceElementsIn(op, /*replaceAttrs=*/false,
+                                          /*replaceLocs=*/false,
+                                          /*replaceTypes=*/true);
+  }
+};
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

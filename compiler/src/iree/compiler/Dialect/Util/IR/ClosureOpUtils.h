@@ -16,10 +16,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/PatternMatch.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
 
 //------------------------------------------------------------------------------
 // Closure optimization
@@ -28,15 +25,15 @@ namespace Util {
 // Modifies in-place the operand results vectors for a closure operation.
 // |excludedOperandIndices| and |excludedResultIndices| are sets containing the
 // operands and results in the lists to remove.
-void excludeClosureOperandsAndResults(SmallVector<Value, 4> &operandValues,
+void excludeClosureOperandsAndResults(SmallVector<Value> &operandValues,
                                       ArrayRef<unsigned> excludedOperandIndices,
-                                      SmallVector<Type, 4> &resultTypes,
+                                      SmallVector<Type> &resultTypes,
                                       ArrayRef<unsigned> excludedResultIndices);
-void excludeClosureOperandsAndResults(SmallVector<Value, 4> &operandValues,
-                                      SmallVector<Value, 4> &operandDims,
+void excludeClosureOperandsAndResults(SmallVector<Value> &operandValues,
+                                      SmallVector<Value> &operandDims,
                                       ArrayRef<unsigned> excludedOperandIndices,
-                                      SmallVector<Type, 4> &resultTypes,
-                                      SmallVector<Value, 4> &resultDims,
+                                      SmallVector<Type> &resultTypes,
+                                      SmallVector<Value> &resultDims,
                                       ArrayRef<unsigned> excludedResultIndices);
 
 // Erases the given result indices from terminators in the given region.
@@ -47,7 +44,7 @@ struct ClosureOptimizationOptions {
   // Maximum size in bytes of constant values to inline into the closure.
   // When 0 no constants will be inlined; when None all constants will be
   // inlined.
-  Optional<int64_t> maxInlinedConstantBytes = {256};
+  std::optional<int64_t> maxInlinedConstantBytes = {256};
 };
 
 // Optimizes closure |closureOp| to remove duplicate operands and unused
@@ -65,7 +62,7 @@ LogicalResult optimizeClosureLikeOp(const ClosureOptimizationOptions &options,
 // T must implement the IREE::Util::ClosureOpInterface.
 template <typename T>
 class ClosureOptimizationPattern : public OpRewritePattern<T> {
- public:
+public:
   ClosureOptimizationPattern(MLIRContext *context,
                              ClosureOptimizationOptions options = {},
                              PatternBenefit benefit = 1)
@@ -77,13 +74,10 @@ class ClosureOptimizationPattern : public OpRewritePattern<T> {
     return optimizeClosureLikeOp(options, closureOp, rewriter);
   }
 
- private:
+private:
   const ClosureOptimizationOptions options;
 };
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util
 
-#endif  // IREE_COMPILER_DIALECT_UTIL_IR_CLOSUREOPUTILS_H_
+#endif // IREE_COMPILER_DIALECT_UTIL_IR_CLOSUREOPUTILS_H_

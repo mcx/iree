@@ -11,7 +11,6 @@
 #include "iree/compiler/Dialect/VMVX/IR/VMVXOps.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXTypes.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -24,8 +23,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 namespace {
 
@@ -33,9 +31,9 @@ namespace {
 template <typename OpTy>
 struct FoldAsNoOp final : public OpConversionPattern<OpTy> {
   using OpConversionPattern<OpTy>::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      OpTy op, typename OpTy::Adaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOp(op, adaptor.getOperands());
     return success();
   }
@@ -46,9 +44,9 @@ struct FoldAsNoOp final : public OpConversionPattern<OpTy> {
 struct RemoveIdentityConversionCast final
     : public OpConversionPattern<UnrealizedConversionCastOp> {
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(
-      UnrealizedConversionCastOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     if (op->getNumOperands() == 1 && op->getNumResults() == 1 &&
         adaptor.getOperands().front().getType() ==
             op->getResultTypes().front()) {
@@ -60,7 +58,7 @@ struct RemoveIdentityConversionCast final
   }
 };
 
-}  // namespace
+} // namespace
 
 void populateStandardToVMVXPatterns(MLIRContext *context,
                                     RewritePatternSet &patterns,
@@ -72,5 +70,4 @@ void populateStandardToVMVXPatterns(MLIRContext *context,
   patterns.insert<RemoveIdentityConversionCast>(typeConverter, context);
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

@@ -48,6 +48,14 @@ enum iree_hal_numerical_type_bits_t {
   IREE_HAL_NUMERICAL_TYPE_FLOAT_BRAIN = IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x02u,
   // Paired (real, imag) complex number in floating-point format.
   IREE_HAL_NUMERICAL_TYPE_FLOAT_COMPLEX = IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x03u,
+  // Ad-hoc entries for the zoo of low-bit-depth float types. They are special
+  // in that there are many different types sharing the same size.
+  IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E5M2 = IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x04u,
+  IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E4M3 = IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x05u,
+  IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E5M2_FNUZ =
+      IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x06u,
+  IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E4M3_FNUZ =
+      IREE_HAL_NUMERICAL_TYPE_FLOAT | 0x07u,
 };
 typedef uint8_t iree_hal_numerical_type_t;
 
@@ -91,7 +99,7 @@ typedef uint8_t iree_hal_numerical_type_t;
 // TODO(#8193): split out logical and physical bit widths.
 // Returns the bit width of each element.
 #define iree_hal_element_bit_count(element_type) \
-  (iree_host_size_t)((element_type)&0xFF)
+  (iree_host_size_t)((element_type) & 0xFF)
 
 // Returns true if the element is byte-aligned.
 // Sub-byte aligned types such as i4 require user handling of the packing.
@@ -148,6 +156,10 @@ enum iree_hal_element_types_t {
   IREE_HAL_ELEMENT_TYPE_BFLOAT_16          = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_BRAIN,        16),  // NOLINT
   IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_64   = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_COMPLEX,      64),  // NOLINT
   IREE_HAL_ELEMENT_TYPE_COMPLEX_FLOAT_128  = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_COMPLEX,     128),  // NOLINT
+  IREE_HAL_ELEMENT_TYPE_FLOAT_8_E5M2       = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E5M2,        8),  // NOLINT
+  IREE_HAL_ELEMENT_TYPE_FLOAT_8_E4M3       = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E4M3,        8),  // NOLINT
+  IREE_HAL_ELEMENT_TYPE_FLOAT_8_E5M2_FNUZ  = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E5M2_FNUZ,   8),  // NOLINT
+  IREE_HAL_ELEMENT_TYPE_FLOAT_8_E4M3_FNUZ  = IREE_HAL_ELEMENT_TYPE_VALUE(IREE_HAL_NUMERICAL_TYPE_FLOAT_8_E4M3_FNUZ,   8),  // NOLINT
 };
 typedef uint32_t iree_hal_element_type_t;
 // clang-format on
@@ -233,7 +245,9 @@ IREE_API_EXPORT iree_hal_dim_t iree_hal_buffer_view_shape_dim(
 // Returns the dimensions of the shape in |out_shape| and its rank in
 // |out_shape_rank|. |rank_capacity| indicates the number of dimensions
 // available in the |out_shape| buffer. If there is not enough capacity to store
-// all of the dimensions IREE_STATUS_OUT_OF_RANGE is returned.
+// all of the dimensions IREE_STATUS_OUT_OF_RANGE is returned
+// without populating |out_shape|.
+// If the shape rank of |buffer_view| is 0, |out_shape| can be NULL.
 // |out_shape_rank| can be omitted if the rank is already known.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_view_shape(
     const iree_hal_buffer_view_t* buffer_view, iree_host_size_t rank_capacity,

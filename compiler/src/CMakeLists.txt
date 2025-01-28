@@ -4,26 +4,10 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-iree_cc_library(
-  NAME
-    defs
-  INCLUDES
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}
-  PUBLIC
+iree_setup_c_src_root(
+  IMPLICIT_DEFS_TARGET iree_compiler_defs
+  IMPLICIT_DEFS_INSTALL_COMPONENT IREERuntimeLibraries-Compiler
+  IMPLICIT_DEFS_EXPORT_SET Compiler
 )
 
-# Configures all iree_cc_* targets to take this implicit dep,
-# which provides common includes and copts for the tree.
-set(IREE_IMPLICIT_DEFS_CC_DEPS iree::compiler::src::defs)
-
-# Force enable BUILD_SHARED_LIBS for the compiler if instructed.
-set(_IREE_ORIG_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
-if(IREE_COMPILER_BUILD_SHARED_LIBS)
-  set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-endif()
-
 add_subdirectory(iree/compiler)
-
-# Reset BUILD_SHARED_LIBS.
-set(BUILD_SHARED_LIBS ${_IREE_ORIG_BUILD_SHARED_LIBS} CACHE BOOL "" FORCE)

@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/HAL/Analysis/BindingLayout.h"
 
+#include "iree/compiler/Dialect/HAL/Analysis/Captures.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
@@ -14,50 +15,61 @@
 
 #define DEBUG_TYPE "iree-hal-binding-layout-analysis"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
 
 void PipelineLayout::print(llvm::raw_ostream &os) const {
   os << "PipelineLayout:\n";
-  os << "  push constants: " << pushConstantCount << "\n";
-  os << "  sets:\n";
-  for (auto &setLayout : setLayouts) {
-    os << "    set[" << setLayout.ordinal
-       << "]: " << stringifyDescriptorSetLayoutFlags(setLayout.flags) << "\n";
-    for (auto &binding : setLayout.bindings) {
-      os << "      binding[" << binding.ordinal
-         << "]: " << stringifyDescriptorType(binding.type) << "\n";
-    }
+  os << "  constants: " << constantCount << "\n";
+  os << "  bindings:\n";
+  for (auto &binding : bindings) {
+    os << "    binding[" << binding.ordinal
+       << "]: " << stringifyDescriptorType(binding.type) << "\n";
   }
   os << "  resource map:\n";
-  for (auto setBinding : llvm::enumerate(resourceMap)) {
-    os << "    resource[" << setBinding.index() << "]: set "
-       << setBinding.value().first << " binding " << setBinding.value().second
+  for (auto ordinal : llvm::enumerate(resourceMap)) {
+    os << "    resource[" << ordinal.index() << "]: binding " << ordinal.value()
        << "\n";
   }
 }
 
-// Finds all dispatches within |rootOp| and groups them by executable export.
-static BindingLayoutAnalysis::ExportDispatchMap findAllDispatchSites(
-    Operation *rootOp) {
-  SymbolTable symbolTable(rootOp);
-  BindingLayoutAnalysis::ExportDispatchMap dispatchMap;
-  rootOp->walk([&](IREE::Stream::CmdDispatchOp dispatchOp) {
-    dispatchOp.forEachEntryPointAttr([&](SymbolRefAttr entryPointAttr) {
-      auto exportOp =
-          symbolTable.lookupNearestSymbolFrom(dispatchOp, entryPointAttr);
-      dispatchMap[exportOp].push_back(dispatchOp);
-    });
-  });
-  return dispatchMap;
+// Assumes an explicit layout as specified on an export.
+static PipelineLayout
+assumeExportLayout(IREE::HAL::PipelineLayoutAttr layoutAttr) {
+  PipelineLayout pipelineLayout;
+  pipelineLayout.constantCount = layoutAttr.getConstants();
+
+  size_t bindingCount = layoutAttr.getBindings().size();
+  pipelineLayout.bindings.resize(bindingCount);
+  pipelineLayout.resourceMap.resize(bindingCount);
+  for (auto [i, bindingAttr] : llvm::enumerate(layoutAttr.getBindings())) {
+    PipelineLayoutBinding binding;
+    binding.ordinal = i;
+    binding.type = bindingAttr.getType();
+    binding.flags = bindingAttr.getFlags();
+    pipelineLayout.bindings[binding.ordinal] = binding;
+    pipelineLayout.resourceMap[i] = binding.ordinal;
+  }
+
+  return pipelineLayout;
 }
 
 // Derives an pipeline layout from all of the dispatches to |exportOp|.
-static PipelineLayout deriveExportLayout(
-    IREE::Stream::ExecutableExportOp exportOp,
-    SmallVector<IREE::Stream::CmdDispatchOp> &dispatchOps) {
+static PipelineLayout
+deriveStreamExportLayout(IREE::Stream::ExecutableExportOp exportOp,
+                         ArrayRef<IREE::Stream::CmdDispatchOp> dispatchOps) {
+  if (auto layoutAttr = exportOp->getAttrOfType<IREE::HAL::PipelineLayoutAttr>(
+          "hal.interface.layout")) {
+    auto assumedLayout = assumeExportLayout(layoutAttr);
+    LLVM_DEBUG({
+      auto executableOp =
+          exportOp->getParentOfType<IREE::Stream::ExecutableOp>();
+      llvm::dbgs() << "assumeExportLayout(@" << executableOp.getSymName()
+                   << "::@" << exportOp.getSymName() << "):\n";
+      assumedLayout.print(llvm::dbgs());
+    });
+    return assumedLayout;
+  }
+
   auto funcOp = exportOp.lookupFunctionRef();
   assert(funcOp && "export target not found");
 
@@ -81,7 +93,7 @@ static PipelineLayout deriveExportLayout(
   unsigned operandCount = 0;
   unsigned bindingCount = 0;
   for (auto arg : funcOp.getArgumentTypes()) {
-    if (arg.isa<IREE::Stream::BindingType>()) {
+    if (isa<IREE::Stream::BindingType>(arg)) {
       ++bindingCount;
     } else {
       ++operandCount;
@@ -89,44 +101,78 @@ static PipelineLayout deriveExportLayout(
   }
 
   // Check the usage of each binding at each dispatch site.
-  SmallVector<DescriptorFlags> bindingFlags(bindingCount);
+  struct DescriptorInfo {
+    DescriptorFlags flags = DescriptorFlags::None;
+  };
+  SmallVector<DescriptorInfo> descriptorInfos(bindingCount);
   for (auto dispatchOp : dispatchOps) {
+    // If any dispatch is performed within a reusable (non-one-shot) execution
+    // region we may opt in to indirect references. For those only executed once
+    // (though maybe from multiple dispatch sites) we try to bias towards direct
+    // references to avoid additional overheads.
+    auto parentOp = dispatchOp->getParentOfType<IREE::Stream::CmdExecuteOp>();
+    bool isRegionExecutedOnce = parentOp ? parentOp.getOnce() : false;
+
     auto resourceAccessesAttrs = dispatchOp.getResourceAccesses().getValue();
     for (unsigned i = 0; i < bindingCount; ++i) {
-      auto resourceAccessAttr =
-          resourceAccessesAttrs[i]
-              .cast<IREE::Stream::ResourceAccessBitfieldAttr>();
+      auto &descriptorInfo = descriptorInfos[i];
+
+      // Opt into indirect descriptors when dynamic values are used from
+      // execution regions that may be executed more than once.
+      if (!isRegionExecutedOnce) {
+        Value resource = dispatchOp.getResources()[i];
+        if (auto blockArg = dyn_cast<BlockArgument>(resource)) {
+          if (blockArg.getOwner()->getParentOp() == parentOp) {
+            resource = parentOp.getResourceOperands()[blockArg.getArgNumber()];
+          }
+        }
+        switch (categorizeValue(resource)) {
+        default:
+        case ValueOrigin::Unknown:
+        case ValueOrigin::MutableGlobal:
+          descriptorInfo.flags =
+              descriptorInfo.flags | IREE::HAL::DescriptorFlags::Indirect;
+          break;
+        case ValueOrigin::LocalConstant:
+        case ValueOrigin::ImmutableGlobal:
+          break;
+        }
+      }
+
+      // Set binding flags based on the OR of all dispatch site access.
       auto resourceAccess = static_cast<IREE::Stream::ResourceAccessBitfield>(
-          resourceAccessAttr.getInt());
+          cast<IREE::Stream::ResourceAccessBitfieldAttr>(
+              resourceAccessesAttrs[i])
+              .getInt());
       if (!bitEnumContainsAll(resourceAccess,
                               IREE::Stream::ResourceAccessBitfield::Write)) {
         // Read-only.
-        bindingFlags[i] =
-            bindingFlags[i] | IREE::HAL::DescriptorFlags::ReadOnly;
+        descriptorInfo.flags =
+            descriptorInfo.flags | IREE::HAL::DescriptorFlags::ReadOnly;
       }
     }
   }
 
   PipelineLayout pipelineLayout;
-  pipelineLayout.pushConstantCount = operandCount;
+  pipelineLayout.constantCount = operandCount;
   pipelineLayout.resourceMap.resize(bindingCount);
 
-  // Only one set today - this creates a lot of pushes that we can't elide later
-  // on once interfaces are materialized.
-  DescriptorSetLayout setLayout;
-  setLayout.ordinal = 0;
-  setLayout.flags = IREE::HAL::DescriptorSetLayoutFlags::None;
-  setLayout.bindings.resize(bindingCount);
+  IREE::HAL::PipelineLayoutFlags layoutFlags =
+      IREE::HAL::PipelineLayoutFlags::None;
   for (unsigned i = 0; i < bindingCount; ++i) {
-    DescriptorSetLayoutBinding setBinding;
-    setBinding.ordinal = i;
-    setBinding.type = IREE::HAL::DescriptorType::StorageBuffer;
-    setBinding.flags = bindingFlags[i];
-    setLayout.bindings[i] = setBinding;
-    pipelineLayout.resourceMap[i] =
-        std::make_pair(setLayout.ordinal, setBinding.ordinal);
+    const auto &descriptorInfo = descriptorInfos[i];
+    if (allEnumBitsSet(descriptorInfo.flags,
+                       IREE::HAL::DescriptorFlags::Indirect)) {
+      layoutFlags = layoutFlags | IREE::HAL::PipelineLayoutFlags::Indirect;
+    }
+    PipelineLayoutBinding binding;
+    binding.ordinal = i;
+    binding.type = IREE::HAL::DescriptorType::StorageBuffer;
+    binding.flags = descriptorInfo.flags;
+    pipelineLayout.bindings.push_back(binding);
+    pipelineLayout.resourceMap[i] = binding.ordinal;
   }
-  pipelineLayout.setLayouts.push_back(setLayout);
+  pipelineLayout.flags = layoutFlags;
 
   LLVM_DEBUG({
     auto executableOp = exportOp->getParentOfType<IREE::Stream::ExecutableOp>();
@@ -138,37 +184,70 @@ static PipelineLayout deriveExportLayout(
   return pipelineLayout;
 }
 
-static BindingLayoutAnalysis::ExportLayoutMap deriveExportLayouts(
-    Operation *rootOp, BindingLayoutAnalysis::ExportDispatchMap dispatchMap) {
-  BindingLayoutAnalysis::ExportLayoutMap layoutMap;
-  rootOp->walk([&](IREE::Stream::ExecutableExportOp exportOp) {
-    auto &dispatchOps = dispatchMap[exportOp];
-    layoutMap[exportOp] = deriveExportLayout(exportOp, dispatchOps);
+BindingLayoutAnalysis::BindingLayoutAnalysis(Operation *rootOp,
+                                             SymbolTable &symbolTable) {
+  // Finds all exports and dispatches within rootOp and groups them by
+  // executable export. We need to complete gathering all of the information
+  // before we derive the layouts.
+  auto getExportInfo = [&](Operation *exportOp) -> ExportInfo & {
+    auto &exportInfo = exportInfos[exportOp];
+    if (!exportInfo)
+      exportInfo = std::make_unique<ExportInfo>();
+    return *exportInfo;
+  };
+  rootOp->walk([&](Operation *op) {
+    TypeSwitch<Operation *>(op)
+        .Case<IREE::Stream::ExecutableExportOp>(
+            [&](auto exportOp) { (void)getExportInfo(exportOp); })
+        .Case<IREE::HAL::ExecutableExportOp>([&](auto exportOp) {
+          auto &exportInfo = getExportInfo(exportOp);
+          exportInfo.pipelineLayout =
+              assumeExportLayout(exportOp.getLayoutAttr());
+        })
+        .Case<IREE::Stream::CmdDispatchOp>([&](auto dispatchOp) {
+          dispatchOp.forEachEntryPointAttr([&](SymbolRefAttr entryPointAttr) {
+            auto exportOp =
+                symbolTable.lookupNearestSymbolFrom(dispatchOp, entryPointAttr);
+            auto &exportInfo = getExportInfo(exportOp);
+            exportInfo.dispatchOps.push_back(dispatchOp);
+          });
+        })
+        .Default([](auto op) {});
   });
-  return layoutMap;
+
+  // Derive the layouts for each export op.
+  for (auto &it : exportInfos) {
+    TypeSwitch<Operation *>(it.first)
+        .Case<IREE::Stream::ExecutableExportOp>([&](auto exportOp) {
+          it.second->pipelineLayout =
+              deriveStreamExportLayout(exportOp, it.second->dispatchOps);
+        })
+        .Default([&](auto op) {});
+  }
 }
 
-BindingLayoutAnalysis::BindingLayoutAnalysis(Operation *rootOp) {
-  exportDispatches = findAllDispatchSites(rootOp);
-  exportLayouts = deriveExportLayouts(rootOp, exportDispatches);
+bool BindingLayoutAnalysis::hasDispatches() const {
+  for (auto &it : exportInfos) {
+    if (!it.second->dispatchOps.empty()) {
+      return true; // found at least one dispatch
+    }
+  }
+  return false;
 }
 
-SmallVector<IREE::Stream::CmdDispatchOp>
-BindingLayoutAnalysis::getExportDispatches(
-    IREE::Stream::ExecutableExportOp exportOp) const {
-  auto it = exportDispatches.find(exportOp);
-  if (it == exportDispatches.end()) return {};  // no dispatches
-  return it->second;
+ArrayRef<IREE::Stream::CmdDispatchOp>
+BindingLayoutAnalysis::getExportDispatches(Operation *exportOp) const {
+  auto it = exportInfos.find(exportOp);
+  if (it == exportInfos.end())
+    return {}; // not analyzed
+  return it->second.get()->dispatchOps;
 }
 
-const PipelineLayout &BindingLayoutAnalysis::getPipelineLayout(
-    IREE::Stream::ExecutableExportOp exportOp) const {
-  auto it = exportLayouts.find(exportOp);
-  assert(it != exportLayouts.end() && "unanalyzed export");
-  return it->second;
+const PipelineLayout &
+BindingLayoutAnalysis::getPipelineLayout(Operation *exportOp) const {
+  auto it = exportInfos.find(exportOp);
+  assert(it != exportInfos.end() && "unanalyzed export");
+  return it->second.get()->pipelineLayout;
 }
 
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL

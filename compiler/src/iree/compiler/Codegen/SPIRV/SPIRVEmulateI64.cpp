@@ -11,9 +11,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
-#include "iree/compiler/Codegen/SPIRV/Utils.h"
+#include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
+#include "iree/compiler/Codegen/SPIRV/Passes.h"
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/SmallVector.h"
@@ -23,7 +23,7 @@
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/WideIntEmulationConverter.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -35,32 +35,35 @@
 
 #define DEBUG_TYPE "iree-spirv-emulate-i64"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_SPIRVEMULATEI64PASS
+#include "iree/compiler/Codegen/SPIRV/Passes.h.inc"
+
 namespace {
 
 //===----------------------------------------------------------------------===//
 // Conversion patterns
 //===----------------------------------------------------------------------===//
+
 struct ConvertHalInterfaceBindingSubspan final
     : OpConversionPattern<IREE::HAL::InterfaceBindingSubspanOp> {
   using OpConversionPattern::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(
-      IREE::HAL::InterfaceBindingSubspanOp op, OpAdaptor adaptor,
-      ConversionPatternRewriter &rewriter) const override {
+  LogicalResult
+  matchAndRewrite(IREE::HAL::InterfaceBindingSubspanOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Type newResultTy = getTypeConverter()->convertType(op.getType());
     if (!newResultTy)
       return rewriter.notifyMatchFailure(
           op->getLoc(),
-          llvm::formatv("failed to legalize memref type: {0}", op.getType()));
+          llvm::formatv("failed to legalize memref type: {}", op.getType()));
 
     auto newOp =
         rewriter.replaceOpWithNewOp<IREE::HAL::InterfaceBindingSubspanOp>(
-            op, newResultTy, adaptor.getSet(), adaptor.getBinding(),
-            adaptor.getDescriptorType(), adaptor.getByteOffset(),
-            adaptor.getDynamicDims(), adaptor.getAlignmentAttr(),
-            adaptor.getDescriptorFlagsAttr());
+            op, newResultTy, adaptor.getLayout(), adaptor.getBinding(),
+            adaptor.getByteOffset(), adaptor.getDynamicDims(),
+            adaptor.getAlignmentAttr(), adaptor.getDescriptorFlagsAttr());
     LLVM_DEBUG(llvm::dbgs()
                << "WideIntegerEmulation: new op: " << newOp << "\n");
     (void)newOp;
@@ -74,10 +77,12 @@ struct ConvertHalInterfaceBindingSubspan final
 
 // Tries to flatten `type` to a 1-D vector type. Returns `nullptr` on failure.
 static VectorType flattenVectorType(Type type) {
-  auto vecTy = type.dyn_cast<VectorType>();
-  if (!vecTy) return nullptr;
+  auto vecTy = llvm::dyn_cast<VectorType>(type);
+  if (!vecTy)
+    return nullptr;
 
-  if (vecTy.isScalable() || vecTy.getRank() <= 1) return nullptr;
+  if (vecTy.isScalable() || vecTy.getRank() <= 1)
+    return nullptr;
 
   int64_t totalElements = vecTy.getNumElements();
   return VectorType::get(llvm::ArrayRef(totalElements), vecTy.getElementType());
@@ -102,7 +107,8 @@ struct FlattenElementwisePattern final : RewritePattern {
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    if (!OpTrait::hasElementwiseMappableTraits(op)) return failure();
+    if (!OpTrait::hasElementwiseMappableTraits(op))
+      return failure();
 
     auto newResultTypes = llvm::to_vector_of<Type, 2>(
         llvm::map_range(op->getResultTypes(), flattenVectorType));
@@ -115,7 +121,8 @@ struct FlattenElementwisePattern final : RewritePattern {
     auto operands = llvm::to_vector_of<Value, 2>(op->getOperands());
     for (Value &operand : operands) {
       VectorType newOperandTy = flattenVectorType(operand.getType());
-      if (!newOperandTy) return failure();
+      if (!newOperandTy)
+        return failure();
 
       operand = rewriter.createOrFold<vector::ShapeCastOp>(loc, newOperandTy,
                                                            operand);
@@ -140,17 +147,18 @@ struct FlattenElementwisePattern final : RewritePattern {
 // Helper functions
 //===----------------------------------------------------------------------===//
 
-static void populateIreeI64EmulationPatterns(
-    arith::WideIntEmulationConverter &converter, RewritePatternSet &patterns) {
+static void
+populateIreeI64EmulationPatterns(arith::WideIntEmulationConverter &converter,
+                                 RewritePatternSet &patterns) {
   patterns.add<ConvertHalInterfaceBindingSubspan>(converter,
                                                   patterns.getContext());
 }
 
-static bool supportsI64(ModuleOp op) {
-  spirv::TargetEnvAttr attr = getSPIRVTargetEnvAttr(op);
-  assert(attr && "Not a valid spirv module");
-  spirv::TargetEnv env(attr);
-  return env.allows(spirv::Capability::Int64);
+static bool supportsI64(FunctionOpInterface op) {
+  IREE::GPU::TargetAttr attr = getGPUTargetAttr(op);
+  assert(attr && "Missing GPU target");
+  return IREE::GPU::bitEnumContainsAll(attr.getWgp().getCompute().getValue(),
+                                       IREE::GPU::ComputeBitwidths::Int64);
 }
 
 //===----------------------------------------------------------------------===//
@@ -158,14 +166,15 @@ static bool supportsI64(ModuleOp op) {
 //===----------------------------------------------------------------------===//
 
 struct SPIRVEmulateI64Pass final
-    : public SPIRVEmulateI64Base<SPIRVEmulateI64Pass> {
+    : impl::SPIRVEmulateI64PassBase<SPIRVEmulateI64Pass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<vector::VectorDialect>();
   }
 
   void runOnOperation() override {
-    ModuleOp op = getOperation();
-    if (supportsI64(op)) return;
+    auto op = getOperation();
+    if (supportsI64(op))
+      return;
 
     arith::WideIntEmulationConverter typeConverter(32);
     memref::populateMemRefWideIntEmulationConversions(typeConverter);
@@ -210,21 +219,11 @@ struct SPIRVEmulateI64Pass final
       vector::InsertStridedSliceOp::getCanonicalizationPatterns(patterns, ctx);
       vector::ShapeCastOp::getCanonicalizationPatterns(patterns, ctx);
 
-      if (failed(applyPatternsAndFoldGreedily(op, std::move(patterns))))
+      if (failed(applyPatternsGreedily(op, std::move(patterns))))
         return signalPassFailure();
     }
   }
 };
 
-}  // namespace
-
-//===----------------------------------------------------------------------===//
-// Public interface
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<OperationPass<ModuleOp>> createSPIRVEmulateI64Pass() {
-  return std::make_unique<SPIRVEmulateI64Pass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

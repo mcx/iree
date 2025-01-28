@@ -6,19 +6,21 @@
 
 #include "iree/compiler/Codegen/Utils/LinkingUtils.h"
 
-#include "llvm/ADT/StringExtras.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Utils/EquivalenceUtils.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/TypeUtilities.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
-SetVector<IREE::HAL::ExecutableTargetAttr> gatherExecutableTargets(
-    ArrayRef<IREE::HAL::ExecutableOp> executableOps) {
+SetVector<IREE::HAL::ExecutableTargetAttr>
+gatherExecutableTargets(ArrayRef<IREE::HAL::ExecutableOp> executableOps) {
   SetVector<IREE::HAL::ExecutableTargetAttr> result;
   for (auto executableOp : executableOps) {
-    auto variantOps = llvm::to_vector<4>(
-        executableOp.getOps<IREE::HAL::ExecutableVariantOp>());
+    auto variantOps =
+        llvm::to_vector(executableOp.getOps<IREE::HAL::ExecutableVariantOp>());
     for (auto variantOp : variantOps) {
       result.insert(variantOp.getTarget());
     }
@@ -26,12 +28,27 @@ SetVector<IREE::HAL::ExecutableTargetAttr> gatherExecutableTargets(
   return result;
 }
 
+SmallVector<IREE::HAL::ExecutableOp>
+gatherExecutablesForTarget(mlir::ModuleOp moduleOp, StringRef targetName) {
+  SmallVector<IREE::HAL::ExecutableOp> result;
+  for (auto executableOp : moduleOp.getOps<IREE::HAL::ExecutableOp>()) {
+    if (llvm::any_of(executableOp.getOps<IREE::HAL::ExecutableVariantOp>(),
+                     [&](IREE::HAL::ExecutableVariantOp variantOp) {
+                       return variantOp.getTarget().getBackend().getValue() ==
+                              targetName;
+                     })) {
+      result.push_back(executableOp);
+    }
+  }
+  return result;
+}
+
 // Renames |op| within |moduleOp| with a new name that is unique within both
 // |moduleOp| and |optionalSymbolTable| (if one is provided).
-static void renameWithDisambiguatedName(
-    Operation *op, Operation *moduleOp,
-    DenseMap<StringRef, Operation *> &targetSymbolMap,
-    SymbolTable *optionalSymbolTable) {
+static void
+renameWithDisambiguatedName(Operation *op, Operation *moduleOp,
+                            DenseMap<StringRef, Operation *> &targetSymbolMap,
+                            SymbolTable *optionalSymbolTable) {
   StringRef originalName = SymbolTable::getSymbolName(op).getValue();
 
   // Iteratively try suffixes until we find one that isn't used.
@@ -39,7 +56,7 @@ static void renameWithDisambiguatedName(
   int uniqueingCounter = 0;
   do {
     disambiguatedName =
-        llvm::formatv("{0}_{1}", originalName, uniqueingCounter++).str();
+        llvm::formatv("{}_{}", originalName, uniqueingCounter++).str();
   } while (
       targetSymbolMap.lookup(disambiguatedName) ||
       (optionalSymbolTable && optionalSymbolTable->lookup(disambiguatedName)));
@@ -63,40 +80,45 @@ static void renameWithDisambiguatedName(
 //
 // Fails if a public symbol in |sourceModuleOp| conflicts with another public
 // symbol tracked in |targetSymbolMap|.
-static LogicalResult mergeModuleInto(
-    Operation *sourceModuleOp, Operation *targetModuleOp,
-    DenseMap<StringRef, Operation *> &targetSymbolMap) {
+LogicalResult
+mergeModuleInto(Operation *sourceModuleOp, Operation *targetModuleOp,
+                DenseMap<StringRef, Operation *> &targetSymbolMap,
+                std::function<bool(mlir::Operation *op)> canRenameSymbol) {
   auto &sourceBlock = sourceModuleOp->getRegion(0).front();
   auto &targetBlock = targetModuleOp->getRegion(0).front();
   SymbolTable sourceSymbolTable(sourceModuleOp);
-  auto allOps = llvm::to_vector<8>(
-      llvm::map_range(sourceBlock, [&](Operation &op) { return &op; }));
+  auto allOps =
+      llvm::map_to_vector<8>(sourceBlock, [&](Operation &op) { return &op; });
 
-  for (auto &op : allOps) {
-    if (op->hasTrait<OpTrait::IsTerminator>()) continue;
-    if (auto symbolOp = dyn_cast<SymbolOpInterface>(op)) {
+  for (auto &sourceOp : allOps) {
+    if (sourceOp->hasTrait<OpTrait::IsTerminator>())
+      continue;
+    if (auto symbolOp = dyn_cast<SymbolOpInterface>(sourceOp)) {
       auto symbolName = symbolOp.getName();
 
       // Resolve symbol name conflicts.
       if (auto targetOp = targetSymbolMap[symbolName]) {
-        if (symbolOp.getVisibility() == SymbolTable::Visibility::Private) {
-          // Private symbols can be safely folded into duplicates or renamed.
-          if (OperationEquivalence::isEquivalentTo(
-                  targetOp, op, OperationEquivalence::exactValueMatch,
-                  /*markEquivalent=*/nullptr,
-                  OperationEquivalence::Flags::IgnoreLocations)) {
-            // Optimization: skip over duplicate private symbols.
-            // We could let CSE do this later, but we may as well check here.
-            continue;
-          } else {
-            // Preserve the op but give it a unique name.
-            renameWithDisambiguatedName(op, sourceModuleOp, targetSymbolMap,
-                                        &sourceSymbolTable);
-          }
+        if (OperationEquivalence::isEquivalentTo(
+                targetOp, sourceOp, OperationEquivalence::exactValueMatch,
+                /*markEquivalent=*/nullptr,
+                OperationEquivalence::Flags::IgnoreLocations)) {
+          // If the two ops are identical then we can ignore the source op and
+          // use the existing target op.
+          continue;
+        }
+        if (canRenameSymbol(symbolOp)) {
+          // Since the source symbol is private we can rename it as all uses
+          // are known to be local to the source module.
+          renameWithDisambiguatedName(sourceOp, sourceModuleOp, targetSymbolMap,
+                                      &sourceSymbolTable);
         } else {
           // The source symbol has 'nested' or 'public' visibility.
-          if (SymbolTable::getSymbolVisibility(targetOp) !=
-              SymbolTable::Visibility::Private) {
+          if (canRenameSymbol(targetOp)) {
+            // Keep the original name for our new op, rename the target op.
+            renameWithDisambiguatedName(targetOp, targetModuleOp,
+                                        targetSymbolMap,
+                                        /*optionalSymbolTable=*/nullptr);
+          } else {
             // Oops! Both symbols are public and we can't safely rename either.
             // If you hit this with ops that you think are safe to rename, mark
             // them private.
@@ -105,23 +127,19 @@ static LogicalResult mergeModuleInto(
             // conflicting symbol names. We think such conflicts will be better
             // fixed in other ways, so we'll emit an error until we find a case
             // where that isn't true.
-            return op->emitError()
+            return sourceOp->emitError()
                    << "multiple public symbols with the name: " << symbolName;
-          } else {
-            // Keep the original name for our new op, rename the target op.
-            renameWithDisambiguatedName(targetOp, targetModuleOp,
-                                        targetSymbolMap,
-                                        /*optionalSymbolTable=*/nullptr);
           }
         }
       }
-      targetSymbolMap[SymbolTable::getSymbolName(op).getValue()] = op;
+      targetSymbolMap[SymbolTable::getSymbolName(sourceOp).getValue()] =
+          sourceOp;
     }
     if (!targetBlock.empty() &&
         targetBlock.back().hasTrait<OpTrait::IsTerminator>()) {
-      op->moveBefore(&targetBlock.back());
+      sourceOp->moveBefore(&targetBlock.back());
     } else {
-      op->moveBefore(&targetBlock, targetBlock.end());
+      sourceOp->moveBefore(&targetBlock, targetBlock.end());
     }
   }
 
@@ -146,29 +164,32 @@ struct SymbolReplacements {
 // `@new_executable::@old_export` and an export update would then not match the
 // new/old mismatched ref. This means we have to do three walks over the entire
 // module in order to do the replacements; not great.
-static void replaceEntryPointUses(
-    mlir::ModuleOp moduleOp, const SymbolReplacements &symbolReplacements) {
+static void
+replaceEntryPointUses(mlir::ModuleOp moduleOp,
+                      const SymbolReplacements &symbolReplacements) {
   auto replaceSymbolRefs = [](Operation *rootOp,
                               const DenseMap<Attribute, Attribute> &map) {
     auto allUses = SymbolTable::getSymbolUses(rootOp);
-    if (!allUses) return;
+    if (!allUses)
+      return;
     for (auto use : *allUses) {
       auto oldAttr = use.getSymbolRef();
       auto newAttr = map.lookup(oldAttr);
-      if (!newAttr) continue;
+      if (!newAttr)
+        continue;
       auto newDict = use.getUser()->getAttrDictionary().replace(
           [&](Attribute attr) -> std::pair<Attribute, WalkResult> {
             if (attr == oldAttr) {
               // Found old->new replacement.
               return {newAttr, WalkResult::skip()};
-            } else if (attr.isa<SymbolRefAttr>()) {
+            } else if (llvm::isa<SymbolRefAttr>(attr)) {
               // Don't recurse into symbol refs - we only want to match roots.
               return {attr, WalkResult::skip()};
             }
             // Non-symbol ref attr.
             return {attr, WalkResult::advance()};
           });
-      use.getUser()->setAttrs(newDict.cast<DictionaryAttr>());
+      use.getUser()->setAttrs(llvm::cast<DictionaryAttr>(newDict));
     }
   };
   replaceSymbolRefs(moduleOp, symbolReplacements.exportRefs);
@@ -183,21 +204,24 @@ static void replaceEntryPointUses(
 
 LogicalResult linkExecutablesInto(
     mlir::ModuleOp moduleOp,
-    ArrayRef<IREE::HAL::ExecutableOp> sourceExecutableOps,
+    SmallVectorImpl<IREE::HAL::ExecutableOp> &sourceExecutableOps,
     IREE::HAL::ExecutableOp linkedExecutableOp,
     IREE::HAL::ExecutableVariantOp linkedTargetOp,
-    std::function<Operation *(mlir::ModuleOp moduleOp)> getInnerModuleFn,
-    OpBuilder &builder) {
+    std::function<LogicalResult(mlir::ModuleOp sourceInnerModule,
+                                mlir::ModuleOp linkedInnerModule,
+                                DenseMap<StringRef, Operation *> &symbolMap)>
+        mergeInnerModuleFn) {
+  MLIRContext *context = linkedTargetOp.getContext();
   int nextEntryPointOrdinal = 0;
   DenseMap<StringRef, Operation *> targetSymbolMap;
   SymbolReplacements symbolReplacements;
 
   auto linkedTargetBuilder =
       OpBuilder::atBlockBegin(&linkedTargetOp.getBlock());
-  auto linkedModuleOp = getInnerModuleFn(linkedTargetOp.getInnerModule());
 
-  // Aggregation of all external objects specified on variants used.
+  // Aggregation of all external objects and sources specified on variants used.
   SetVector<Attribute> objectAttrs;
+  NamedAttrList linkedSourceAttrs;
 
   // Iterate over all source executable ops, linking as many as we can.
   for (auto sourceExecutableOp : sourceExecutableOps) {
@@ -205,87 +229,130 @@ LogicalResult linkExecutablesInto(
     symbolReplacements.executableRefs[SymbolRefAttr::get(sourceExecutableOp)] =
         SymbolRefAttr::get(linkedExecutableOp);
 
-    auto variantOps = llvm::to_vector<4>(
+    auto variantOps = llvm::to_vector(
         sourceExecutableOp.getOps<IREE::HAL::ExecutableVariantOp>());
     for (auto variantOp : variantOps) {
       // Only process compatible targets.
       // TODO(benvanik): allow for grouping when multi-versioning is supported?
       // We could, for example, link all aarch64 variants together and then
       // use function multi-versioning to let LLVM insert runtime switches.
-      if (variantOp.getTarget() != linkedTargetOp.getTarget()) continue;
+      if (variantOp.getTarget() != linkedTargetOp.getTarget()) {
+        continue;
+      }
 
       // Add any required object files to the set we will link in the target.
       if (auto objectsAttr = variantOp.getObjectsAttr()) {
         objectAttrs.insert(objectsAttr.begin(), objectsAttr.end());
       }
 
+      // Merge sources into the linked source listing.
+      if (auto sourcesAttr = variantOp.getSourcesAttr()) {
+        for (auto sourceAttr : sourcesAttr.getValue())
+          linkedSourceAttrs.set(sourceAttr.getName(), sourceAttr.getValue());
+      }
+
       // Remap variant refs.
       auto oldVariantRefAttr =
-          SymbolRefAttr::get(builder.getContext(), sourceExecutableOp.getName(),
+          SymbolRefAttr::get(context, sourceExecutableOp.getName(),
                              {SymbolRefAttr::get(variantOp)});
       auto newVariantRefAttr =
-          SymbolRefAttr::get(builder.getContext(), linkedExecutableOp.getName(),
+          SymbolRefAttr::get(context, linkedExecutableOp.getName(),
                              {SymbolRefAttr::get(linkedTargetOp)});
       symbolReplacements.variantRefs[oldVariantRefAttr] = newVariantRefAttr;
+
+      // Move the condition op too. We need to make sure all variant's condition
+      // op has the same content.
+      auto targetConditionOps =
+          linkedTargetOp.getOps<IREE::HAL::ExecutableConditionOp>();
+      if (auto sourceConditionOp = variantOp.getConditionOp()) {
+        if (targetConditionOps.empty()) {
+          sourceConditionOp->moveBefore(
+              &*linkedTargetBuilder.getInsertionPoint());
+        } else {
+          assert(llvm::hasSingleElement(targetConditionOps));
+          IREE::HAL::ExecutableConditionOp referenceOp =
+              *targetConditionOps.begin();
+          if (!isStructurallyEquivalentTo(*sourceConditionOp.getOperation(),
+                                          *referenceOp.getOperation())) {
+            return variantOp.emitError("contains incompatible condition op");
+          }
+        }
+      } else {
+        if (!targetConditionOps.empty()) {
+          return variantOp.emitError("should contain a condition op");
+        }
+      }
 
       // Move any constant blocks that need to be preserved for future host
       // translation. There may be duplicates provided but they'll be cleaned
       // up in future passes.
-      for (auto constantBlockOp : llvm::make_early_inc_range(
-               variantOp.getOps<IREE::HAL::ExecutableConstantBlockOp>())) {
+      for (auto constantBlockOp :
+           llvm::make_early_inc_range(variantOp.getConstantBlockOps())) {
         constantBlockOp->moveBefore(&*linkedTargetBuilder.getInsertionPoint());
       }
 
       // Clone export ops and queue remapping ordinals and updating
       // symbol refs.
-      for (auto exportOp : variantOp.getOps<IREE::HAL::ExecutableExportOp>()) {
-        auto newExportOp =
-            linkedTargetBuilder.create<IREE::HAL::ExecutableExportOp>(
-                exportOp.getLoc(), exportOp.getSymNameAttr(),
-                builder.getIndexAttr(nextEntryPointOrdinal++),
-                exportOp.getLayout(), /*workgroup_size=*/ArrayAttr{},
-                /*subgroup_size=*/IntegerAttr{},
-                /*workgroup_local_memory=*/IntegerAttr{});
-        newExportOp->setDialectAttrs(exportOp->getDialectAttrs());
+      for (auto exportOp : variantOp.getExportOps()) {
+        auto newExportOp = cast<IREE::HAL::ExecutableExportOp>(
+            linkedTargetBuilder.clone(*exportOp));
+        newExportOp.setOrdinalAttr(
+            linkedTargetBuilder.getIndexAttr(nextEntryPointOrdinal++));
 
         // Add to replacement table for fixing up dispatch calls referencing
         // this export.
         auto oldExportRefAttr = SymbolRefAttr::get(
-            builder.getContext(), sourceExecutableOp.getName(),
+            context, sourceExecutableOp.getName(),
             {SymbolRefAttr::get(variantOp), SymbolRefAttr::get(exportOp)});
-        auto newExportRefAttr = SymbolRefAttr::get(
-            builder.getContext(), linkedExecutableOp.getName(),
-            {SymbolRefAttr::get(linkedTargetOp),
-             SymbolRefAttr::get(newExportOp)});
+        auto newExportRefAttr =
+            SymbolRefAttr::get(context, linkedExecutableOp.getName(),
+                               {SymbolRefAttr::get(linkedTargetOp),
+                                SymbolRefAttr::get(newExportOp)});
         symbolReplacements.exportRefs[oldExportRefAttr] = newExportRefAttr;
       }
 
       // Merge the existing module into the new linked module op.
-      auto sourceModuleOp = getInnerModuleFn(variantOp.getInnerModule());
-      if (failed(mergeModuleInto(sourceModuleOp, linkedModuleOp,
-                                 targetSymbolMap))) {
+      if (failed(mergeInnerModuleFn(variantOp.getInnerModule(),
+                                    linkedTargetOp.getInnerModule(),
+                                    targetSymbolMap))) {
         return failure();
       }
 
       variantOp.erase();
     }
+  }
 
-    if (sourceExecutableOp.getOps<IREE::HAL::ExecutableVariantOp>().empty()) {
-      sourceExecutableOp.erase();
+  // Retain only non-empty source executables. This is necessary to make sure
+  // when we scan the source executable list multiple times, we don't access
+  // destroyed ones so to avoid data structure corruption.
+  int retainSize = 0;
+  for (int i = 0, e = sourceExecutableOps.size(); i < e; ++i) {
+    IREE::HAL::ExecutableOp executable = sourceExecutableOps[i];
+    if (executable.getOps<IREE::HAL::ExecutableVariantOp>().empty()) {
+      executable.erase();
+    } else {
+      sourceExecutableOps[retainSize++] = executable;
     }
   }
+  sourceExecutableOps.resize(retainSize);
 
   // Attach object files from source variants.
   if (!objectAttrs.empty()) {
     linkedTargetOp.setObjectsAttr(
-        builder.getArrayAttr(objectAttrs.takeVector()));
+        linkedTargetBuilder.getArrayAttr(objectAttrs.takeVector()));
+  }
+
+  // Attach all source files from the source variants.
+  if (!linkedSourceAttrs.empty()) {
+    linkedTargetOp.setSourcesAttr(
+        linkedTargetBuilder.getDictionaryAttr(linkedSourceAttrs));
   }
 
   // Update references to @executable::@target::@entry symbols.
   replaceEntryPointUses(moduleOp, symbolReplacements);
 
   // Remove if we didn't add anything.
-  if (linkedTargetOp.getOps<IREE::HAL::ExecutableExportOp>().empty()) {
+  if (linkedTargetOp.getExportOps().empty()) {
     linkedTargetOp.erase();
     linkedExecutableOp.erase();
   }
@@ -293,5 +360,4 @@ LogicalResult linkExecutablesInto(
   return success();
 }
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler

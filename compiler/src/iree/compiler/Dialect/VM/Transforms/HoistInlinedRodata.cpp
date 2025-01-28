@@ -16,15 +16,12 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 class HoistInlinedRodataPass
     : public PassWrapper<HoistInlinedRodataPass,
                          OperationPass<IREE::VM::ModuleOp>> {
- public:
+public:
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::VM::VMDialect>();
   }
@@ -71,7 +68,7 @@ class HoistInlinedRodataPass
     }
   }
 
- private:
+private:
   Operation *findParentContainer(IREE::VM::RodataInlineOp inlineOp) {
     if (auto parentOp = inlineOp->getParentOfType<IREE::VM::InitializerOp>()) {
       return parentOp;
@@ -111,7 +108,4 @@ createHoistInlinedRodataPass() {
 
 static PassRegistration<HoistInlinedRodataPass> pass;
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM

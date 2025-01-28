@@ -8,45 +8,26 @@
 #define IREE_COMPILER_DIALECT_VM_CONVERSION_VMTOEMITC_EMITCTYPECONVERTER_H_
 
 #include "iree/compiler/Dialect/VM/Conversion/VMToEmitC/VMAnalysis.h"
+#include "iree/compiler/Dialect/VM/IR/VMOps.h"
 #include "iree/compiler/Dialect/VM/IR/VMTypes.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace VM {
+namespace mlir::iree_compiler::IREE::VM {
 
 class EmitCTypeConverter : public mlir::TypeConverter {
- public:
-  EmitCTypeConverter();
-  FailureOr<std::reference_wrapper<VMAnalysis>> lookupAnalysis(
-      mlir::func::FuncOp &funcOp) {
-    return lookupAnalysis(funcOp.getOperation());
-  }
-  FailureOr<std::reference_wrapper<VMAnalysis>> lookupAnalysis(
-      IREE::VM::FuncOp &funcOp) {
-    return lookupAnalysis(funcOp.getOperation());
-  }
-  Optional<Value> materializeRef(Value ref);
+public:
+  EmitCTypeConverter(ModuleOp module);
 
   // This is the same as convertType, but returns `iree_vm_ref_t` rather than a
   // pointer to it for `vm.ref` types.
-  Type convertTypeAsNonPointer(Type type);
-  Type convertTypeAsPointer(Type type);
-  emitc::OpaqueType convertTypeAsCType(Type type);
+  Type convertTypeAsNonPointer(Type type) const;
+  emitc::PointerType convertTypeAsPointer(Type type) const;
+  emitc::OpaqueType convertTypeAsCType(Type type) const;
 
-  SetVector<Operation *> sourceMaterializations;
-  VMAnalysisCache analysisCache;
-
- private:
-  FailureOr<std::reference_wrapper<VMAnalysis>> lookupAnalysis(Operation *op);
+  mutable ModuleAnalysis analysis;
 };
 
-}  // namespace VM
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::VM
 
-#endif  // IREE_COMPILER_DIALECT_VM_CONVERSION_VMTOEMITC_EMITCTYPECONVERTER_H_
+#endif // IREE_COMPILER_DIALECT_VM_CONVERSION_VMTOEMITC_EMITCTYPECONVERTER_H_

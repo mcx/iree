@@ -11,13 +11,10 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Flow {
+namespace mlir::iree_compiler::IREE::Flow {
 
 class FlowDialect : public Dialect {
- public:
+public:
   explicit FlowDialect(MLIRContext *context);
   static StringRef getDialectNamespace() { return "flow"; }
 
@@ -35,14 +32,11 @@ class FlowDialect : public Dialect {
            op->getDialect()->getNamespace() == getDialectNamespace();
   }
 
- private:
+private:
   void registerAttributes();
   void registerTypes();
 };
 
-}  // namespace Flow
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Flow
 
-#endif  // IREE_COMPILER_DIALECT_FLOW_IR_FLOWDIALECT_H_
+#endif // IREE_COMPILER_DIALECT_FLOW_IR_FLOWDIALECT_H_

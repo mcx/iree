@@ -12,15 +12,14 @@
 
 #include "iree/base/internal/arena.h"
 #include "iree/base/internal/cpu.h"
-#include "iree/base/tracing.h"
 #include "iree/hal/drivers/local_sync/sync_event.h"
 #include "iree/hal/drivers/local_sync/sync_semaphore.h"
 #include "iree/hal/local/executable_environment.h"
 #include "iree/hal/local/inline_command_buffer.h"
 #include "iree/hal/local/local_executable_cache.h"
-#include "iree/hal/local/local_pipeline_layout.h"
-#include "iree/hal/utils/buffer_transfer.h"
 #include "iree/hal/utils/deferred_command_buffer.h"
+#include "iree/hal/utils/file_registry.h"
+#include "iree/hal/utils/file_transfer.h"
 
 typedef struct iree_hal_sync_device_t {
   iree_hal_resource_t resource;
@@ -28,6 +27,9 @@ typedef struct iree_hal_sync_device_t {
 
   iree_allocator_t host_allocator;
   iree_hal_allocator_t* device_allocator;
+
+  // Optional provider used for creating/configuring collective channels.
+  iree_hal_channel_provider_t* channel_provider;
 
   // Block pool used for command buffers with a larger block size (as command
   // buffers can contain inlined data uploads).
@@ -126,8 +128,12 @@ static void iree_hal_sync_device_destroy(iree_hal_device_t* base_device) {
   for (iree_host_size_t i = 0; i < device->loader_count; ++i) {
     iree_hal_executable_loader_release(device->loaders[i]);
   }
+
   iree_hal_allocator_release(device->device_allocator);
+  iree_hal_channel_provider_release(device->channel_provider);
+
   iree_arena_block_pool_deinitialize(&device->large_block_pool);
+
   iree_allocator_free(host_allocator, device);
 
   IREE_TRACE_ZONE_END(z0);
@@ -159,6 +165,14 @@ static void iree_hal_sync_replace_device_allocator(
   device->device_allocator = new_allocator;
 }
 
+static void iree_hal_sync_replace_channel_provider(
+    iree_hal_device_t* base_device, iree_hal_channel_provider_t* new_provider) {
+  iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
+  iree_hal_channel_provider_retain(new_provider);
+  iree_hal_channel_provider_release(device->channel_provider);
+  device->channel_provider = new_provider;
+}
+
 static iree_status_t iree_hal_sync_device_trim(iree_hal_device_t* base_device) {
   iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
   return iree_hal_allocator_trim(device->device_allocator);
@@ -170,6 +184,12 @@ static iree_status_t iree_hal_sync_device_query_i64(
   iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
   *out_value = 0;
 
+  if (iree_string_view_equal(category, IREE_SV("hal.device.id"))) {
+    *out_value =
+        iree_string_view_match_pattern(device->identifier, key) ? 1 : 0;
+    return iree_ok_status();
+  }
+
   if (iree_string_view_equal(category, IREE_SV("hal.executable.format"))) {
     *out_value =
         iree_hal_query_any_executable_loader_support(
@@ -177,7 +197,9 @@ static iree_status_t iree_hal_sync_device_query_i64(
             ? 1
             : 0;
     return iree_ok_status();
-  } else if (iree_string_view_equal(category, IREE_SV("hal.device"))) {
+  }
+
+  if (iree_string_view_equal(category, IREE_SV("hal.device"))) {
     if (iree_string_view_equal(key, IREE_SV("concurrency"))) {
       *out_value = 1;
       return iree_ok_status();
@@ -212,30 +234,23 @@ static iree_status_t iree_hal_sync_device_create_command_buffer(
   if (iree_all_bits_set(mode,
                         IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION)) {
     return iree_hal_inline_command_buffer_create(
-        base_device, mode, command_categories, queue_affinity, binding_capacity,
+        iree_hal_device_allocator(base_device), mode, command_categories,
+        queue_affinity, binding_capacity,
         iree_hal_device_host_allocator(base_device), out_command_buffer);
   } else {
     iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
     return iree_hal_deferred_command_buffer_create(
-        base_device, mode, command_categories, binding_capacity,
-        &device->large_block_pool, device->host_allocator, out_command_buffer);
+        iree_hal_device_allocator(base_device), mode, command_categories,
+        queue_affinity, binding_capacity, &device->large_block_pool,
+        device->host_allocator, out_command_buffer);
   }
 }
 
-static iree_status_t iree_hal_sync_device_create_descriptor_set_layout(
-    iree_hal_device_t* base_device,
-    iree_hal_descriptor_set_layout_flags_t flags,
-    iree_host_size_t binding_count,
-    const iree_hal_descriptor_set_layout_binding_t* bindings,
-    iree_hal_descriptor_set_layout_t** out_descriptor_set_layout) {
-  return iree_hal_local_descriptor_set_layout_create(
-      flags, binding_count, bindings,
-      iree_hal_device_host_allocator(base_device), out_descriptor_set_layout);
-}
-
 static iree_status_t iree_hal_sync_device_create_event(
-    iree_hal_device_t* base_device, iree_hal_event_t** out_event) {
-  return iree_hal_sync_event_create(iree_hal_device_host_allocator(base_device),
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_event_flags_t flags, iree_hal_event_t** out_event) {
+  return iree_hal_sync_event_create(queue_affinity, flags,
+                                    iree_hal_device_host_allocator(base_device),
                                     out_event);
 }
 
@@ -248,19 +263,18 @@ static iree_status_t iree_hal_sync_device_create_executable_cache(
       iree_hal_device_host_allocator(base_device), out_executable_cache);
 }
 
-static iree_status_t iree_hal_sync_device_create_pipeline_layout(
-    iree_hal_device_t* base_device, iree_host_size_t push_constants,
-    iree_host_size_t set_layout_count,
-    iree_hal_descriptor_set_layout_t* const* set_layouts,
-    iree_hal_pipeline_layout_t** out_pipeline_layout) {
-  return iree_hal_local_pipeline_layout_create(
-      push_constants, set_layout_count, set_layouts,
-      iree_hal_device_host_allocator(base_device), out_pipeline_layout);
+static iree_status_t iree_hal_sync_device_import_file(
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_memory_access_t access, iree_io_file_handle_t* handle,
+    iree_hal_external_file_flags_t flags, iree_hal_file_t** out_file) {
+  return iree_hal_file_from_handle(
+      iree_hal_device_allocator(base_device), queue_affinity, access, handle,
+      iree_hal_device_host_allocator(base_device), out_file);
 }
 
 static iree_status_t iree_hal_sync_device_create_semaphore(
     iree_hal_device_t* base_device, uint64_t initial_value,
-    iree_hal_semaphore_t** out_semaphore) {
+    iree_hal_semaphore_flags_t flags, iree_hal_semaphore_t** out_semaphore) {
   iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
   return iree_hal_sync_semaphore_create(&device->semaphore_state, initial_value,
                                         device->host_allocator, out_semaphore);
@@ -283,9 +297,9 @@ static iree_status_t iree_hal_sync_device_queue_alloca(
   // TODO(benvanik): queue-ordered allocations.
   IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_wait(wait_semaphore_list,
                                                     iree_infinite_timeout()));
-  IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
-      iree_hal_device_allocator(base_device), params, allocation_size,
-      iree_const_byte_span_empty(), out_buffer));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_allocator_allocate_buffer(iree_hal_device_allocator(base_device),
+                                         params, allocation_size, out_buffer));
   IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_signal(signal_semaphore_list));
   return iree_ok_status();
 }
@@ -301,55 +315,105 @@ static iree_status_t iree_hal_sync_device_queue_dealloca(
   return iree_ok_status();
 }
 
-static iree_status_t iree_hal_sync_device_apply_deferred_command_buffers(
-    iree_hal_sync_device_t* device, iree_host_size_t command_buffer_count,
-    iree_hal_command_buffer_t* const* command_buffers) {
-  // See if there are any deferred command buffers; this saves us work in cases
-  // of pure inline execution.
-  bool any_deferred = false;
-  for (iree_host_size_t i = 0; i < command_buffer_count && !any_deferred; ++i) {
-    any_deferred = iree_hal_deferred_command_buffer_isa(command_buffers[i]);
+static iree_status_t iree_hal_sync_device_queue_read(
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    const iree_hal_semaphore_list_t wait_semaphore_list,
+    const iree_hal_semaphore_list_t signal_semaphore_list,
+    iree_hal_file_t* source_file, uint64_t source_offset,
+    iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
+    iree_device_size_t length, iree_hal_read_flags_t flags) {
+  // TODO: expose streaming chunk count/size options.
+  iree_status_t loop_status = iree_ok_status();
+  iree_hal_file_transfer_options_t options = {
+      .loop = iree_loop_inline(&loop_status),
+      .chunk_count = IREE_HAL_FILE_TRANSFER_CHUNK_COUNT_DEFAULT,
+      .chunk_size = IREE_HAL_FILE_TRANSFER_CHUNK_SIZE_DEFAULT,
+  };
+  IREE_RETURN_IF_ERROR(iree_hal_device_queue_read_streaming(
+      base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list,
+      source_file, source_offset, target_buffer, target_offset, length, flags,
+      options));
+  return loop_status;
+}
+
+static iree_status_t iree_hal_sync_device_queue_write(
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    const iree_hal_semaphore_list_t wait_semaphore_list,
+    const iree_hal_semaphore_list_t signal_semaphore_list,
+    iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
+    iree_hal_file_t* target_file, uint64_t target_offset,
+    iree_device_size_t length, iree_hal_write_flags_t flags) {
+  // TODO: expose streaming chunk count/size options.
+  iree_status_t loop_status = iree_ok_status();
+  iree_hal_file_transfer_options_t options = {
+      .loop = iree_loop_inline(&loop_status),
+      .chunk_count = IREE_HAL_FILE_TRANSFER_CHUNK_COUNT_DEFAULT,
+      .chunk_size = IREE_HAL_FILE_TRANSFER_CHUNK_SIZE_DEFAULT,
+  };
+  IREE_RETURN_IF_ERROR(iree_hal_device_queue_write_streaming(
+      base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list,
+      source_buffer, source_offset, target_file, target_offset, length, flags,
+      options));
+  return loop_status;
+}
+
+static iree_status_t iree_hal_sync_device_apply_deferred_command_buffer(
+    iree_hal_sync_device_t* device, iree_hal_command_buffer_t* command_buffer,
+    iree_hal_buffer_binding_table_t binding_table) {
+  // If there were no deferred command buffers no-op this call - they've already
+  // been issued.
+  if (!command_buffer ||
+      !iree_hal_deferred_command_buffer_isa(command_buffer)) {
+    return iree_ok_status();
   }
-  if (!any_deferred) return iree_ok_status();
 
   // Stack allocate storage for an inline command buffer we'll use to replay
   // the deferred command buffers. We want to reset it between each apply so
   // that we don't get state carrying across.
+  iree_host_size_t storage_size = iree_hal_inline_command_buffer_size(
+      iree_hal_command_buffer_mode(command_buffer) |
+          IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION |
+          // NOTE: we need to validate if a binding table is provided as
+          // the bindings were not known when it was originally recorded.
+          (iree_hal_buffer_binding_table_is_empty(binding_table)
+               ? IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED
+               : 0),
+      /*binding_capacity=*/0);
   iree_byte_span_t storage =
-      iree_make_byte_span(iree_alloca(iree_hal_inline_command_buffer_size()),
-                          iree_hal_inline_command_buffer_size());
+      iree_make_byte_span(iree_alloca(storage_size), storage_size);
 
-  // NOTE: we ignore any inline command buffers that may be passed in as they've
-  // already executed during recording. The caller is probably in for a bad time
-  // if they mixed the two modes together!
-  for (iree_host_size_t i = 0; i < command_buffer_count; ++i) {
-    iree_hal_command_buffer_t* command_buffer = command_buffers[i];
-    if (iree_hal_deferred_command_buffer_isa(command_buffer)) {
-      iree_hal_command_buffer_t* inline_command_buffer = NULL;
-      IREE_RETURN_IF_ERROR(iree_hal_inline_command_buffer_initialize(
-          (iree_hal_device_t*)device,
-          iree_hal_command_buffer_mode(command_buffer) |
-              IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION,
-          IREE_HAL_COMMAND_CATEGORY_ANY, IREE_HAL_QUEUE_AFFINITY_ANY,
-          /*binding_capacity=*/0, device->host_allocator, storage,
-          &inline_command_buffer));
-      iree_status_t status = iree_hal_deferred_command_buffer_apply(
-          command_buffer, inline_command_buffer,
-          iree_hal_buffer_binding_table_empty());
-      iree_hal_inline_command_buffer_deinitialize(inline_command_buffer);
-      IREE_RETURN_IF_ERROR(status);
-    }
-  }
+  // NOTE: we run unvalidated as inline command buffers don't support
+  // binding tables and can be validated entirely while recording.
+  iree_hal_command_buffer_t* inline_command_buffer = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_inline_command_buffer_initialize(
+      device->device_allocator,
+      iree_hal_command_buffer_mode(command_buffer) |
+          IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION |
+          // NOTE: we need to validate if a binding table is provided as the
+          // bindings were not known when it was originally recorded.
+          (iree_hal_buffer_binding_table_is_empty(binding_table)
+               ? IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED
+               : 0),
+      iree_hal_command_buffer_allowed_categories(command_buffer),
+      IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*binding_capacity=*/0, device->host_allocator, storage,
+      &inline_command_buffer));
 
-  return iree_ok_status();
+  iree_status_t status = iree_hal_deferred_command_buffer_apply(
+      command_buffer, inline_command_buffer, binding_table);
+
+  iree_hal_inline_command_buffer_deinitialize(inline_command_buffer);
+  return status;
 }
 
 static iree_status_t iree_hal_sync_device_queue_execute(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    iree_host_size_t command_buffer_count,
-    iree_hal_command_buffer_t* const* command_buffers) {
+    iree_hal_command_buffer_t* command_buffer,
+    iree_hal_buffer_binding_table_t binding_table) {
   iree_hal_sync_device_t* device = iree_hal_sync_device_cast(base_device);
 
   // TODO(#4680): there is some better error handling here needed; we should
@@ -364,8 +428,8 @@ static iree_status_t iree_hal_sync_device_queue_execute(
 
   // Run all deferred command buffers - any we could have run inline we already
   // did during recording.
-  IREE_RETURN_IF_ERROR(iree_hal_sync_device_apply_deferred_command_buffers(
-      device, command_buffer_count, command_buffers));
+  IREE_RETURN_IF_ERROR(iree_hal_sync_device_apply_deferred_command_buffer(
+      device, command_buffer, binding_table));
 
   // Signal all semaphores now that batch work has completed.
   IREE_RETURN_IF_ERROR(iree_hal_sync_semaphore_multi_signal(
@@ -389,7 +453,7 @@ static iree_status_t iree_hal_sync_device_wait_semaphores(
 }
 
 static iree_status_t iree_hal_sync_device_profiling_begin(
-    iree_hal_device_t* device,
+    iree_hal_device_t* base_device,
     const iree_hal_device_profiling_options_t* options) {
   // Unimplemented (and that's ok).
   // We could hook in to vendor APIs (Intel/ARM/etc) or generic perf infra:
@@ -402,8 +466,14 @@ static iree_status_t iree_hal_sync_device_profiling_begin(
   return iree_ok_status();
 }
 
+static iree_status_t iree_hal_sync_device_profiling_flush(
+    iree_hal_device_t* base_device) {
+  // Unimplemented (and that's ok).
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_sync_device_profiling_end(
-    iree_hal_device_t* device) {
+    iree_hal_device_t* base_device) {
   // Unimplemented (and that's ok).
   return iree_ok_status();
 }
@@ -414,24 +484,28 @@ static const iree_hal_device_vtable_t iree_hal_sync_device_vtable = {
     .host_allocator = iree_hal_sync_device_host_allocator,
     .device_allocator = iree_hal_sync_device_allocator,
     .replace_device_allocator = iree_hal_sync_replace_device_allocator,
+    .replace_channel_provider = iree_hal_sync_replace_channel_provider,
     .trim = iree_hal_sync_device_trim,
     .query_i64 = iree_hal_sync_device_query_i64,
     .create_channel = iree_hal_sync_device_create_channel,
     .create_command_buffer = iree_hal_sync_device_create_command_buffer,
-    .create_descriptor_set_layout =
-        iree_hal_sync_device_create_descriptor_set_layout,
     .create_event = iree_hal_sync_device_create_event,
     .create_executable_cache = iree_hal_sync_device_create_executable_cache,
-    .create_pipeline_layout = iree_hal_sync_device_create_pipeline_layout,
+    .import_file = iree_hal_sync_device_import_file,
     .create_semaphore = iree_hal_sync_device_create_semaphore,
     .query_semaphore_compatibility =
         iree_hal_sync_device_query_semaphore_compatibility,
-    .transfer_range = iree_hal_device_transfer_mappable_range,
     .queue_alloca = iree_hal_sync_device_queue_alloca,
     .queue_dealloca = iree_hal_sync_device_queue_dealloca,
+    .queue_fill = iree_hal_device_queue_emulated_fill,
+    .queue_update = iree_hal_device_queue_emulated_update,
+    .queue_copy = iree_hal_device_queue_emulated_copy,
+    .queue_read = iree_hal_sync_device_queue_read,
+    .queue_write = iree_hal_sync_device_queue_write,
     .queue_execute = iree_hal_sync_device_queue_execute,
     .queue_flush = iree_hal_sync_device_queue_flush,
     .wait_semaphores = iree_hal_sync_device_wait_semaphores,
     .profiling_begin = iree_hal_sync_device_profiling_begin,
+    .profiling_flush = iree_hal_sync_device_profiling_flush,
     .profiling_end = iree_hal_sync_device_profiling_end,
 };

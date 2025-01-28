@@ -10,14 +10,13 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
 
 // Interface for encoding of VM operations within functions.
 // This base manages source map construction and vm.func walking while
 // subclasses provide actual emission.
 class VMFuncEncoder {
- public:
+public:
   virtual ~VMFuncEncoder() = default;
 
   // Begins encoding the contents of a block.
@@ -61,6 +60,11 @@ class VMFuncEncoder {
                                      Operation::operand_range operands,
                                      int successorIndex) = 0;
 
+  // Encodes a branch table.
+  virtual LogicalResult encodeBranchTable(SuccessorRange caseSuccessors,
+                                          OperandRangeRange caseOperands,
+                                          int baseSuccessorIndex) = 0;
+
   // Encodes an operand value (by reference).
   virtual LogicalResult encodeOperand(Value value, int ordinal) = 0;
 
@@ -74,7 +78,6 @@ class VMFuncEncoder {
   virtual LogicalResult encodeResults(Operation::result_range values) = 0;
 };
 
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler
 
-#endif  // IREE_COMPILER_DIALECT_VM_IR_VMFUNCENCODER_H_
+#endif // IREE_COMPILER_DIALECT_VM_IR_VMFUNCENCODER_H_

@@ -4,49 +4,40 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#ifndef IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_
-#define IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_
+#ifndef IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_H_
+#define IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_H_
 
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Support/LLVM.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
+namespace mlir::iree_compiler::IREE::HAL {
 
-struct DescriptorSetLayoutBinding {
+struct PipelineLayoutBinding {
   // Ordinal of the descriptor within its parent set layout.
-  unsigned ordinal;
+  unsigned ordinal = 0;
   // Storage type of the descriptor resource.
-  IREE::HAL::DescriptorType type;
+  IREE::HAL::DescriptorType type = IREE::HAL::DescriptorType::StorageBuffer;
   // Flags defining how the descriptor behaves.
-  IREE::HAL::DescriptorFlags flags;
+  IREE::HAL::DescriptorFlags flags = IREE::HAL::DescriptorFlags::None;
 };
 
-struct DescriptorSetLayout {
-  // Ordinal of the set within the parent pipeline layout.
-  unsigned ordinal;
-  // Usage of the descriptor set (such as whether it is persistent or push).
-  IREE::HAL::DescriptorSetLayoutFlags flags;
-  // Bindings within the layout. Ordinals may be sparse.
-  SmallVector<DescriptorSetLayoutBinding> bindings;
-};
-
-using PipelineResourceMap = SmallVector<std::pair<unsigned, unsigned>>;
+using PipelineResourceMap = SmallVector<unsigned>;
 
 struct PipelineLayout {
   // Total number of 32-bit push constants allocated. Not all dispatchable
   // functions using this layout will use all constants.
-  int64_t pushConstantCount;
-  // Sets bound in the layout. Ordinals may be sparse.
-  SmallVector<DescriptorSetLayout> setLayouts;
-  // Mapping of flattened source resource bindings into the descriptor sets.
-  // Matches 1:1 with the IREE::Stream::CmdDispatchOp::resources.
+  int64_t constantCount;
+  // Bindings within the layout. Ordinals may be sparse.
+  SmallVector<PipelineLayoutBinding> bindings;
+  // Mapping of flattened source resource bindings into the descriptor set
+  // bindings. Matches 1:1 with the IREE::Stream::CmdDispatchOp::resources.
   PipelineResourceMap resourceMap;
+  // Flags defining behavior of the pipeline.
+  IREE::HAL::PipelineLayoutFlags flags = IREE::HAL::PipelineLayoutFlags::None;
 
   void print(llvm::raw_ostream &os) const;
 };
@@ -58,32 +49,45 @@ struct PipelineLayout {
 //
 // NOTE: erasing dispatch ops will invalidate this analysis.
 class BindingLayoutAnalysis {
- public:
-  using ExportDispatchMap =
-      DenseMap<Operation *, SmallVector<IREE::Stream::CmdDispatchOp>>;
-  using ExportLayoutMap = DenseMap<Operation *, PipelineLayout>;
+public:
+  explicit BindingLayoutAnalysis(Operation *rootOp, SymbolTable &symbolTable);
 
-  explicit BindingLayoutAnalysis(Operation *rootOp);
+  // Whether there are any dispatches in the program.
+  bool hasDispatches() const;
 
   // Returns all of the dispatches to the given executable export.
-  SmallVector<IREE::Stream::CmdDispatchOp> getExportDispatches(
-      IREE::Stream::ExecutableExportOp exportOp) const;
+  ArrayRef<IREE::Stream::CmdDispatchOp>
+  getExportDispatches(IREE::Stream::ExecutableExportOp exportOp) const {
+    return getExportDispatches(exportOp.getOperation());
+  }
+  ArrayRef<IREE::Stream::CmdDispatchOp>
+  getExportDispatches(IREE::HAL::ExecutableExportOp exportOp) const {
+    return getExportDispatches(exportOp.getOperation());
+  }
 
   // Returns a layout used for the given executable export op.
-  const PipelineLayout &getPipelineLayout(
-      IREE::Stream::ExecutableExportOp exportOp) const;
+  const PipelineLayout &
+  getPipelineLayout(IREE::Stream::ExecutableExportOp exportOp) const {
+    return getPipelineLayout(exportOp.getOperation());
+  }
+  const PipelineLayout &
+  getPipelineLayout(IREE::HAL::ExecutableExportOp exportOp) const {
+    return getPipelineLayout(exportOp.getOperation());
+  }
 
- private:
-  // All dispatches to a particular executable IREE::Stream::ExecutableExportOp.
-  ExportDispatchMap exportDispatches;
-  // Pipeline layout for each IREE::Stream::ExecutableExportOp.
-  // Many of these may be duplicates.
-  ExportLayoutMap exportLayouts;
+private:
+  ArrayRef<IREE::Stream::CmdDispatchOp>
+  getExportDispatches(Operation *exportOp) const;
+  const PipelineLayout &getPipelineLayout(Operation *exportOp) const;
+
+  struct ExportInfo {
+    SmallVector<IREE::Stream::CmdDispatchOp> dispatchOps;
+    PipelineLayout pipelineLayout;
+  };
+  using ExportInfoMap = DenseMap<Operation *, std::unique_ptr<ExportInfo>>;
+  ExportInfoMap exportInfos;
 };
 
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL
 
-#endif  // IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_
+#endif // IREE_COMPILER_DIALECT_HAL_ANALYSIS_BINDINGLAYOUT_H_

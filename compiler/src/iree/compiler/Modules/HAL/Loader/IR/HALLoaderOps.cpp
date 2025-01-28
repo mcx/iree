@@ -18,11 +18,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeUtilities.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace HAL {
-namespace Loader {
+namespace mlir::iree_compiler::IREE::HAL::Loader {
 
 //===----------------------------------------------------------------------===//
 // custom<DispatchBindings>($binding_buffers,
@@ -109,13 +105,35 @@ void ExecutableLookupOp::getAsmResultNames(
   setNameFn(getResult(), "exe");
 }
 
-LogicalResult ExecutableLookupOp::verifySymbolUses(
-    SymbolTableCollection &symbolTable) {
+LogicalResult
+ExecutableLookupOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   Operation *op = getOperation();
   auto exportOp = symbolTable.lookupNearestSymbolFrom<IREE::HAL::ExecutableOp>(
       op, getExecutableAttr());
   if (!exportOp) {
     return op->emitOpError() << "undefined executable: " << getExecutable();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// hal_loader.executable.export.ordinal
+//===----------------------------------------------------------------------===//
+
+void ExecutableExportOrdinalOp::getAsmResultNames(
+    function_ref<void(Value, StringRef)> setNameFn) {
+  setNameFn(getResult(), "ordinal");
+}
+
+LogicalResult ExecutableExportOrdinalOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  Operation *op = getOperation();
+  auto exportOp =
+      symbolTable.lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
+          op, getEntryPointAttr());
+  if (!exportOp) {
+    return op->emitOpError()
+           << "undefined executable export: " << getEntryPointAttr();
   }
   return success();
 }
@@ -132,19 +150,6 @@ static LogicalResult verifyDispatchBindings(Operation *op, OperandRange buffers,
            << buffers.size() << "/" << offsets.size() << "/" << lengths.size();
   }
   return success();
-}
-
-LogicalResult ExecutableDispatchSymbolOp::verifySymbolUses(
-    SymbolTableCollection &symbolTable) {
-  Operation *op = getOperation();
-  auto exportOp =
-      symbolTable.lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
-          op, getEntryPoint());
-  if (!exportOp) {
-    return op->emitOpError() << "undefined entry point: " << getEntryPoint();
-  }
-  return verifyDispatchBindings(getOperation(), getBindingBuffers(),
-                                getBindingOffsets(), getBindingLengths());
 }
 
 LogicalResult ExecutableDispatchOp::verify() {
@@ -182,8 +187,9 @@ struct FoldBindingSubspansIntoDispatchOp
       bindingBuffers.push_back(subspanOp.getSource());
       bindingOffsets.push_back(newOffset);
     }
-    if (!didChangeAny) return failure();
-    rewriter.updateRootInPlace(op, [&]() {
+    if (!didChangeAny)
+      return failure();
+    rewriter.modifyOpInPlace(op, [&]() {
       op.getBindingBuffersMutable().assign(bindingBuffers);
       op.getBindingOffsetsMutable().assign(bindingOffsets);
     });
@@ -191,18 +197,14 @@ struct FoldBindingSubspansIntoDispatchOp
   }
 };
 
-}  // namespace
+} // namespace
 
 void ExecutableDispatchOp::getCanonicalizationPatterns(
     RewritePatternSet &results, MLIRContext *context) {
   results.insert<FoldBindingSubspansIntoDispatchOp>(context);
 }
 
-}  // namespace Loader
-}  // namespace HAL
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::HAL::Loader
 
 //===----------------------------------------------------------------------===//
 // TableGen definitions (intentionally last)

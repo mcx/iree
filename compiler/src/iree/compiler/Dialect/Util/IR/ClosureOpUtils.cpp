@@ -8,30 +8,25 @@
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
 
 //------------------------------------------------------------------------------
 // Closure optimization
 //------------------------------------------------------------------------------
 
 void excludeClosureOperandsAndResults(
-    SmallVector<Value, 4> &operandValues,
-    ArrayRef<unsigned> excludedOperandIndices,
-    SmallVector<Type, 4> &resultTypes,
+    SmallVector<Value> &operandValues,
+    ArrayRef<unsigned> excludedOperandIndices, SmallVector<Type> &resultTypes,
     ArrayRef<unsigned> excludedResultIndices) {
-  SmallVector<Value, 4> oldOperandValues = operandValues;
+  SmallVector<Value> oldOperandValues = operandValues;
   operandValues.clear();
   for (auto it : llvm::enumerate(oldOperandValues)) {
     if (!llvm::count(excludedOperandIndices, it.index())) {
       operandValues.push_back(it.value());
     }
   }
-  SmallVector<Type, 4> oldResultTypes = resultTypes;
+  SmallVector<Type> oldResultTypes = resultTypes;
   resultTypes.clear();
   for (auto it : llvm::enumerate(oldResultTypes)) {
     if (!llvm::count(excludedResultIndices, it.index())) {
@@ -41,21 +36,20 @@ void excludeClosureOperandsAndResults(
 }
 
 void excludeClosureOperandsAndResults(
-    SmallVector<Value, 4> &operandValues, SmallVector<Value, 4> &operandDims,
-    ArrayRef<unsigned> excludedOperandIndices,
-    SmallVector<Type, 4> &resultTypes, SmallVector<Value, 4> &resultDims,
-    ArrayRef<unsigned> excludedResultIndices) {
-  SmallVector<Value, 4> oldOperandValues = operandValues;
-  SmallVector<Value, 4> oldOperandDims = operandDims;
+    SmallVector<Value> &operandValues, SmallVector<Value> &operandDims,
+    ArrayRef<unsigned> excludedOperandIndices, SmallVector<Type> &resultTypes,
+    SmallVector<Value> &resultDims, ArrayRef<unsigned> excludedResultIndices) {
+  SmallVector<Value> oldOperandValues = operandValues;
+  SmallVector<Value> oldOperandDims = operandDims;
   operandValues.clear();
   operandDims.clear();
   auto remainingOperandDims = llvm::ArrayRef(oldOperandDims);
   for (auto it : llvm::enumerate(oldOperandValues)) {
     unsigned numDynamicDims = 0;
     auto type = it.value().getType();
-    if (auto shapedType = type.dyn_cast<ShapedType>()) {
+    if (auto shapedType = llvm::dyn_cast<ShapedType>(type)) {
       numDynamicDims = shapedType.getNumDynamicDims();
-    } else if (type.isa<IREE::Util::SizeAwareTypeInterface>()) {
+    } else if (llvm::isa<IREE::Util::SizeAwareTypeInterface>(type)) {
       numDynamicDims = 1;
     }
     if (!llvm::count(excludedOperandIndices, it.index())) {
@@ -67,17 +61,17 @@ void excludeClosureOperandsAndResults(
     remainingOperandDims = remainingOperandDims.drop_front(numDynamicDims);
   }
 
-  SmallVector<Type, 4> oldResultTypes = resultTypes;
-  SmallVector<Value, 4> oldResultDims = resultDims;
+  SmallVector<Type> oldResultTypes = resultTypes;
+  SmallVector<Value> oldResultDims = resultDims;
   resultTypes.clear();
   resultDims.clear();
   auto remainingResultDims = llvm::ArrayRef(oldResultDims);
   for (auto it : llvm::enumerate(oldResultTypes)) {
     unsigned numDynamicDims = 0;
     auto type = it.value();
-    if (auto shapedType = type.dyn_cast<ShapedType>()) {
+    if (auto shapedType = llvm::dyn_cast<ShapedType>(type)) {
       numDynamicDims = shapedType.getNumDynamicDims();
-    } else if (type.isa<IREE::Util::SizeAwareTypeInterface>()) {
+    } else if (llvm::isa<IREE::Util::SizeAwareTypeInterface>(type)) {
       numDynamicDims = 1;
     }
     if (!llvm::count(excludedResultIndices, it.index())) {
@@ -96,7 +90,7 @@ void eraseRegionResults(Region &region,
   for (auto &block : region.getBlocks()) {
     auto *terminatorOp = block.getTerminator();
     if (terminatorOp && terminatorOp->hasTrait<OpTrait::ReturnLike>()) {
-      llvm::SmallVector<Value, 4> newReturns;
+      llvm::SmallVector<Value> newReturns;
       for (auto it : llvm::enumerate(terminatorOp->getOperands())) {
         if (!llvm::count(excludedResultIndices, it.index())) {
           newReturns.push_back(it.value());
@@ -131,19 +125,17 @@ static bool isConstantInlinable(const ClosureOptimizationOptions &options,
 
   auto constantValueAttr = constantOp.getValue();
   auto constantType = constantOp.getType();
-  if (constantValueAttr.isa<SplatElementsAttr>()) {
+  if (llvm::isa<SplatElementsAttr>(constantValueAttr)) {
     // Splats are always small and can often have special handling when we
     // know they are a splat - which is why it's so important we inline them
     // here so we know when they are used that's the case.
     return true;
-  } else if (auto denseAttr = constantValueAttr.dyn_cast<DenseElementsAttr>()) {
+  } else if (auto attr = llvm::dyn_cast<ElementsAttr>(constantValueAttr)) {
     // Smallish constants are worth moving inside.
-    auto shapedType = constantType.cast<ShapedType>();
+    auto shapedType = llvm::cast<ShapedType>(constantType);
     uint64_t estimatedByteLength =
-        shapedType.getNumElements() *
-        getRoundedElementByteWidth(shapedType.getElementType());
-    return denseAttr.isSplat() ||
-           estimatedByteLength <= maxInlinedConstantBytes;
+        IREE::Util::getRoundedPhysicalStorageSize(shapedType);
+    return attr.isSplat() || estimatedByteLength <= maxInlinedConstantBytes;
   } else if (constantType.isIntOrIndexOrFloat()) {
     // Primitives can always go in.
     return true;
@@ -183,13 +175,15 @@ static void inlineClosureOperands(const ClosureOptimizationOptions &options,
   for (auto opArg : llvm::enumerate(closureOp.getClosureOperands())) {
     auto outerValue = opArg.value();
     auto *sourceOp = outerValue.getDefiningOp();
-    if (!sourceOp) continue;  // can't clone block arguments into closures
+    if (!sourceOp)
+      continue; // can't clone block arguments into closures
 
     // We cannot just simply inline and replace all users if this is an
     // argument that can be written; for example, the region might perform
     // work after loading a initial constant from the argument and then
     // write back.
-    if (!closureOp.getOperandAccess(opArg.index()).isReadOnly()) continue;
+    if (!closureOp.getOperandAccess(opArg.index()).isReadOnly())
+      continue;
 
     if (closureOp.canClosureContainOp(sourceOp) &&
         shouldInlineIntoClosure(options, outerValue)) {
@@ -226,9 +220,9 @@ LogicalResult optimizeClosureLikeOp(const ClosureOptimizationOptions &options,
   inlineClosureOperands(options, closureOp, entryBlock, rewriter);
 
   // Build data structure for unused operand elision.
-  SmallVector<unsigned, 4> elidedOperands;
+  SmallVector<unsigned> elidedOperands;
   llvm::SmallMapVector<Value, BlockArgument, 8> argToBlockMap;
-  SmallVector<llvm::Optional<BlockArgument>, 8> blockArgReplacements(
+  SmallVector<std::optional<BlockArgument>, 8> blockArgReplacements(
       entryBlock.getNumArguments());
   for (auto opArg : llvm::enumerate(closureOp.getClosureOperands())) {
     auto blockArg = entryBlock.getArgument(opArg.index());
@@ -250,8 +244,8 @@ LogicalResult optimizeClosureLikeOp(const ClosureOptimizationOptions &options,
   }
 
   // Check for unused results.
-  SmallVector<Value, 4> preservedResults;
-  SmallVector<unsigned, 4> elidedResults;
+  SmallVector<Value> preservedResults;
+  SmallVector<unsigned> elidedResults;
   for (auto result : llvm::enumerate(closureOp.getClosureResults())) {
     // You can drop a result if the use is empty and not read via a tie.
     auto access = closureOp.getResultAccess(result.index());
@@ -320,7 +314,4 @@ LogicalResult optimizeClosureLikeOp(const ClosureOptimizationOptions &options,
   return success();
 }
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

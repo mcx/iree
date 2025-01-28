@@ -12,7 +12,6 @@
 
 #include "iree/base/internal/atomics.h"
 #include "iree/base/internal/debugging.h"
-#include "iree/base/tracing.h"
 
 struct iree_vm_context_t {
   iree_atomic_ref_count_t ref_count;
@@ -40,6 +39,11 @@ struct iree_vm_context_t {
   } list;
 };
 
+static iree_status_t iree_vm_context_resolve_function_impl(
+    const iree_vm_context_t* context, iree_string_view_t full_name,
+    const iree_vm_function_signature_t* expected_signature,
+    iree_vm_function_t* out_function);
+
 static void iree_vm_context_destroy(iree_vm_context_t* context);
 
 // Allocates a process-unique ID for a context to use.
@@ -47,8 +51,8 @@ static iree_vm_context_id_t iree_vm_context_allocate_id(void) {
   static iree_atomic_int32_t next_context_id = IREE_ATOMIC_VAR_INIT(1);
   // relaxed because we only care about atomic increments, not ordering w.r.t.
   // other memory accesses.
-  uint32_t context_id = iree_atomic_fetch_add_int32(&next_context_id, 1,
-                                                    iree_memory_order_relaxed);
+  uint32_t context_id =
+      iree_atomic_fetch_add(&next_context_id, 1, iree_memory_order_relaxed);
 #if IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_FIBERS
   // This is what we pass to Tracy as the fiber name.
   // The string must remain live for the lifetime of the process.
@@ -71,7 +75,8 @@ static iree_status_t iree_vm_context_run_function(
   iree_vm_function_call_t call;
   memset(&call, 0, sizeof(call));
   iree_status_t status = iree_vm_module_lookup_function_by_name(
-      module, IREE_VM_FUNCTION_LINKAGE_EXPORT, function_name, &call.function);
+      module, IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL, function_name,
+      &call.function);
   if (iree_status_is_not_found(status)) {
     // Function doesn't exist; that's ok as this was an optional call.
     iree_status_ignore(status);
@@ -182,8 +187,8 @@ static iree_status_t iree_vm_context_resolve_module_imports(
     // Resolve the function to the module that contains it and return the
     // information.
     iree_vm_function_t import_function;
-    iree_status_t resolve_status =
-        iree_vm_context_resolve_function(context, full_name, &import_function);
+    iree_status_t resolve_status = iree_vm_context_resolve_function_impl(
+        context, full_name, &expected_signature, &import_function);
     if (!iree_status_is_ok(resolve_status)) {
       if (iree_status_is_not_found(resolve_status) &&
           decl_function.linkage == IREE_VM_FUNCTION_LINKAGE_IMPORT_OPTIONAL) {
@@ -221,8 +226,9 @@ static iree_status_t iree_vm_context_resolve_module_imports(
       IREE_TRACE_ZONE_END(z0);
       return iree_make_status(
           IREE_STATUS_INTERNAL,
-          "import function signature mismatch between %.*s "
+          "import function %.*s signature mismatch between %.*s "
           "and source %.*s; expected %.*s but got %.*s",
+          (int)full_name.size, full_name.data,
           (int)iree_vm_module_name(module).size,
           iree_vm_module_name(module).data,
           (int)iree_vm_module_name(import_function.module).size,
@@ -343,6 +349,77 @@ IREE_API_EXPORT iree_status_t iree_vm_context_create_with_modules(
   return iree_ok_status();
 }
 
+IREE_API_EXPORT iree_status_t iree_vm_context_fork(
+    const iree_vm_context_t* parent_context, iree_allocator_t allocator,
+    iree_vm_context_t** out_child_context) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_ASSERT_ARGUMENT(parent_context);
+  IREE_ASSERT_ARGUMENT(out_child_context);
+  *out_child_context = NULL;
+
+  // Allocate with the same capacity as the parent context.
+  iree_host_size_t child_context_size =
+      sizeof(iree_vm_context_t) +
+      sizeof(iree_vm_module_t*) * parent_context->list.capacity +
+      sizeof(iree_vm_module_state_t*) * parent_context->list.capacity;
+
+  // Create empty context and copy over the fixed information.
+  iree_vm_context_t* child_context = NULL;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_allocator_malloc(allocator, child_context_size,
+                                (void**)&child_context));
+  iree_atomic_ref_count_init(&child_context->ref_count);
+  child_context->instance = parent_context->instance;
+  iree_vm_instance_retain(child_context->instance);
+  child_context->allocator = allocator;
+
+  // Forked contexts get their own unique ID.
+  child_context->context_id = iree_vm_context_allocate_id();
+
+  // TODO(benvanik): allow for non-frozen but static contexts.
+  child_context->is_frozen = parent_context->list.count > 0;
+  child_context->is_static = parent_context->list.count > 0;
+  child_context->flags = parent_context->flags;
+
+  uint8_t* p = (uint8_t*)child_context + sizeof(iree_vm_context_t);
+  child_context->list.modules = (iree_vm_module_t**)p;
+  p += sizeof(iree_vm_module_t*) * parent_context->list.capacity;
+  child_context->list.module_states = (iree_vm_module_state_t**)p;
+  p += sizeof(iree_vm_module_state_t*) * parent_context->list.capacity;
+  child_context->list.count = parent_context->list.count;
+  child_context->list.capacity = parent_context->list.capacity;
+
+  // Copy over modules; these will be the same as the parent.
+  for (iree_host_size_t i = 0; i < parent_context->list.count; ++i) {
+    iree_vm_module_t* module = parent_context->list.modules[i];
+    child_context->list.modules[i] = module;
+    iree_vm_module_retain(module);
+  }
+
+  // Fork module state. This will fail if any module does not support forking.
+  iree_status_t status = iree_ok_status();
+  for (iree_host_size_t i = 0; i < parent_context->list.count; ++i) {
+    iree_vm_module_t* module = parent_context->list.modules[i];
+    status =
+        module->fork_state(module, parent_context->list.module_states[i],
+                           allocator, &child_context->list.module_states[i]);
+    if (!iree_status_is_ok(status)) break;
+  }
+
+  // Notify all modules the fork took place. They may reinitialize state.
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_context_notify(child_context, IREE_VM_SIGNAL_FORK);
+  }
+
+  if (iree_status_is_ok(status)) {
+    *out_child_context = child_context;
+  } else {
+    iree_vm_context_destroy(child_context);
+  }
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
 static void iree_vm_context_destroy(iree_vm_context_t* context) {
   if (!context) return;
 
@@ -381,11 +458,15 @@ IREE_API_EXPORT void iree_vm_context_release(iree_vm_context_t* context) {
   }
 }
 
+IREE_API_EXPORT iree_vm_instance_t* iree_vm_context_instance(
+    const iree_vm_context_t* context) {
+  IREE_ASSERT_ARGUMENT(context);
+  return context->instance;
+}
+
 IREE_API_EXPORT iree_vm_context_id_t
 iree_vm_context_id(const iree_vm_context_t* context) {
-  if (!context) {
-    return -1;
-  }
+  if (!context) return -1;
   return context->context_id;
 }
 
@@ -419,7 +500,7 @@ IREE_API_EXPORT iree_status_t iree_vm_context_register_modules(
   for (iree_host_size_t i = 0; i < module_count; ++i) {
     if (!modules[i]) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "modules[%zu] is null", i);
+                              "modules[%" PRIhsz "] is null", i);
     }
   }
   if (!module_count) return iree_ok_status();
@@ -556,8 +637,9 @@ IREE_API_EXPORT iree_status_t iree_vm_context_resolve_module_state(
                                             out_module_state);
 }
 
-IREE_API_EXPORT iree_status_t iree_vm_context_resolve_function(
+static iree_status_t iree_vm_context_resolve_function_impl(
     const iree_vm_context_t* context, iree_string_view_t full_name,
+    const iree_vm_function_signature_t* expected_signature,
     iree_vm_function_t* out_function) {
   IREE_ASSERT_ARGUMENT(context);
   IREE_ASSERT_ARGUMENT(out_function);
@@ -576,8 +658,9 @@ IREE_API_EXPORT iree_status_t iree_vm_context_resolve_function(
   for (int i = (int)context->list.count - 1; i >= 0; --i) {
     iree_vm_module_t* module = context->list.modules[i];
     if (iree_string_view_equal(module_name, iree_vm_module_name(module))) {
-      return iree_vm_module_lookup_function_by_name(
-          module, IREE_VM_FUNCTION_LINKAGE_EXPORT, function_name, out_function);
+      return module->lookup_function(
+          module->self, IREE_VM_FUNCTION_LINKAGE_EXPORT, function_name,
+          expected_signature, out_function);
     }
   }
 
@@ -586,6 +669,13 @@ IREE_API_EXPORT iree_status_t iree_vm_context_resolve_function(
                           "registered with the context",
                           (int)module_name.size, module_name.data,
                           (int)full_name.size, full_name.data);
+}
+
+IREE_API_EXPORT iree_status_t iree_vm_context_resolve_function(
+    const iree_vm_context_t* context, iree_string_view_t full_name,
+    iree_vm_function_t* out_function) {
+  return iree_vm_context_resolve_function_impl(
+      context, full_name, /*expected_signature=*/NULL, out_function);
 }
 
 // Calls the '__notify(i32)' function in |module|, if present.
@@ -600,7 +690,7 @@ static iree_status_t iree_vm_context_call_module_notify(
 
   // Try to find the function. Modules are not required to export it.
   iree_status_t status = iree_vm_module_lookup_function_by_name(
-      module, IREE_VM_FUNCTION_LINKAGE_EXPORT,
+      module, IREE_VM_FUNCTION_LINKAGE_EXPORT_OPTIONAL,
       iree_make_cstring_view("__notify"), &call.function);
   if (iree_status_is_not_found(status)) {
     // Function doesn't exist; that's ok as this was an optional call.
@@ -680,7 +770,7 @@ static iree_status_t iree_vm_context_notify_reverse(iree_vm_stack_t* stack,
 IREE_API_EXPORT iree_status_t iree_vm_context_notify(iree_vm_context_t* context,
                                                      iree_vm_signal_t signal) {
   IREE_TRACE_ZONE_BEGIN(z0);
-  IREE_TRACE_ZONE_APPEND_VALUE(z0, (uint64_t)signal);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (uint64_t)signal);
 
   // VM stack used to call into module __init methods.
   IREE_VM_INLINE_STACK_INITIALIZE(
@@ -698,6 +788,7 @@ IREE_API_EXPORT iree_status_t iree_vm_context_notify(iree_vm_context_t* context,
   switch (signal) {
     default:
     case IREE_VM_SIGNAL_RESUME:
+    case IREE_VM_SIGNAL_FORK:
       status = iree_vm_context_notify_forward(stack, context, signal);
       break;
     case IREE_VM_SIGNAL_SUSPEND:

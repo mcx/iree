@@ -18,7 +18,7 @@ def Stream_AffinityAttr : AttrInterface<"AffinityAttr"> {
 
   let summary = [{defines execution context affinity}];
   let description = [{
-    WIP; see https://github.com/openxla/iree/issues/10765.
+    WIP; see [#10765](https://github.com/iree-org/iree/issues/10765).
 
     TBD. The intent is that this can specify host, device, and queue affinity.
     Scopes can be annotated with an affinity to ensure execution within happens
@@ -97,7 +97,13 @@ def Stream_AffinityAttr : AttrInterface<"AffinityAttr"> {
     // Returns an affinity active for the given operation.
     // This will recursively walk parent operations until one with the
     // `stream.affinity` attribute is found.
-    static AffinityAttr lookup(Operation *op);
+    static AffinityAttr lookup(Operation *fromOp);
+
+    // Returns an affinity active for the given operation or the fallback
+    // default if none is specified.
+    // This will recursively walk parent operations until one with the
+    // `stream.affinity` attribute is found.
+    static AffinityAttr lookupOrDefault(Operation *fromOp);
 
     // TODO(benvanik): replace with more fine-grained compatibility checks.
     // "Compatible" can mean a lot of things: are they cache-coherent, are they
@@ -116,10 +122,24 @@ def Stream_AffinityAttr : AttrInterface<"AffinityAttr"> {
 }
 
 //===----------------------------------------------------------------------===//
+// IREE::Stream::AffinityTypeInterface
+//===----------------------------------------------------------------------===//
+
+def Stream_AffinityType : TypeInterface<"AffinityTypeInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
+  let description = [{
+    Indicates a type represents a resource that has its affinity tracked.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // IREE::Stream::AffinityOpInterface
 //===----------------------------------------------------------------------===//
 
 def Stream_AffinityOp : OpInterface<"AffinityOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
   let description = [{
     TBD. Used to denote a stream affinity for ops and specify the kind of
     environment the ops are expected run in.
@@ -128,13 +148,41 @@ def Stream_AffinityOp : OpInterface<"AffinityOpInterface"> {
   let methods = [
     InterfaceMethod<
       /*desc=*/[{
+        Returns whether the op requires an affinity to be assigned.
+        Some ops may represent either host and device operations depending on
+        their operands/results and only sometimes require an affinity.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"requiresAffinity",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return true;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns true if the operands and results should be pinned to the
+        affinity of the op. This overrides all automatic placement logic.
+      }],
+      /*retTy=*/"bool",
+      /*methodName=*/"pinsValueAffinity",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return false;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Returns the stream affinity for the op, indicating where it should run.
       }],
       /*retTy=*/"IREE::Stream::AffinityAttr",
-      /*methodName=*/"getAffinity",
+      /*methodName=*/"getAffinityAttr",
       /*args=*/(ins),
-      /*methodBody=*/[{
-        return $_self->getAttr("affinity").template dyn_cast_or_null<IREE::Stream::AffinityAttr>();
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return dyn_cast_or_null<IREE::Stream::AffinityAttr>($_op->getAttr("affinity"));
       }]
     >,
     InterfaceMethod<
@@ -142,11 +190,12 @@ def Stream_AffinityOp : OpInterface<"AffinityOpInterface"> {
         Sets the stream affinity for the op, indicating where it should run.
       }],
       /*retTy=*/"void",
-      /*methodName=*/"setAffinity",
+      /*methodName=*/"setAffinityAttr",
       /*args=*/(ins "IREE::Stream::AffinityAttr":$value),
-      /*methodBody=*/[{
-        if (value) $_self->setAttr("affinity", value);
-        else $_self->removeAttr("affinity");
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        if (value) $_op->setAttr("affinity", value);
+        else $_op->removeAttr("affinity");
       }]
     >,
   ];
@@ -157,6 +206,8 @@ def Stream_AffinityOp : OpInterface<"AffinityOpInterface"> {
 //===----------------------------------------------------------------------===//
 
 def Stream_StreamableOp : OpInterface<"StreamableOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
   let description = [{
     Interface for ops that can be asynchronous executed in a streaming context.
   }];
@@ -196,6 +247,8 @@ def Stream_StreamableOp : OpInterface<"StreamableOpInterface"> {
 //===----------------------------------------------------------------------===//
 
 def Stream_AsyncAccessOp : OpInterface<"AsyncAccessOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
   let description = [{
     Interface for stream.async.* ops that access subviews of resources.
     This allows for some basic analysis and is only valid prior to allocation.
@@ -224,6 +277,8 @@ def Stream_AsyncAccessOp : OpInterface<"AsyncAccessOpInterface"> {
 //===----------------------------------------------------------------------===//
 
 def Stream_SubviewEffectOp : OpInterface<"SubviewEffectOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
   let description = [{
     Interface for ops that operate on subviews of resources used to query the
     memory effects for subviews on operands.
@@ -238,57 +293,12 @@ def Stream_SubviewEffectOp : OpInterface<"SubviewEffectOpInterface"> {
 }
 
 //===----------------------------------------------------------------------===//
-// IREE::Stream::BuiltinOpInterface
-//===----------------------------------------------------------------------===//
-
-def Stream_BuiltinOp : OpInterface<"BuiltinOpInterface"> {
-  let description = [{
-    Interface for ops that can be asynchronous executed in a streaming context.
-  }];
-
-  let methods = [
-    InterfaceMethod<
-      /*desc=*/[{
-        Merges the builtin module for the op into the target user module. By
-        doing a top level module merge the builtin can provide host functions
-        and multiple executables as needed.
-
-        This should not specialize the executable yet as callers currently
-        assume all builtin ops of the same type will have the same module IR.
-        If we want to specialize the executables based on usage we'll need a
-        more complex interface.
-
-        Fails if there's a name conflict; we have a __ prefix and things outside
-        the compiler shouldn't use it.
-      }],
-      /*retTy=*/"LogicalResult",
-      /*methodName=*/"mergeBuiltinModule",
-      /*args=*/(ins "Operation *":$targetOp, "OpBuilder &":$targetBuilder)
-    >,
-    InterfaceMethod<
-      /*desc=*/[{
-        Converts a stream.builtin.* op to its stream.async.* form. Any number of
-        ops may be inserted such as transfers and resource operations.
-
-        This is called in the stream.async.* phase of lowering and before
-        resource refinement or copy-on-write materialization has happened; this
-        enables the conversion to create new tensors as `!stream.resource<*>`.
-
-        The original op must remain valid after the call completes; the caller
-        of this needs to erase it themselves.
-      }],
-      /*retTy=*/"LogicalResult",
-      /*methodName=*/"convertBuiltinOp",
-      /*args=*/(ins "OpBuilder &":$builder)
-    >,
-  ];
-}
-
-//===----------------------------------------------------------------------===//
 // IREE::Stream::TimelineOpInterface
 //===----------------------------------------------------------------------===//
 
 def Stream_TimelineOp : OpInterface<"TimelineOpInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Stream";
+
   let description = [{
     Interface for ops that operate in an ordered sequence defined by timepoints.
   }];

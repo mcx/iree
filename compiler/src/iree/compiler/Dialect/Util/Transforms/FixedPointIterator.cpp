@@ -4,16 +4,16 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Dialect/Util/Transforms/PassDetail.h"
 #include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 
-namespace mlir {
-namespace iree_compiler {
-namespace IREE {
-namespace Util {
+namespace mlir::iree_compiler::IREE::Util {
+
+#define GEN_PASS_DEF_FIXEDPOINTITERATORPASS
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h.inc"
+
 namespace {
 
 // Dynamic pass which runs a sub-pipeline to a fixed point or a maximum
@@ -26,19 +26,22 @@ namespace {
 // iteration terminates. If a sub-pass removes it, then iteration will
 // continue.
 class FixedPointIteratorPass
-    : public FixedPointIteratorBase<FixedPointIteratorPass> {
- public:
+    : public impl::FixedPointIteratorPassBase<FixedPointIteratorPass> {
+public:
+  using Base::Base;
   FixedPointIteratorPass() = default;
   FixedPointIteratorPass(const FixedPointIteratorPass &other)
-      : FixedPointIteratorBase<FixedPointIteratorPass>(other) {}
+      : impl::FixedPointIteratorPassBase<FixedPointIteratorPass>(other) {}
   FixedPointIteratorPass(OpPassManager pipeline);
 
- private:
-  LogicalResult initializeOptions(StringRef options) override;
+private:
+  LogicalResult initializeOptions(
+      StringRef options,
+      function_ref<LogicalResult(const Twine &)> errorHandler) override;
   void getDependentDialects(DialectRegistry &registry) const override;
   void runOnOperation() override;
 
-  Optional<OpPassManager> pipeline;
+  std::optional<OpPassManager> pipeline;
 
   // Serialized form of the body pipeline.
   Option<std::string> pipelineStr{
@@ -55,9 +58,13 @@ FixedPointIteratorPass::FixedPointIteratorPass(OpPassManager pipeline)
   ss.flush();
 }
 
-LogicalResult FixedPointIteratorPass::initializeOptions(StringRef options) {
-  if (failed(Pass::initializeOptions(options))) return failure();
-  if (pipeline) return success();
+LogicalResult FixedPointIteratorPass::initializeOptions(
+    StringRef options,
+    function_ref<LogicalResult(const Twine &)> errorHandler) {
+  if (failed(Pass::initializeOptions(options, errorHandler)))
+    return failure();
+  if (pipeline)
+    return success();
 
   // Pipelines are expected to be of the form `<op-name>(<pipeline>)`.
   // TODO: This was lifted from the Inliner pass. We should provide a parse
@@ -114,14 +121,11 @@ void FixedPointIteratorPass::runOnOperation() {
   return signalPassFailure();
 }
 
-}  // namespace
+} // namespace
 
-std::unique_ptr<OperationPass<void>> createFixedPointIteratorPass(
-    OpPassManager pipeline) {
+std::unique_ptr<OperationPass<void>>
+createFixedPointIteratorPass(OpPassManager pipeline) {
   return std::make_unique<FixedPointIteratorPass>(std::move(pipeline));
 }
 
-}  // namespace Util
-}  // namespace IREE
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace mlir::iree_compiler::IREE::Util

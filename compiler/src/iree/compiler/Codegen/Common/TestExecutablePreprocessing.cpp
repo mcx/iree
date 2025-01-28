@@ -4,19 +4,21 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "iree/compiler/Codegen/PassDetail.h"
-#include "iree/compiler/Codegen/Passes.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
-namespace mlir {
-namespace iree_compiler {
+namespace mlir::iree_compiler {
+
+#define GEN_PASS_DEF_TESTEXECUTABLEPREPROCESSINGPASS
+#include "iree/compiler/Codegen/Common/Passes.h.inc"
 
 namespace {
 
-struct TestExecutablePreprocessingPass
-    : public TestExecutablePreprocessingBase<TestExecutablePreprocessingPass> {
+struct TestExecutablePreprocessingPass final
+    : impl::TestExecutablePreprocessingPassBase<
+          TestExecutablePreprocessingPass> {
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<IREE::HAL::HALDialect>();
   }
@@ -27,7 +29,8 @@ struct TestExecutablePreprocessingPass
     // whatever it needed to the executable instead.
     getOperation()->walk([&](IREE::HAL::ExecutableVariantOp variantOp) {
       auto configAttr = variantOp.getTarget().getConfiguration();
-      if (!configAttr) return;
+      if (!configAttr)
+        return;
       auto replacementAttr = configAttr.getAs<IntegerAttr>("replace_i64");
       if (!replacementAttr) {
         // Skip variants that don't request modification.
@@ -44,11 +47,5 @@ struct TestExecutablePreprocessingPass
   }
 };
 
-}  // namespace
-
-std::unique_ptr<OperationPass<void>> createTestExecutablePreprocessingPass() {
-  return std::make_unique<TestExecutablePreprocessingPass>();
-}
-
-}  // namespace iree_compiler
-}  // namespace mlir
+} // namespace
+} // namespace mlir::iree_compiler

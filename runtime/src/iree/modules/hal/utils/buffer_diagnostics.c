@@ -22,8 +22,8 @@ iree_status_t iree_hal_modules_buffer_assert(
   IREE_RETURN_IF_ERROR(iree_hal_buffer_check_deref(buffer_ref, &buffer));
   iree_vm_buffer_t* message = NULL;
   IREE_RETURN_IF_ERROR(iree_vm_buffer_check_deref(message_ref, &message));
-  iree_string_view_t message_str IREE_ATTRIBUTE_UNUSED =
-      iree_vm_buffer_as_string(message);
+  iree_string_view_t message_str = iree_vm_buffer_as_string(message);
+  (void)message_str;
 
   // Ensure we have enough bytes in the buffer for the encoding we have.
   // Note that having more bytes is fine:
@@ -43,11 +43,12 @@ iree_status_t iree_hal_modules_buffer_assert(
   iree_hal_memory_type_t actual_memory_type =
       iree_hal_buffer_memory_type(buffer);
   if (!iree_all_bits_set(actual_memory_type, required_memory_types)) {
-#if IREE_HAL_MODULE_STRING_UTIL_ENABLE
+#if ((IREE_STATUS_FEATURES & IREE_STATUS_FEATURE_ANNOTATIONS) != 0) && \
+    IREE_HAL_MODULE_STRING_UTIL_ENABLE
     iree_bitfield_string_temp_t temp0, temp1;
     iree_string_view_t actual_memory_type_str =
         iree_hal_memory_type_format(actual_memory_type, &temp0);
-    iree_string_view_t expected_memory_type_str =
+    iree_string_view_t required_memory_type_str =
         iree_hal_memory_type_format(required_memory_types, &temp1);
     return iree_make_status(
         IREE_STATUS_PERMISSION_DENIED,
@@ -55,27 +56,28 @@ iree_status_t iree_hal_modules_buffer_assert(
         "requires %.*s",
         (int)message_str.size, message_str.data,
         (int)actual_memory_type_str.size, actual_memory_type_str.data,
-        (int)expected_memory_type_str.size, expected_memory_type_str.data);
+        (int)required_memory_type_str.size, required_memory_type_str.data);
 #else
     return iree_make_status(
         IREE_STATUS_PERMISSION_DENIED,
         "%.*s buffer memory type is not compatible; buffer has %08X, operation "
         "requires %08X",
         (int)message_str.size, message_str.data, actual_memory_type,
-        expected_memory_type);
+        required_memory_types);
 #endif  // IREE_HAL_MODULE_STRING_UTIL_ENABLE
   }
 
   // All usage bits expected (indicating what the program intends to use the
   // buffer for) must be set in the buffer while the buffer is allowed to have
   // more bits.
-  iree_hal_buffer_usage_t actual_buffer_usage =
+  iree_hal_buffer_usage_t allowed_buffer_usage =
       iree_hal_buffer_allowed_usage(buffer);
-  if (!iree_all_bits_set(actual_buffer_usage, required_buffer_usage)) {
-#if IREE_HAL_MODULE_STRING_UTIL_ENABLE
+  if (!iree_all_bits_set(allowed_buffer_usage, required_buffer_usage)) {
+#if ((IREE_STATUS_FEATURES & IREE_STATUS_FEATURE_ANNOTATIONS) != 0) && \
+    IREE_HAL_MODULE_STRING_UTIL_ENABLE
     iree_bitfield_string_temp_t temp0, temp1;
     iree_string_view_t allowed_usage_str =
-        iree_hal_buffer_usage_format(actual_buffer_usage, &temp0);
+        iree_hal_buffer_usage_format(allowed_buffer_usage, &temp0);
     iree_string_view_t required_usage_str =
         iree_hal_buffer_usage_format(required_buffer_usage, &temp1);
     return iree_make_status(
@@ -143,8 +145,8 @@ iree_status_t iree_hal_modules_buffer_view_assert(
       iree_hal_buffer_view_check_deref(buffer_view_ref, &buffer_view));
   iree_vm_buffer_t* message = NULL;
   IREE_RETURN_IF_ERROR(iree_vm_buffer_check_deref(message_ref, &message));
-  iree_string_view_t message_str IREE_ATTRIBUTE_UNUSED =
-      iree_vm_buffer_as_string(message);
+  iree_string_view_t message_str = iree_vm_buffer_as_string(message);
+  (void)message_str;
 
   // Check encoding first; getting the encoding wrong is worse than the shape.
   // If the actual encoding is opaque we allow it to pass through - this lets
@@ -168,7 +170,8 @@ iree_status_t iree_hal_modules_buffer_view_assert(
       iree_hal_buffer_view_element_type(buffer_view);
   if (!iree_hal_element_types_are_compatible(actual_element_type,
                                              expected_element_type)) {
-#if IREE_HAL_MODULE_STRING_UTIL_ENABLE
+#if ((IREE_STATUS_FEATURES & IREE_STATUS_FEATURE_ANNOTATIONS) != 0) && \
+    IREE_HAL_MODULE_STRING_UTIL_ENABLE
     char actual_element_type_str[32];
     iree_host_size_t actual_element_type_str_length = 0;
     char expected_element_type_str[32];
@@ -204,9 +207,11 @@ iree_status_t iree_hal_modules_buffer_view_assert(
   if (actual_shape_rank != expected_shape_rank) {
     shape_status = iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
-        "%.*s shape rank mismatch; expected %" PRIhsz " but have %" PRIhsz,
+        "%.*s shape rank mismatch; expected %" PRIhsz "%s but have %" PRIhsz
+        "%s",
         (int)message_str.size, message_str.data, expected_shape_rank,
-        actual_shape_rank);
+        expected_shape_rank == 0 ? " (scalar)" : "", actual_shape_rank,
+        actual_shape_rank == 0 ? " (scalar)" : "");
   }
   if (iree_status_is_ok(shape_status)) {
     for (iree_host_size_t i = 0; i < actual_shape_rank; ++i) {
@@ -222,7 +227,8 @@ iree_status_t iree_hal_modules_buffer_view_assert(
     }
   }
 
-#if IREE_HAL_MODULE_STRING_UTIL_ENABLE
+#if ((IREE_STATUS_FEATURES & IREE_STATUS_FEATURE_ANNOTATIONS) != 0) && \
+    IREE_HAL_MODULE_STRING_UTIL_ENABLE
   if (!iree_status_is_ok(shape_status)) {
     char actual_shape_str[32];
     iree_host_size_t actual_shape_str_length = 0;
@@ -235,57 +241,11 @@ iree_status_t iree_hal_modules_buffer_view_assert(
         expected_shape_rank, expected_shape_dims, sizeof(expected_shape_str),
         expected_shape_str, &expected_shape_str_length));
     shape_status = iree_status_annotate_f(
-        shape_status, "expected shape %.*s, actual shape %.*s",
+        shape_status, "expected shape `%.*s`, actual shape `%.*s`",
         (int)expected_shape_str_length, expected_shape_str,
         (int)actual_shape_str_length, actual_shape_str);
   }
 #endif  // IREE_HAL_MODULE_STRING_UTIL_ENABLE
 
   return shape_status;
-}
-
-iree_status_t iree_hal_modules_buffer_view_trace(
-    iree_vm_ref_t key_ref, iree_vm_size_t buffer_view_count,
-    iree_vm_abi_r_t* buffer_view_refs, iree_allocator_t host_allocator) {
-#if IREE_HAL_MODULE_STRING_UTIL_ENABLE
-
-  iree_vm_buffer_t* key = NULL;
-  IREE_RETURN_IF_ERROR(iree_vm_buffer_check_deref(key_ref, &key));
-  iree_string_view_t key_str = iree_vm_buffer_as_string(key);
-
-  fprintf(stderr, "=== %.*s ===\n", (int)key_str.size, key_str.data);
-  for (iree_host_size_t i = 0; i < buffer_view_count; ++i) {
-    iree_hal_buffer_view_t* buffer_view = NULL;
-    IREE_RETURN_IF_ERROR(
-        iree_hal_buffer_view_check_deref(buffer_view_refs[i].r0, &buffer_view));
-
-    // NOTE: this export is for debugging only and a no-op in min-size builds.
-    // We heap-alloc here because at the point this export is used performance
-    // is not a concern.
-
-    // Query total length (excluding NUL terminator).
-    iree_host_size_t result_length = 0;
-    iree_status_t status = iree_hal_buffer_view_format(buffer_view, SIZE_MAX, 0,
-                                                       NULL, &result_length);
-    if (!iree_status_is_out_of_range(status)) {
-      return status;
-    }
-    ++result_length;  // include NUL
-
-    // Allocate scratch heap memory to contain the result and format into it.
-    char* result_str = NULL;
-    IREE_RETURN_IF_ERROR(iree_allocator_malloc(host_allocator, result_length,
-                                               (void**)&result_str));
-    status = iree_hal_buffer_view_format(buffer_view, SIZE_MAX, result_length,
-                                         result_str, &result_length);
-    if (iree_status_is_ok(status)) {
-      fprintf(stderr, "%.*s\n", (int)result_length, result_str);
-    }
-    iree_allocator_free(host_allocator, result_str);
-    IREE_RETURN_IF_ERROR(status);
-  }
-  fprintf(stderr, "\n");
-
-#endif  // IREE_HAL_MODULE_STRING_UTIL_ENABLE
-  return iree_ok_status();
 }
