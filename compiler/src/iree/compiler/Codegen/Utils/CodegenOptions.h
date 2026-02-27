@@ -58,9 +58,6 @@ struct CPUCodegenOptions : CodegenOptions {
 };
 
 struct GPUCodegenOptions : CodegenOptions {
-  // Enable prefetch in the vector distribute pipeline.
-  bool enablePrefetch = false;
-
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<GPUCodegenOptions>;
 };

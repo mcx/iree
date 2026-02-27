@@ -94,13 +94,7 @@ void CPUCodegenOptions::bindOptions(OptionsBinder &binder) {
 }
 
 void GPUCodegenOptions::bindOptions(OptionsBinder &binder) {
-  static llvm::cl::OptionCategory category("IREE GPU Codegen Options");
   CodegenOptions::bindOptions(binder);
-
-  binder.opt<bool>(
-      "iree-llvmgpu-enable-prefetch", enablePrefetch,
-      llvm::cl::desc("Enable prefetch in the vector distribute pipeline."),
-      llvm::cl::cat(category));
 }
 
 } // namespace mlir::iree_compiler
