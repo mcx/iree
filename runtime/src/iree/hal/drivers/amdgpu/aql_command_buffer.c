@@ -272,24 +272,31 @@ iree_hal_amdgpu_aql_command_buffer_ensure_static_buffer_page(
   return iree_ok_status();
 }
 
-static iree_status_t iree_hal_amdgpu_aql_command_buffer_record_static_buffer(
+static iree_status_t iree_hal_amdgpu_aql_command_buffer_allocate_static_buffer(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
     iree_hal_buffer_t* buffer, uint32_t* out_ordinal) {
   *out_ordinal = 0;
-  IREE_RETURN_IF_ERROR(
-      iree_hal_amdgpu_aql_command_buffer_ensure_resource_set(command_buffer));
   iree_hal_amdgpu_aql_command_buffer_static_buffer_page_t* page = NULL;
   IREE_RETURN_IF_ERROR(
       iree_hal_amdgpu_aql_command_buffer_ensure_static_buffer_page(
           command_buffer, &page));
-  if (command_buffer->resource_set) {
-    IREE_RETURN_IF_ERROR(iree_hal_resource_set_insert(
-        command_buffer->resource_set, /*count=*/1, &buffer));
-  }
   *out_ordinal = command_buffer->static_buffers.count;
   ++command_buffer->static_buffers.count;
   page->buffers[page->count++] = buffer;
   return iree_ok_status();
+}
+
+static iree_status_t iree_hal_amdgpu_aql_command_buffer_record_static_buffer(
+    iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
+    iree_hal_buffer_t* buffer, uint32_t* out_ordinal) {
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_aql_command_buffer_ensure_resource_set(command_buffer));
+  if (command_buffer->resource_set) {
+    IREE_RETURN_IF_ERROR(iree_hal_resource_set_insert(
+        command_buffer->resource_set, /*count=*/1, &buffer));
+  }
+  return iree_hal_amdgpu_aql_command_buffer_allocate_static_buffer(
+      command_buffer, buffer, out_ordinal);
 }
 
 static iree_hal_amdgpu_aql_command_buffer_rodata_segment_t*
@@ -1125,6 +1132,19 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_validate_dispatch_shape(
   return iree_ok_status();
 }
 
+static bool iree_hal_amdgpu_aql_command_buffer_should_defer_static_buffer_ref(
+    const iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
+    const iree_hal_buffer_ref_t* buffer_ref) {
+  if (!iree_hal_amdgpu_aql_command_buffer_allows_staged_transient_buffer_refs(
+          command_buffer)) {
+    return false;
+  }
+  iree_hal_buffer_t* allocated_buffer =
+      iree_hal_buffer_allocated_buffer(buffer_ref->buffer);
+  return iree_hal_amdgpu_transient_buffer_isa(allocated_buffer) &&
+         !iree_hal_amdgpu_transient_buffer_backing_buffer(allocated_buffer);
+}
+
 static iree_status_t
 iree_hal_amdgpu_aql_command_buffer_prepare_dispatch_binding_sources(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
@@ -1152,9 +1172,18 @@ iree_hal_amdgpu_aql_command_buffer_prepare_dispatch_binding_sources(
       continue;
     }
 
-    uint64_t unused_device_pointer = 0;
-    status = iree_hal_amdgpu_aql_command_buffer_resolve_static_buffer_ref(
-        command_buffer, binding, &unused_device_pointer);
+    iree_device_size_t unused_offset = 0;
+    iree_device_size_t unused_length = 0;
+    status = iree_hal_buffer_calculate_range(
+        /*base_offset=*/0, iree_hal_buffer_byte_length(binding->buffer),
+        binding->offset, binding->length, &unused_offset, &unused_length);
+    if (iree_status_is_ok(status) &&
+        !iree_hal_amdgpu_aql_command_buffer_should_defer_static_buffer_ref(
+            command_buffer, binding)) {
+      uint64_t unused_device_pointer = 0;
+      status = iree_hal_amdgpu_aql_command_buffer_resolve_static_buffer_ref(
+          command_buffer, binding, &unused_device_pointer);
+    }
     if (iree_status_is_ok(status) && command_buffer->resource_set) {
       status = iree_hal_resource_set_insert(command_buffer->resource_set,
                                             /*count=*/1, &binding->buffer);
@@ -1167,6 +1196,29 @@ iree_hal_amdgpu_aql_command_buffer_prepare_dispatch_binding_sources(
         iree_status_annotate_f(status, "binding[%" PRIhsz "]", failed_index);
   }
   return status;
+}
+
+static iree_status_t
+iree_hal_amdgpu_aql_command_buffer_record_deferred_dispatch_binding_source(
+    iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
+    const iree_hal_buffer_ref_t* binding,
+    iree_hal_amdgpu_command_buffer_binding_source_t* binding_source) {
+  iree_device_size_t resolved_offset = 0;
+  iree_device_size_t resolved_length = 0;
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_calculate_range(
+      /*base_offset=*/0, iree_hal_buffer_byte_length(binding->buffer),
+      binding->offset, binding->length, &resolved_offset, &resolved_length));
+  (void)resolved_length;
+
+  uint32_t static_buffer_ordinal = 0;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_aql_command_buffer_allocate_static_buffer(
+          command_buffer, binding->buffer, &static_buffer_ordinal));
+  binding_source->offset_or_pointer = resolved_offset;
+  binding_source->slot = static_buffer_ordinal;
+  binding_source->flags =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_STATIC_BUFFER;
+  return iree_ok_status();
 }
 
 static iree_status_t
@@ -1185,6 +1237,14 @@ iree_hal_amdgpu_aql_command_buffer_write_dispatch_binding_sources(
       binding_source->slot = binding->buffer_slot;
       binding_source->flags =
           IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC;
+      continue;
+    }
+
+    if (iree_hal_amdgpu_aql_command_buffer_should_defer_static_buffer_ref(
+            command_buffer, binding)) {
+      status =
+          iree_hal_amdgpu_aql_command_buffer_record_deferred_dispatch_binding_source(
+              command_buffer, binding, binding_source);
       continue;
     }
 
@@ -1261,6 +1321,16 @@ iree_hal_amdgpu_aql_command_buffer_write_indirect_parameter_source(
   if (command_buffer->resource_set) {
     IREE_RETURN_IF_ERROR(iree_hal_resource_set_insert(
         command_buffer->resource_set, /*count=*/1, &buffer_ref.buffer));
+  }
+
+  if (iree_hal_amdgpu_aql_command_buffer_should_defer_static_buffer_ref(
+          command_buffer, &buffer_ref)) {
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_aql_command_buffer_record_deferred_dispatch_binding_source(
+            command_buffer, &buffer_ref, binding_source));
+    binding_source->flags |=
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS;
+    return iree_ok_status();
   }
 
   IREE_RETURN_IF_ERROR(

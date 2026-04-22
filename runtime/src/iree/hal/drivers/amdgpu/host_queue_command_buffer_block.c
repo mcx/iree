@@ -251,6 +251,50 @@ static iree_status_t iree_hal_amdgpu_host_queue_resolve_command_buffer_ref(
   return iree_ok_status();
 }
 
+static iree_status_t
+iree_hal_amdgpu_host_queue_resolve_static_binding_source_ptr(
+    iree_hal_command_buffer_t* command_buffer,
+    const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source,
+    uint64_t* out_binding_ptr) {
+  *out_binding_ptr = 0;
+  iree_hal_buffer_t* buffer = iree_hal_amdgpu_aql_command_buffer_static_buffer(
+      command_buffer, binding_source->slot);
+  if (IREE_UNLIKELY(!buffer)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "AQL command-buffer static dispatch binding ordinal %" PRIu32
+        " is invalid",
+        binding_source->slot);
+  }
+  iree_hal_buffer_t* allocated_buffer =
+      iree_hal_buffer_allocated_buffer(buffer);
+  void* device_ptr = iree_hal_amdgpu_buffer_device_pointer(allocated_buffer);
+  if (IREE_UNLIKELY(!device_ptr)) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "AQL command-buffer static dispatch binding has no staged AMDGPU "
+        "backing after queue waits completed");
+  }
+  iree_device_size_t device_offset = 0;
+  if (IREE_UNLIKELY(!iree_device_size_checked_add(
+          iree_hal_buffer_byte_offset(buffer),
+          binding_source->offset_or_pointer, &device_offset))) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AQL command-buffer static dispatch binding pointer offset overflows "
+        "device size");
+  }
+  if (IREE_UNLIKELY(device_offset > UINTPTR_MAX)) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AQL command-buffer static dispatch binding pointer offset exceeds "
+        "host pointer size");
+  }
+  *out_binding_ptr =
+      (uint64_t)((uintptr_t)device_ptr + (uintptr_t)device_offset);
+  return iree_ok_status();
+}
+
 static bool iree_hal_amdgpu_host_queue_command_buffer_packet_has_barrier(
     const iree_hal_amdgpu_wait_resolution_t* resolution, uint32_t packet_index,
     iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t packet_flags) {
@@ -464,7 +508,7 @@ iree_hal_amdgpu_host_queue_write_command_buffer_dispatch_packet_body(
 
 static iree_status_t iree_hal_amdgpu_host_queue_replay_dispatch_kernargs(
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
-    const uint64_t* binding_ptrs,
+    iree_hal_command_buffer_t* command_buffer, const uint64_t* binding_ptrs,
     const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command,
     uint8_t* kernarg_data) {
   const uint8_t* command_base = (const uint8_t*)dispatch_command;
@@ -484,9 +528,13 @@ static iree_status_t iree_hal_amdgpu_host_queue_replay_dispatch_kernargs(
       for (uint16_t i = 0; i < dispatch_command->binding_count; ++i) {
         const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
             &binding_sources[i];
-        if (iree_any_bit_set(
-                binding_source->flags,
-                IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC)) {
+        const uint32_t flags = binding_source->flags;
+        if (IREE_LIKELY(
+                flags ==
+                IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_NONE)) {
+          binding_dst[i] = binding_source->offset_or_pointer;
+        } else if (flags ==
+                   IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC) {
           if (IREE_UNLIKELY(!binding_ptrs)) {
             return iree_make_status(
                 IREE_STATUS_INVALID_ARGUMENT,
@@ -495,8 +543,17 @@ static iree_status_t iree_hal_amdgpu_host_queue_replay_dispatch_kernargs(
           }
           binding_dst[i] = binding_ptrs[binding_source->slot] +
                            binding_source->offset_or_pointer;
+        } else if (
+            flags ==
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_STATIC_BUFFER) {
+          IREE_RETURN_IF_ERROR(
+              iree_hal_amdgpu_host_queue_resolve_static_binding_source_ptr(
+                  command_buffer, binding_source, &binding_dst[i]));
         } else {
-          binding_dst[i] = binding_source->offset_or_pointer;
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "malformed AQL command-buffer dispatch binding source flags %u",
+              binding_source->flags);
         }
       }
       if (tail_length > 0) {
@@ -531,31 +588,48 @@ static iree_status_t iree_hal_amdgpu_host_queue_replay_dispatch_kernargs(
 
 static iree_status_t
 iree_hal_amdgpu_host_queue_replay_dispatch_indirect_params_ptr(
+    iree_hal_command_buffer_t* command_buffer,
     iree_hal_buffer_binding_table_t binding_table,
     const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source,
     const uint32_t** out_workgroup_count_ptr) {
   *out_workgroup_count_ptr = NULL;
-  if (!iree_any_bit_set(
-          binding_source->flags,
-          IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC)) {
-    *out_workgroup_count_ptr =
-        (const uint32_t*)(uintptr_t)binding_source->offset_or_pointer;
-    return iree_ok_status();
+  switch (binding_source->flags) {
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS:
+      *out_workgroup_count_ptr =
+          (const uint32_t*)(uintptr_t)binding_source->offset_or_pointer;
+      return iree_ok_status();
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC |
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS: {
+      iree_hal_buffer_ref_t resolved_ref = {0};
+      IREE_RETURN_IF_ERROR(iree_hal_buffer_binding_table_resolve_ref(
+          binding_table,
+          iree_hal_make_indirect_buffer_ref(binding_source->slot,
+                                            binding_source->offset_or_pointer,
+                                            sizeof(uint32_t[3])),
+          &resolved_ref));
+      uint8_t* device_ptr = NULL;
+      IREE_RETURN_IF_ERROR(iree_hal_amdgpu_host_queue_resolve_buffer_ref_ptr(
+          resolved_ref, IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS,
+          IREE_HAL_MEMORY_ACCESS_READ, &device_ptr));
+      *out_workgroup_count_ptr = (const uint32_t*)device_ptr;
+      return iree_ok_status();
+    }
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_STATIC_BUFFER |
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS: {
+      uint64_t workgroup_count_ptr = 0;
+      IREE_RETURN_IF_ERROR(
+          iree_hal_amdgpu_host_queue_resolve_static_binding_source_ptr(
+              command_buffer, binding_source, &workgroup_count_ptr));
+      *out_workgroup_count_ptr =
+          (const uint32_t*)(uintptr_t)workgroup_count_ptr;
+      return iree_ok_status();
+    }
+    default:
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "malformed AQL command-buffer indirect parameter source flags %u",
+          binding_source->flags);
   }
-
-  iree_hal_buffer_ref_t resolved_ref = {0};
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_binding_table_resolve_ref(
-      binding_table,
-      iree_hal_make_indirect_buffer_ref(binding_source->slot,
-                                        binding_source->offset_or_pointer,
-                                        sizeof(uint32_t[3])),
-      &resolved_ref));
-  uint8_t* device_ptr = NULL;
-  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_host_queue_resolve_buffer_ref_ptr(
-      resolved_ref, IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS,
-      IREE_HAL_MEMORY_ACCESS_READ, &device_ptr));
-  *out_workgroup_count_ptr = (const uint32_t*)device_ptr;
-  return iree_ok_status();
 }
 
 static iree_amdgpu_kernel_implicit_args_t*
@@ -591,7 +665,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_replay_dispatch_packet_body(
     }
   } else {
     IREE_RETURN_IF_ERROR(iree_hal_amdgpu_host_queue_replay_dispatch_kernargs(
-        block, binding_ptrs, dispatch_command, kernarg_data));
+        block, command_buffer, binding_ptrs, dispatch_command, kernarg_data));
   }
   iree_hal_amdgpu_host_queue_write_command_buffer_dispatch_packet_body(
       dispatch_command, packet, kernarg_data, completion_signal, out_setup);
@@ -625,7 +699,8 @@ iree_hal_amdgpu_host_queue_replay_indirect_dispatch_packet_bodies(
   const uint32_t* workgroup_count_ptr = NULL;
   IREE_RETURN_IF_ERROR(
       iree_hal_amdgpu_host_queue_replay_dispatch_indirect_params_ptr(
-          binding_table, indirect_params_source, &workgroup_count_ptr));
+          command_buffer, binding_table, indirect_params_source,
+          &workgroup_count_ptr));
 
   iree_amdgpu_kernel_implicit_args_t* implicit_args =
       iree_hal_amdgpu_host_queue_dispatch_implicit_args_ptr(

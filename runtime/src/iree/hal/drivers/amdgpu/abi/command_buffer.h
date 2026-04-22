@@ -56,6 +56,7 @@ typedef enum iree_hal_amdgpu_command_buffer_binding_source_flag_bits_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC = 1u << 0,
   IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS = 1u
                                                                            << 1,
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_STATIC_BUFFER = 1u << 2,
 } iree_hal_amdgpu_command_buffer_binding_source_flag_bits_t;
 
 // Dispatch command flags.
@@ -144,10 +145,13 @@ IREE_AMDGPU_STATIC_ASSERT(
 // Source record used to emit one HAL ABI dispatch binding pointer.
 typedef struct IREE_AMDGPU_ALIGNAS(8)
     iree_hal_amdgpu_command_buffer_binding_source_t {
-  // Static source: final raw device pointer. Dynamic source: byte offset added
-  // to the queue_execute binding table slot.
+  // Static raw source: final raw device pointer.
+  //
+  // Dynamic or static-buffer source: byte offset added to the queue_execute
+  // binding table slot or command-buffer static buffer ordinal in |slot|.
   uint64_t offset_or_pointer;
-  // Dynamic source binding table slot. Must be zero for static sources.
+  // Dynamic source binding table slot or static buffer ordinal. Must be zero
+  // for raw static sources.
   uint32_t slot;
   // Source flags from
   // iree_hal_amdgpu_command_buffer_binding_source_flag_bits_t.
