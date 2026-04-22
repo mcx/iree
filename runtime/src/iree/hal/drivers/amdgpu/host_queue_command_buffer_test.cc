@@ -1333,6 +1333,23 @@ static bool AqlHeaderHasBarrier(uint16_t header) {
           ((1u << IREE_HSA_PACKET_HEADER_WIDTH_BARRIER) - 1u)) != 0;
 }
 
+static uint16_t AqlHeaderField(uint16_t header, uint32_t bit_offset,
+                               uint32_t bit_width) {
+  return (header >> bit_offset) & ((1u << bit_width) - 1u);
+}
+
+static iree_hsa_fence_scope_t AqlHeaderAcquireScope(uint16_t header) {
+  return (iree_hsa_fence_scope_t)AqlHeaderField(
+      header, IREE_HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE,
+      IREE_HSA_PACKET_HEADER_WIDTH_SCACQUIRE_FENCE_SCOPE);
+}
+
+static iree_hsa_fence_scope_t AqlHeaderReleaseScope(uint16_t header) {
+  return (iree_hsa_fence_scope_t)AqlHeaderField(
+      header, IREE_HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE,
+      IREE_HSA_PACKET_HEADER_WIDTH_SCRELEASE_FENCE_SCOPE);
+}
+
 TEST_F(HostQueueCommandBufferTest,
        PacketControlBarriersFirstPayloadPacketForInlineWait) {
   iree_hal_amdgpu_logical_device_options_t options;
@@ -1354,15 +1371,15 @@ TEST_F(HostQueueCommandBufferTest,
           IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE);
   EXPECT_TRUE(control.has_barrier);
   EXPECT_EQ(control.acquire_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
-  EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
+  EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_NONE);
 
   control = iree_hal_amdgpu_host_queue_command_buffer_packet_control(
       queue, &resolution, iree_hal_semaphore_list_empty(), /*packet_index=*/1,
       IREE_HSA_FENCE_SCOPE_NONE,
       IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE);
   EXPECT_FALSE(control.has_barrier);
-  EXPECT_EQ(control.acquire_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
-  EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
+  EXPECT_EQ(control.acquire_fence_scope, IREE_HSA_FENCE_SCOPE_NONE);
+  EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_NONE);
 }
 
 #if !defined(NDEBUG)
@@ -1445,6 +1462,8 @@ TEST_F(HostQueueCommandBufferTest,
   EXPECT_EQ(summary.packet_count, 2u);
   EXPECT_EQ(summary.barrier_packet_count, 1u);
   EXPECT_FALSE(AqlHeaderHasBarrier(summary.first_packet_header));
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_NONE);
   EXPECT_TRUE(AqlHeaderHasBarrier(summary.last_packet_header));
 
   resolution.inline_acquire_scope = IREE_HSA_FENCE_SCOPE_AGENT;
@@ -1456,6 +1475,10 @@ TEST_F(HostQueueCommandBufferTest,
   EXPECT_EQ(summary.packet_count, 2u);
   EXPECT_EQ(summary.barrier_packet_count, 2u);
   EXPECT_TRUE(AqlHeaderHasBarrier(summary.first_packet_header));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_NONE);
   EXPECT_TRUE(AqlHeaderHasBarrier(summary.last_packet_header));
 
   iree_hal_executable_release(executable);
@@ -1529,7 +1552,113 @@ TEST_F(HostQueueCommandBufferTest,
   EXPECT_EQ(summary.packet_count, 2u);
   EXPECT_EQ(summary.barrier_packet_count, 2u);
   EXPECT_TRUE(AqlHeaderHasBarrier(summary.first_packet_header));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_AGENT);
   EXPECT_TRUE(AqlHeaderHasBarrier(summary.last_packet_header));
+
+  iree_hal_executable_release(executable);
+  iree_hal_executable_cache_release(executable_cache);
+}
+
+TEST_F(HostQueueCommandBufferTest,
+       PacketSummaryPreservesExplicitMemoryBarrierScopes) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+  iree_hal_amdgpu_host_queue_t* queue = test_device.first_host_queue();
+  ASSERT_NE(queue, nullptr);
+
+  iree_hal_executable_cache_t* executable_cache = NULL;
+  iree_hal_executable_t* executable = NULL;
+  IREE_ASSERT_OK(LoadCtsExecutable(
+      test_device.base_device(),
+      iree_make_cstring_view("command_buffer_dispatch_constants_bindings_test."
+                             "bin"),
+      &executable_cache, &executable));
+
+  Ref<iree_hal_buffer_t> input_buffer;
+  IREE_ASSERT_OK(CreateHostVisibleDispatchBuffer(
+      test_device.allocator(), /*buffer_size=*/4 * sizeof(uint32_t),
+      input_buffer.out()));
+  Ref<iree_hal_buffer_t> output_buffer0;
+  IREE_ASSERT_OK(CreateHostVisibleDispatchBuffer(
+      test_device.allocator(), /*buffer_size=*/4 * sizeof(uint32_t),
+      output_buffer0.out()));
+  Ref<iree_hal_buffer_t> output_buffer1;
+  IREE_ASSERT_OK(CreateHostVisibleDispatchBuffer(
+      test_device.allocator(), /*buffer_size=*/4 * sizeof(uint32_t),
+      output_buffer1.out()));
+
+  Ref<iree_hal_command_buffer_t> command_buffer;
+  IREE_ASSERT_OK(iree_hal_command_buffer_create(
+      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT,
+      IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*binding_capacity=*/0, command_buffer.out()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
+  iree_hal_buffer_ref_t binding_refs0[2] = {
+      iree_hal_make_buffer_ref(input_buffer, /*offset=*/0,
+                               iree_hal_buffer_byte_length(input_buffer)),
+      iree_hal_make_buffer_ref(output_buffer0, /*offset=*/0,
+                               iree_hal_buffer_byte_length(output_buffer0)),
+  };
+  const iree_hal_buffer_ref_list_t bindings0 = {
+      /*count=*/IREE_ARRAYSIZE(binding_refs0),
+      /*values=*/binding_refs0,
+  };
+  IREE_ASSERT_OK(
+      AppendConstantsBindingsDispatch(command_buffer, executable, bindings0));
+  const iree_hal_memory_barrier_t memory_barrier = {
+      .source_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
+      command_buffer, IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      IREE_HAL_EXECUTION_STAGE_DISPATCH, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
+      /*memory_barrier_count=*/1, &memory_barrier,
+      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  iree_hal_buffer_ref_t binding_refs1[2] = {
+      iree_hal_make_buffer_ref(input_buffer, /*offset=*/0,
+                               iree_hal_buffer_byte_length(input_buffer)),
+      iree_hal_make_buffer_ref(output_buffer1, /*offset=*/0,
+                               iree_hal_buffer_byte_length(output_buffer1)),
+  };
+  const iree_hal_buffer_ref_list_t bindings1 = {
+      /*count=*/IREE_ARRAYSIZE(binding_refs1),
+      /*values=*/binding_refs1,
+  };
+  IREE_ASSERT_OK(
+      AppendConstantsBindingsDispatch(command_buffer, executable, bindings1));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
+
+  const iree_hal_amdgpu_aql_program_t* program =
+      iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
+  ASSERT_NE(program->first_block, nullptr);
+  ASSERT_EQ(program->first_block->aql_packet_count, 2u);
+
+  iree_hal_amdgpu_wait_resolution_t resolution = {0};
+  iree_hal_amdgpu_host_queue_command_buffer_packet_summary_t summary = {0};
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_host_queue_summarize_command_buffer_block_packets(
+          queue, &resolution, iree_hal_semaphore_list_empty(),
+          program->first_block, &summary));
+  EXPECT_EQ(summary.packet_count, 2u);
+  EXPECT_EQ(summary.barrier_packet_count, 1u);
+  EXPECT_FALSE(AqlHeaderHasBarrier(summary.first_packet_header));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.first_packet_header),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_TRUE(AqlHeaderHasBarrier(summary.last_packet_header));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.last_packet_header),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.last_packet_header),
+            IREE_HSA_FENCE_SCOPE_AGENT);
 
   iree_hal_executable_release(executable);
   iree_hal_executable_cache_release(executable_cache);

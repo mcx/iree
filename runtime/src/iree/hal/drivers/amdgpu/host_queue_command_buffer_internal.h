@@ -22,7 +22,61 @@ enum iree_hal_amdgpu_host_queue_command_buffer_packet_flag_bits_t {
       1u << 0,
   // Packet owns queue completion and releases user-visible signal semaphores.
   IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_FINAL = 1u << 1,
+  // First bit of the two-bit acquire fence scope field in packet flags.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_SHIFT = 2,
+  // Bit mask of the two-bit acquire fence scope field in packet flags.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_MASK = 0x0Cu,
+  // First bit of the two-bit release fence scope field in packet flags.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_SHIFT = 4,
+  // Bit mask of the two-bit release fence scope field in packet flags.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_MASK = 0x30u,
 };
+
+// Returns |flags| with its encoded fence scope fields replaced.
+static inline iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t
+iree_hal_amdgpu_host_queue_command_buffer_packet_flags_set_fence_scopes(
+    iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t flags,
+    iree_hsa_fence_scope_t acquire_scope,
+    iree_hsa_fence_scope_t release_scope) {
+  flags &=
+      ~(IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_MASK |
+        IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_MASK);
+  flags |=
+      ((uint32_t)acquire_scope & 0x3u)
+      << IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_SHIFT;
+  flags |=
+      ((uint32_t)release_scope & 0x3u)
+      << IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_SHIFT;
+  return flags;
+}
+
+// Returns one encoded fence scope field from packet flags.
+static inline iree_hsa_fence_scope_t
+iree_hal_amdgpu_host_queue_command_buffer_packet_flags_fence_scope(
+    iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t flags,
+    uint32_t mask, uint32_t shift) {
+  return (iree_hsa_fence_scope_t)((flags & mask) >> shift);
+}
+
+// Returns the acquire fence scope encoded in packet flags.
+static inline iree_hsa_fence_scope_t
+iree_hal_amdgpu_host_queue_command_buffer_packet_flags_acquire_scope(
+    iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t flags) {
+  return iree_hal_amdgpu_host_queue_command_buffer_packet_flags_fence_scope(
+      flags,
+      IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_MASK,
+      IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_ACQUIRE_SCOPE_SHIFT);
+}
+
+// Returns the release fence scope encoded in packet flags.
+static inline iree_hsa_fence_scope_t
+iree_hal_amdgpu_host_queue_command_buffer_packet_flags_release_scope(
+    iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t flags) {
+  return iree_hal_amdgpu_host_queue_command_buffer_packet_flags_fence_scope(
+      flags,
+      IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_MASK,
+      IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_RELEASE_SCOPE_SHIFT);
+}
 
 // Computes AQL packet control for one replayed command-buffer packet.
 iree_hal_amdgpu_aql_packet_control_t

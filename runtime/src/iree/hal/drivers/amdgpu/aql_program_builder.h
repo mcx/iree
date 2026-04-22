@@ -89,6 +89,9 @@ typedef struct iree_hal_amdgpu_aql_program_builder_t {
   uint8_t* command_cursor;
   // Backward cursor used to append binding source records.
   uint8_t* binding_source_cursor;
+  // Last payload command recorded in program order, if any. Execution barriers
+  // patch producer-side release scopes into this command at recording time.
+  iree_hal_amdgpu_command_buffer_command_header_t* last_payload_command;
   // Number of finalized and current blocks.
   uint32_t block_count;
   // Number of command records emitted into finalized and current blocks.
@@ -104,6 +107,8 @@ typedef struct iree_hal_amdgpu_aql_program_builder_t {
   // Number of leading AQL payload packets in the current block's initial
   // unordered span, including the first packet with a barrier edge.
   uint32_t current_block_initial_barrier_packet_count;
+  // Acquire fence scope carried by a pending execution barrier.
+  uint8_t pending_barrier_acquire_scope;
   // State flags for the current block from
   // iree_hal_amdgpu_aql_program_builder_flag_bits_t.
   iree_hal_amdgpu_aql_program_builder_flags_t current_block_flags;
@@ -146,6 +151,15 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
     uint32_t kernarg_length,
     iree_hal_amdgpu_command_buffer_command_header_t** out_command,
     iree_hal_amdgpu_command_buffer_binding_source_t** out_binding_sources);
+
+// Sets the fence scopes for the pending execution barrier most recently
+// appended to |builder|. The release scope patches the previous payload command
+// while the acquire scope is carried until the next payload command. Multiple
+// adjacent barriers are coalesced by taking the maximum encoded HSA fence scope
+// for each side.
+void iree_hal_amdgpu_aql_program_builder_set_pending_barrier_scopes(
+    iree_hal_amdgpu_aql_program_builder_t* builder, uint8_t acquire_scope,
+    uint8_t release_scope);
 
 #ifdef __cplusplus
 }  // extern "C"

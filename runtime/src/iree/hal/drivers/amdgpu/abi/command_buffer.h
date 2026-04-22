@@ -50,6 +50,17 @@ typedef enum iree_hal_amdgpu_command_buffer_command_flag_bits_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER = 1u << 1,
 } iree_hal_amdgpu_command_buffer_command_flag_bits_t;
 
+enum {
+  // First bit of the two-bit acquire fence scope field in command flags.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_SHIFT = 2,
+  // Bit mask of the two-bit acquire fence scope field in command flags.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_MASK = 0x0Cu,
+  // First bit of the two-bit release fence scope field in command flags.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_SHIFT = 4,
+  // Bit mask of the two-bit release fence scope field in command flags.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_MASK = 0x30u,
+};
+
 // Binding source flags used to form HAL dispatch kernarg pointer prefixes.
 typedef enum iree_hal_amdgpu_command_buffer_binding_source_flag_bits_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_NONE = 0u,
@@ -141,6 +152,44 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_command_header_t) == 8,
     "command header size is part of the command-buffer ABI");
+
+// Returns |flags| with its encoded fence scope fields replaced.
+static inline uint8_t
+iree_hal_amdgpu_command_buffer_command_flags_set_fence_scopes(
+    uint8_t flags, uint8_t acquire_scope, uint8_t release_scope) {
+  flags &=
+      (uint8_t)~(IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_MASK |
+                 IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_MASK);
+  flags |=
+      (uint8_t)((acquire_scope & 0x3u)
+                << IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_SHIFT);
+  flags |=
+      (uint8_t)((release_scope & 0x3u)
+                << IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_SHIFT);
+  return flags;
+}
+
+// Returns one encoded fence scope field from a command's flag byte.
+static inline uint8_t iree_hal_amdgpu_command_buffer_command_flags_fence_scope(
+    uint8_t flags, uint8_t mask, uint8_t shift) {
+  return (uint8_t)((flags & mask) >> shift);
+}
+
+// Returns the acquire fence scope encoded in a command's flag byte.
+static inline uint8_t
+iree_hal_amdgpu_command_buffer_command_flags_acquire_scope(uint8_t flags) {
+  return iree_hal_amdgpu_command_buffer_command_flags_fence_scope(
+      flags, IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_MASK,
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_ACQUIRE_SCOPE_SHIFT);
+}
+
+// Returns the release fence scope encoded in a command's flag byte.
+static inline uint8_t
+iree_hal_amdgpu_command_buffer_command_flags_release_scope(uint8_t flags) {
+  return iree_hal_amdgpu_command_buffer_command_flags_fence_scope(
+      flags, IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_MASK,
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_RELEASE_SCOPE_SHIFT);
+}
 
 // Source record used to emit one HAL ABI dispatch binding pointer.
 typedef struct IREE_AMDGPU_ALIGNAS(8)

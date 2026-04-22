@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "iree/base/alignment.h"
+#include "iree/hal/drivers/amdgpu/abi/queue.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/device/blit.h"
@@ -860,6 +861,68 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_end_debug_group(
 // Barriers and Events
 //===----------------------------------------------------------------------===//
 
+static iree_hsa_fence_scope_t
+iree_hal_amdgpu_aql_command_buffer_access_scope_fence_scope(
+    iree_hal_access_scope_t access_scope) {
+  if (access_scope == 0) return IREE_HSA_FENCE_SCOPE_NONE;
+  const iree_hal_access_scope_t system_scopes =
+      IREE_HAL_ACCESS_SCOPE_HOST_READ | IREE_HAL_ACCESS_SCOPE_HOST_WRITE |
+      IREE_HAL_ACCESS_SCOPE_MEMORY_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE;
+  return iree_any_bit_set(access_scope, system_scopes)
+             ? IREE_HSA_FENCE_SCOPE_SYSTEM
+             : IREE_HSA_FENCE_SCOPE_AGENT;
+}
+
+static void iree_hal_amdgpu_aql_command_buffer_accumulate_barrier_scopes(
+    iree_hal_access_scope_t source_scope, iree_hal_access_scope_t target_scope,
+    iree_hsa_fence_scope_t* release_scope,
+    iree_hsa_fence_scope_t* acquire_scope) {
+  const iree_hsa_fence_scope_t source_fence_scope =
+      iree_hal_amdgpu_aql_command_buffer_access_scope_fence_scope(source_scope);
+  const iree_hsa_fence_scope_t target_fence_scope =
+      iree_hal_amdgpu_aql_command_buffer_access_scope_fence_scope(target_scope);
+  const iree_hsa_fence_scope_t fence_scope =
+      source_fence_scope > target_fence_scope ? source_fence_scope
+                                              : target_fence_scope;
+  if (source_scope != 0 && fence_scope > *release_scope) {
+    *release_scope = fence_scope;
+  }
+  if (target_scope != 0 && fence_scope > *acquire_scope) {
+    *acquire_scope = fence_scope;
+  }
+}
+
+static void iree_hal_amdgpu_aql_command_buffer_resolve_barrier_scopes(
+    iree_hal_execution_stage_t source_stage_mask,
+    iree_hal_execution_stage_t target_stage_mask,
+    iree_host_size_t memory_barrier_count,
+    const iree_hal_memory_barrier_t* memory_barriers,
+    iree_host_size_t buffer_barrier_count,
+    const iree_hal_buffer_barrier_t* buffer_barriers,
+    iree_hsa_fence_scope_t* out_acquire_scope,
+    iree_hsa_fence_scope_t* out_release_scope) {
+  iree_hsa_fence_scope_t acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
+  iree_hsa_fence_scope_t release_scope = IREE_HSA_FENCE_SCOPE_NONE;
+  if (iree_any_bit_set(source_stage_mask, IREE_HAL_EXECUTION_STAGE_HOST)) {
+    acquire_scope = IREE_HSA_FENCE_SCOPE_SYSTEM;
+  }
+  if (iree_any_bit_set(target_stage_mask, IREE_HAL_EXECUTION_STAGE_HOST)) {
+    release_scope = IREE_HSA_FENCE_SCOPE_SYSTEM;
+  }
+  for (iree_host_size_t i = 0; i < memory_barrier_count; ++i) {
+    iree_hal_amdgpu_aql_command_buffer_accumulate_barrier_scopes(
+        memory_barriers[i].source_scope, memory_barriers[i].target_scope,
+        &release_scope, &acquire_scope);
+  }
+  for (iree_host_size_t i = 0; i < buffer_barrier_count; ++i) {
+    iree_hal_amdgpu_aql_command_buffer_accumulate_barrier_scopes(
+        buffer_barriers[i].source_scope, buffer_barriers[i].target_scope,
+        &release_scope, &acquire_scope);
+  }
+  *out_acquire_scope = acquire_scope;
+  *out_release_scope = release_scope;
+}
+
 static iree_status_t iree_hal_amdgpu_aql_command_buffer_execution_barrier(
     iree_hal_command_buffer_t* base_command_buffer,
     iree_hal_execution_stage_t source_stage_mask,
@@ -869,8 +932,20 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_execution_barrier(
     const iree_hal_memory_barrier_t* memory_barriers,
     iree_host_size_t buffer_barrier_count,
     const iree_hal_buffer_barrier_t* buffer_barriers) {
+  if (IREE_UNLIKELY(flags != IREE_HAL_EXECUTION_BARRIER_FLAG_NONE)) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "unsupported execution barrier flags");
+  }
+
   iree_hal_amdgpu_aql_command_buffer_t* command_buffer =
       iree_hal_amdgpu_aql_command_buffer_cast(base_command_buffer);
+
+  iree_hsa_fence_scope_t acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
+  iree_hsa_fence_scope_t release_scope = IREE_HSA_FENCE_SCOPE_NONE;
+  iree_hal_amdgpu_aql_command_buffer_resolve_barrier_scopes(
+      source_stage_mask, target_stage_mask, memory_barrier_count,
+      memory_barriers, buffer_barrier_count, buffer_barriers, &acquire_scope,
+      &release_scope);
 
   iree_hal_amdgpu_command_buffer_command_header_t* header = NULL;
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_program_builder_append_command(
@@ -882,9 +957,11 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_execution_barrier(
 
   iree_hal_amdgpu_command_buffer_barrier_command_t* barrier =
       (iree_hal_amdgpu_command_buffer_barrier_command_t*)header;
-  barrier->acquire_scope = 0;
-  barrier->release_scope = 0;
-  barrier->barrier_flags = 0;
+  barrier->acquire_scope = (uint8_t)acquire_scope;
+  barrier->release_scope = (uint8_t)release_scope;
+  barrier->barrier_flags = (uint16_t)flags;
+  iree_hal_amdgpu_aql_program_builder_set_pending_barrier_scopes(
+      &command_buffer->builder, barrier->acquire_scope, barrier->release_scope);
   return iree_ok_status();
 }
 

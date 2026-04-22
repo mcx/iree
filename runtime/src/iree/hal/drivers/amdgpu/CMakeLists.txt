@@ -302,6 +302,7 @@ iree_cc_test(
     iree::base
     iree::base::internal::arena
     iree::hal
+    iree::hal::drivers::amdgpu::abi
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
@@ -321,6 +322,7 @@ iree_cc_test(
     ::headers
     iree::base
     iree::base::internal::arena
+    iree::hal::drivers::amdgpu::abi
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
