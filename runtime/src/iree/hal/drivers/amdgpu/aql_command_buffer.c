@@ -1725,12 +1725,15 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_append_dispatch_command(
   *out_binding_sources = NULL;
 
   iree_hal_amdgpu_command_buffer_command_header_t* header = NULL;
+  const uint8_t command_flags =
+      plan->uses_indirect_parameters
+          ? IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER
+          : IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE;
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_program_builder_append_command(
       &command_buffer->builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH,
-      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE,
-      layout->command.byte_length, layout->command.binding_source_count,
-      layout->command.aql_packet_count, layout->kernarg.queue_block_length,
-      &header, out_binding_sources));
+      command_flags, layout->command.byte_length,
+      layout->command.binding_source_count, layout->command.aql_packet_count,
+      layout->kernarg.queue_block_length, &header, out_binding_sources));
 
   uint64_t prepublished_rodata_ordinal = 0;
   if (layout->prepublish_kernargs) {

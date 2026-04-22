@@ -1350,15 +1350,16 @@ TEST_F(HostQueueCommandBufferTest,
   iree_hal_amdgpu_aql_packet_control_t control =
       iree_hal_amdgpu_host_queue_command_buffer_packet_control(
           queue, &resolution, iree_hal_semaphore_list_empty(),
-          /*packet_index=*/0, /*has_execution_barrier=*/false,
-          /*is_final_packet=*/false);
+          /*packet_index=*/0, IREE_HSA_FENCE_SCOPE_NONE,
+          IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE);
   EXPECT_TRUE(control.has_barrier);
   EXPECT_EQ(control.acquire_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
   EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
 
   control = iree_hal_amdgpu_host_queue_command_buffer_packet_control(
       queue, &resolution, iree_hal_semaphore_list_empty(), /*packet_index=*/1,
-      /*has_execution_barrier=*/false, /*is_final_packet=*/false);
+      IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE);
   EXPECT_FALSE(control.has_barrier);
   EXPECT_EQ(control.acquire_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);
   EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_AGENT);

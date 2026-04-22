@@ -265,7 +265,7 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
   iree_status_t status = iree_hal_amdgpu_host_queue_try_begin_kernel_submission(
       replay->queue, resolution, replay->signal_semaphore_list,
       /*operation_resource_count=*/1, /*payload_packet_count=*/1,
-      /*kernarg_block_count=*/1, out_ready, &submission);
+      /*kernarg_block_count=*/0, out_ready, &submission);
   if (!iree_status_is_ok(status) || !*out_ready) {
     iree_hal_amdgpu_host_queue_cancel_profile_queue_device_events(
         replay->queue, profile_queue_device_events);
@@ -300,8 +300,8 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
           replay->queue, timestamp_packet_id,
           iree_hal_amdgpu_host_queue_command_buffer_packet_control(
               replay->queue, resolution, replay->signal_semaphore_list,
-              /*packet_index=*/0,
-              /*has_execution_barrier=*/false, /*is_final_packet=*/true),
+              /*packet_index=*/0, IREE_HSA_FENCE_SCOPE_NONE,
+              IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_FINAL),
           iree_hal_amdgpu_notification_ring_epoch_signal(
               &replay->queue->notification_ring),
           queue_device_event);

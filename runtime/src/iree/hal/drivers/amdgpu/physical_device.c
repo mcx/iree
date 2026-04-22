@@ -530,6 +530,115 @@ static iree_status_t iree_hal_amdgpu_physical_device_query_global_memory_pools(
       libhsa, device_agent, out_fine_block_memory_pool);
 }
 
+typedef struct iree_hal_amdgpu_physical_device_kernarg_ring_memory_t {
+  // Descriptor consumed by host queue initialization.
+  iree_hal_amdgpu_kernarg_ring_memory_t descriptor;
+  // Inline access-agent list referenced by |descriptor|.
+  hsa_agent_t access_agents[IREE_HAL_AMDGPU_MAX_CPU_AGENT + 1];
+} iree_hal_amdgpu_physical_device_kernarg_ring_memory_t;
+
+static bool iree_hal_amdgpu_physical_device_memory_pool_access_is_valid(
+    hsa_amd_memory_pool_access_t access) {
+  switch (access) {
+    case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
+    case HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT:
+    case HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static iree_status_t iree_hal_amdgpu_physical_device_query_memory_pool_access(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t agent,
+    hsa_amd_memory_pool_t memory_pool,
+    hsa_amd_memory_pool_access_t* out_access) {
+  *out_access = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
+      IREE_LIBHSA(libhsa), agent, memory_pool,
+      HSA_AMD_AGENT_MEMORY_POOL_INFO_ACCESS, out_access));
+  if (IREE_LIKELY(iree_hal_amdgpu_physical_device_memory_pool_access_is_valid(
+          *out_access))) {
+    return iree_ok_status();
+  }
+  return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                          "HSA reported unknown memory pool access mode %u",
+                          (uint32_t)*out_access);
+}
+
+static void iree_hal_amdgpu_physical_device_use_host_kernarg_memory(
+    const iree_hal_amdgpu_host_memory_pools_t* host_memory_pools,
+    hsa_agent_t device_agent,
+    iree_hal_amdgpu_physical_device_kernarg_ring_memory_t* out_memory) {
+  memset(out_memory, 0, sizeof(*out_memory));
+  out_memory->access_agents[0] = device_agent;
+  out_memory->descriptor = (iree_hal_amdgpu_kernarg_ring_memory_t){
+      .memory_pool = host_memory_pools->kernarg_pool,
+      .access_agents = out_memory->access_agents,
+      .access_agent_count = 1,
+  };
+}
+
+static hsa_amd_hdp_flush_t
+iree_hal_amdgpu_physical_device_query_hdp_flush_registers(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t device_agent) {
+  hsa_amd_hdp_flush_t hdp_flush = {0};
+  const hsa_status_t hsa_status = iree_hsa_agent_get_info_raw(
+      libhsa, device_agent, (hsa_agent_info_t)HSA_AMD_AGENT_INFO_HDP_FLUSH,
+      &hdp_flush);
+  if (hsa_status != HSA_STATUS_SUCCESS) {
+    memset(&hdp_flush, 0, sizeof(hdp_flush));
+  }
+  return hdp_flush;
+}
+
+static iree_status_t iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
+    const iree_hal_amdgpu_libhsa_t* libhsa,
+    const iree_hal_amdgpu_topology_t* topology,
+    const iree_hal_amdgpu_host_memory_pools_t* host_memory_pools,
+    hsa_agent_t device_agent, hsa_amd_memory_pool_t device_coarse_memory_pool,
+    iree_hal_amdgpu_physical_device_kernarg_ring_memory_t* out_memory) {
+  iree_hal_amdgpu_physical_device_use_host_kernarg_memory(
+      host_memory_pools, device_agent, out_memory);
+  if (!device_coarse_memory_pool.handle || topology->cpu_agent_count == 0) {
+    return iree_ok_status();
+  }
+
+  const hsa_amd_hdp_flush_t hdp_flush =
+      iree_hal_amdgpu_physical_device_query_hdp_flush_registers(libhsa,
+                                                                device_agent);
+  if (!hdp_flush.HDP_MEM_FLUSH_CNTL || !hdp_flush.HDP_REG_FLUSH_CNTL) {
+    return iree_ok_status();
+  }
+
+  for (iree_host_size_t i = 0; i < topology->cpu_agent_count; ++i) {
+    hsa_amd_memory_pool_access_t access =
+        HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_physical_device_query_memory_pool_access(
+            libhsa, topology->cpu_agents[i], device_coarse_memory_pool,
+            &access));
+    if (access == HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED) {
+      return iree_ok_status();
+    }
+  }
+
+  iree_host_size_t access_agent_count = 0;
+  for (iree_host_size_t i = 0; i < topology->cpu_agent_count; ++i) {
+    out_memory->access_agents[access_agent_count++] = topology->cpu_agents[i];
+  }
+  out_memory->access_agents[access_agent_count++] = device_agent;
+  out_memory->descriptor = (iree_hal_amdgpu_kernarg_ring_memory_t){
+      .memory_pool = device_coarse_memory_pool,
+      .access_agents = out_memory->access_agents,
+      .access_agent_count = access_agent_count,
+      .publication.mode =
+          IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_HDP_FLUSH,
+      .publication.hdp_mem_flush_control = hdp_flush.HDP_MEM_FLUSH_CNTL,
+  };
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_amdgpu_physical_device_initialize_block_pool(
     iree_hal_amdgpu_libhsa_t* libhsa,
     iree_hal_amdgpu_block_pool_options_t pool_options, hsa_agent_t device_agent,
@@ -908,6 +1017,14 @@ iree_status_t iree_hal_amdgpu_physical_device_assign_frontier(
       .physical_device_count = system->topology.gpu_agent_count,
       .queue_count_per_physical_device = physical_device->host_queue_capacity,
   };
+  iree_hal_amdgpu_physical_device_kernarg_ring_memory_t kernarg_ring_memory;
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
+        libhsa, &system->topology, host_memory_pools,
+        physical_device->device_agent,
+        physical_device->coarse_block_pools.large.memory_pool,
+        &kernarg_ring_memory);
+  }
   for (iree_host_size_t queue_ordinal = 0;
        queue_ordinal < physical_device->host_queue_capacity &&
        iree_status_is_ok(status);
@@ -927,7 +1044,7 @@ iree_status_t iree_hal_amdgpu_physical_device_assign_frontier(
                                        &completion_thread_affinity);
     status = iree_hal_amdgpu_host_queue_initialize(
         libhsa, logical_device, proactor, physical_device->device_agent,
-        host_memory_pools->kernarg_pool, host_memory_pools->fine_pool,
+        &kernarg_ring_memory.descriptor, host_memory_pools->fine_pool,
         frontier_tracker, queue_axis, resolved.queue_affinity,
         completion_thread_affinity, physical_device->wait_barrier_strategy,
         physical_device->vendor_packet_capabilities, epoch_signal_table,

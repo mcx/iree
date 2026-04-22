@@ -537,7 +537,7 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
 // The caller must allocate at least sizeof(iree_hal_amdgpu_host_queue_t).
 //
 // Creates an HSA hardware queue on |gpu_agent|, initializes the AQL ring from
-// it, allocates a kernarg ring from |kernarg_pool|, creates the epoch signal
+// it, allocates a kernarg ring from |kernarg_memory|, creates the epoch signal
 // and notification ring, and starts the completion thread.
 //
 // |axis| is this queue's identity in the causal graph, constructed by the
@@ -572,7 +572,8 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
 iree_status_t iree_hal_amdgpu_host_queue_initialize(
     const iree_hal_amdgpu_libhsa_t* libhsa, iree_hal_device_t* logical_device,
     iree_async_proactor_t* proactor, hsa_agent_t gpu_agent,
-    hsa_amd_memory_pool_t kernarg_pool, hsa_amd_memory_pool_t pm4_ib_pool,
+    const iree_hal_amdgpu_kernarg_ring_memory_t* kernarg_memory,
+    hsa_amd_memory_pool_t pm4_ib_pool,
     iree_async_frontier_tracker_t* frontier_tracker, iree_async_axis_t axis,
     iree_hal_queue_affinity_t queue_affinity,
     iree_thread_affinity_t completion_thread_affinity,

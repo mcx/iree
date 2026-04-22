@@ -65,6 +65,17 @@ iree_hal_amdgpu_aql_program_block_next(
 // Program Builder
 //===----------------------------------------------------------------------===//
 
+typedef uint32_t iree_hal_amdgpu_aql_program_builder_flags_t;
+enum iree_hal_amdgpu_aql_program_builder_flag_bits_t {
+  IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_NONE = 0u,
+  // The current block has recorded its initial barrier packet count.
+  IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET = 1u << 0,
+  // An execution barrier command must apply to the next payload command,
+  // possibly in a later split block.
+  IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER = 1u
+                                                                           << 1,
+};
+
 typedef struct iree_hal_amdgpu_aql_program_builder_t {
   // Block pool used to acquire fixed-capacity recording blocks.
   iree_arena_block_pool_t* block_pool;
@@ -90,6 +101,12 @@ typedef struct iree_hal_amdgpu_aql_program_builder_t {
   uint32_t current_block_aql_packet_count;
   // Worst-case kernarg byte count emitted by the current block.
   uint32_t current_block_kernarg_length;
+  // Number of leading AQL payload packets in the current block's initial
+  // unordered span, including the first packet with a barrier edge.
+  uint32_t current_block_initial_barrier_packet_count;
+  // State flags for the current block from
+  // iree_hal_amdgpu_aql_program_builder_flag_bits_t.
+  iree_hal_amdgpu_aql_program_builder_flags_t current_block_flags;
   // Worst-case AQL packet count across finalized blocks.
   uint32_t max_block_aql_packet_count;
   // Worst-case kernarg byte count across finalized blocks.

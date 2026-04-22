@@ -886,14 +886,19 @@ uint64_t iree_hal_amdgpu_host_queue_finish_dispatch_submission(
   }
 
   uint16_t profile_harvest_header = 0;
+  const iree_hsa_fence_scope_t dispatch_minimum_acquire_scope =
+      submission->kernel.kernarg_blocks
+          ? iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+                queue, submission->minimum_acquire_scope)
+          : submission->minimum_acquire_scope;
   iree_hal_amdgpu_aql_packet_control_t dispatch_packet_control =
       iree_hal_amdgpu_host_queue_final_dispatch_packet_control(
           queue, resolution, signal_semaphore_list,
-          submission->minimum_acquire_scope, submission->minimum_release_scope);
+          dispatch_minimum_acquire_scope, submission->minimum_release_scope);
   if (queue_device_event || submission->profile_harvest_slot) {
     dispatch_packet_control =
         iree_hal_amdgpu_host_queue_payload_dispatch_packet_control(
-            resolution, submission->minimum_acquire_scope,
+            resolution, dispatch_minimum_acquire_scope,
             submission->minimum_release_scope);
   }
   if (submission->profile_harvest_slot) {
@@ -911,22 +916,27 @@ uint64_t iree_hal_amdgpu_host_queue_finish_dispatch_submission(
         queue_device_event ? iree_hsa_signal_null()
                            : iree_hal_amdgpu_notification_ring_epoch_signal(
                                  &queue->notification_ring);
+    const iree_hsa_fence_scope_t profile_harvest_acquire_scope =
+        iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     profile_harvest_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         queue_device_event
             ? iree_hal_amdgpu_aql_packet_control_barrier(
                   iree_hal_amdgpu_host_queue_max_fence_scope(
-                      IREE_HSA_FENCE_SCOPE_AGENT,
+                      profile_harvest_acquire_scope,
                       resolution->inline_acquire_scope),
                   IREE_HSA_FENCE_SCOPE_SYSTEM)
             : iree_hal_amdgpu_host_queue_final_dispatch_packet_control(
                   queue, resolution, signal_semaphore_list,
-                  IREE_HSA_FENCE_SCOPE_AGENT, IREE_HSA_FENCE_SCOPE_SYSTEM));
+                  profile_harvest_acquire_scope, IREE_HSA_FENCE_SCOPE_SYSTEM));
   }
   const uint16_t dispatch_header = iree_hal_amdgpu_aql_make_header(
       IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH, dispatch_packet_control);
   const uint32_t profile_queue_device_prefix_packet_count =
       queue_device_event ? 1u : 0u;
+  iree_hal_amdgpu_host_queue_publish_submission_kernargs(queue,
+                                                         &submission->kernel);
   if (queue_device_event) {
     iree_hal_amdgpu_host_queue_commit_queue_device_start_packet(
         queue, resolution,

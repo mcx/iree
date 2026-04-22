@@ -316,7 +316,8 @@ static void iree_hal_amdgpu_host_queue_error_callback(hsa_status_t status,
 iree_status_t iree_hal_amdgpu_host_queue_initialize(
     const iree_hal_amdgpu_libhsa_t* libhsa, iree_hal_device_t* logical_device,
     iree_async_proactor_t* proactor, hsa_agent_t gpu_agent,
-    hsa_amd_memory_pool_t kernarg_pool, hsa_amd_memory_pool_t pm4_ib_pool,
+    const iree_hal_amdgpu_kernarg_ring_memory_t* kernarg_memory,
+    hsa_amd_memory_pool_t pm4_ib_pool,
     iree_async_frontier_tracker_t* frontier_tracker, iree_async_axis_t axis,
     iree_hal_queue_affinity_t queue_affinity,
     iree_thread_affinity_t completion_thread_affinity,
@@ -335,6 +336,7 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   IREE_ASSERT_ARGUMENT(libhsa);
   IREE_ASSERT_ARGUMENT(logical_device);
   IREE_ASSERT_ARGUMENT(proactor);
+  IREE_ASSERT_ARGUMENT(kernarg_memory);
   IREE_ASSERT_ARGUMENT(frontier_tracker);
   IREE_ASSERT_ARGUMENT(epoch_table);
   IREE_ASSERT_ARGUMENT(block_pool);
@@ -434,11 +436,11 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
                                         &out_queue->aql_ring);
   }
 
-  // Initialize the kernarg ring from the HSA kernarg memory pool.
+  // Initialize the kernarg ring from the selected HSA memory pool.
   if (iree_status_is_ok(status)) {
-    status = iree_hal_amdgpu_kernarg_ring_initialize(
-        libhsa, gpu_agent, kernarg_pool, kernarg_capacity_in_blocks,
-        &out_queue->kernarg_ring);
+    status = iree_hal_amdgpu_kernarg_ring_initialize(libhsa, kernarg_memory,
+                                                     kernarg_capacity_in_blocks,
+                                                     &out_queue->kernarg_ring);
   }
 
   // Initialize the optional PM4 IB slot buffer. Capability-driven allocation

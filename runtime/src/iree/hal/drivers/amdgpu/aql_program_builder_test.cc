@@ -136,8 +136,10 @@ TEST_F(AqlProgramBuilderTest, AppendsCommandAndBindingSources) {
   ASSERT_NE(command, nullptr);
   ASSERT_NE(binding_sources, nullptr);
   EXPECT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
-  EXPECT_EQ(command->flags,
-            IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER);
+  EXPECT_TRUE(iree_all_bits_set(
+      command->flags,
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER |
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS));
   EXPECT_EQ(command->command_index, 0u);
 
   binding_sources[0].flags =

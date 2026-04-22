@@ -732,18 +732,19 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_indirect_dispatch(
                                                       ->implicit_args_offset)
           : NULL;
   const uint16_t dispatch_setup = dispatch_packet->dispatch.setup;
+  const iree_hsa_fence_scope_t dispatch_acquire_scope =
+      iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+          queue, IREE_HSA_FENCE_SCOPE_AGENT);
   const iree_hal_amdgpu_aql_packet_control_t dispatch_packet_control =
       (profile_dispatch_packet || profile_queue_device_event)
           ? iree_hal_amdgpu_aql_packet_control_barrier(
                 iree_hal_amdgpu_host_queue_max_fence_scope(
-                    IREE_HSA_FENCE_SCOPE_AGENT,
-                    resolution->inline_acquire_scope),
+                    dispatch_acquire_scope, resolution->inline_acquire_scope),
                 profile_dispatch_packet ? IREE_HSA_FENCE_SCOPE_AGENT
                                         : IREE_HSA_FENCE_SCOPE_NONE)
           : iree_hal_amdgpu_aql_packet_control_barrier(
                 iree_hal_amdgpu_host_queue_max_fence_scope(
-                    IREE_HSA_FENCE_SCOPE_AGENT,
-                    resolution->inline_acquire_scope),
+                    dispatch_acquire_scope, resolution->inline_acquire_scope),
                 iree_hal_amdgpu_host_queue_signal_list_release_scope(
                     queue, signal_semaphore_list));
   const uint16_t dispatch_header = iree_hal_amdgpu_aql_make_header(
@@ -804,13 +805,18 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_indirect_dispatch(
         queue_device_event ? iree_hsa_signal_null()
                            : iree_hal_amdgpu_notification_ring_epoch_signal(
                                  &queue->notification_ring);
+    const iree_hsa_fence_scope_t profile_harvest_acquire_scope =
+        iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     profile_harvest_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         iree_hal_amdgpu_aql_packet_control_barrier(
             iree_hal_amdgpu_host_queue_max_fence_scope(
-                IREE_HSA_FENCE_SCOPE_AGENT, resolution->inline_acquire_scope),
+                profile_harvest_acquire_scope,
+                resolution->inline_acquire_scope),
             IREE_HSA_FENCE_SCOPE_SYSTEM));
   }
+  iree_hal_amdgpu_host_queue_publish_submission_kernargs(queue, &submission);
   if (queue_device_event) {
     iree_hal_amdgpu_host_queue_commit_queue_device_start_packet(
         queue, resolution,

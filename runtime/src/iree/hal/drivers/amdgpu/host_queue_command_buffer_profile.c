@@ -181,8 +181,7 @@ void iree_hal_amdgpu_host_queue_record_command_buffer_profile_dispatch_source(
     const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command,
     iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events,
     iree_hal_amdgpu_profile_dispatch_harvest_source_t* profile_harvest_sources,
-    bool profile_dispatch_packet, uint32_t* inout_profile_event_index) {
-  if (!profile_dispatch_packet) return;
+    uint32_t* inout_profile_event_index) {
   const uint32_t profile_event_index = *inout_profile_event_index;
   const uint64_t profile_event_position =
       profile_events.first_event_position + profile_event_index;

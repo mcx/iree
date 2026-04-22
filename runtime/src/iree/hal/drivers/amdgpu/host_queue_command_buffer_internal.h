@@ -14,13 +14,24 @@
 extern "C" {
 #endif  // __cplusplus
 
+typedef uint32_t iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t;
+enum iree_hal_amdgpu_host_queue_command_buffer_packet_flag_bits_t {
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE = 0u,
+  // Packet must participate in the command-buffer execution dependency chain.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_EXECUTION_BARRIER =
+      1u << 0,
+  // Packet owns queue completion and releases user-visible signal semaphores.
+  IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_FINAL = 1u << 1,
+};
+
 // Computes AQL packet control for one replayed command-buffer packet.
 iree_hal_amdgpu_aql_packet_control_t
 iree_hal_amdgpu_host_queue_command_buffer_packet_control(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_wait_resolution_t* resolution,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    uint32_t packet_index, bool has_execution_barrier, bool is_final_packet);
+    uint32_t packet_index, iree_hsa_fence_scope_t minimum_acquire_scope,
+    iree_hal_amdgpu_host_queue_command_buffer_packet_flags_t packet_flags);
 
 // Submits one finalized command-buffer block to the queue.
 iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(

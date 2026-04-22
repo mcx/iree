@@ -178,6 +178,8 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_begin_block(
   builder->current_block_binding_source_count = 0;
   builder->current_block_aql_packet_count = 0;
   builder->current_block_kernarg_length = 0;
+  builder->current_block_initial_barrier_packet_count = 0;
+  builder->current_block_flags = IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_NONE;
   ++builder->block_count;
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -194,6 +196,12 @@ static void iree_hal_amdgpu_aql_program_builder_finalize_block(
   block->binding_source_count = builder->current_block_binding_source_count;
   block->aql_packet_count = builder->current_block_aql_packet_count;
   block->kernarg_length = builder->current_block_kernarg_length;
+  block->initial_barrier_packet_count =
+      iree_any_bit_set(
+          builder->current_block_flags,
+          IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET)
+          ? builder->current_block_initial_barrier_packet_count
+          : block->aql_packet_count;
 
   if (block->aql_packet_count > builder->max_block_aql_packet_count) {
     builder->max_block_aql_packet_count = block->aql_packet_count;
@@ -282,11 +290,17 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_split_block(
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "command-buffer block count overflow");
   }
+  const iree_hal_amdgpu_aql_program_builder_flags_t carried_flags =
+      builder->current_block_flags &
+      IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_program_builder_append_terminator(
       builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH,
       builder->block_count));
   iree_hal_amdgpu_aql_program_builder_finalize_block(builder);
-  return iree_hal_amdgpu_aql_program_builder_begin_block(builder);
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_aql_program_builder_begin_block(builder));
+  builder->current_block_flags |= carried_flags;
+  return iree_ok_status();
 }
 
 static iree_status_t iree_hal_amdgpu_aql_program_builder_validate_command(
@@ -503,12 +517,47 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
     memset(binding_sources, 0, binding_source_length);
   }
 
+  uint8_t command_flags = flags;
+  if (kernarg_length != 0) {
+    command_flags |=
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS;
+  }
+  const bool command_has_payload = aql_packet_count != 0;
+  const bool command_has_barrier_packet =
+      command_has_payload &&
+      (iree_any_bit_set(
+           builder->current_block_flags,
+           IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER) ||
+       iree_any_bit_set(
+           command_flags,
+           IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER));
+
   command->opcode = opcode;
-  command->flags = flags;
+  if (command_has_barrier_packet) {
+    command_flags |= IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER;
+  }
+  command->flags = command_flags;
   command->length_qwords =
       (uint16_t)(command_length /
                  IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT);
   command->command_index = builder->command_count;
+
+  if (command_has_barrier_packet &&
+      !iree_any_bit_set(
+          builder->current_block_flags,
+          IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET)) {
+    builder->current_block_initial_barrier_packet_count =
+        builder->current_block_aql_packet_count + 1;
+    builder->current_block_flags |=
+        IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET;
+  }
+  if (opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER) {
+    builder->current_block_flags |=
+        IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
+  } else if (command_has_payload) {
+    builder->current_block_flags &=
+        ~IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
+  }
 
   ++builder->command_count;
   ++builder->current_block_command_count;

@@ -43,7 +43,11 @@ typedef enum iree_hal_amdgpu_command_buffer_opcode_e {
 // Command flags shared by all command records.
 typedef enum iree_hal_amdgpu_command_buffer_command_flag_bits_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE = 0u,
-  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER = 1u << 0,
+  // The command writes queue-owned kernarg memory at replay time.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS = 1u << 0,
+  // The command's first payload packet must participate in the command-buffer
+  // execution dependency chain.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER = 1u << 1,
 } iree_hal_amdgpu_command_buffer_command_flag_bits_t;
 
 // Binding source flags used to form HAL dispatch kernarg pointer prefixes.
@@ -106,12 +110,16 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint32_t aql_packet_count;
   // Worst-case kernarg bytes emitted when replaying this block.
   uint32_t kernarg_length;
+  // Number of leading AQL payload packets in the initial unordered span,
+  // including the first packet with a barrier edge. Zero when the block emits
+  // no AQL packets.
+  uint32_t initial_barrier_packet_count;
   // Byte offset from this header to block-local read-only payload data.
   uint32_t rodata_offset;
   // Total bytes occupied by block-local read-only payload data.
   uint32_t rodata_length;
   // Reserved bytes that must be zero in version 0.
-  uint32_t reserved0[3];
+  uint32_t reserved0[2];
 } iree_hal_amdgpu_command_buffer_block_header_t;
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_block_header_t) == 64,
