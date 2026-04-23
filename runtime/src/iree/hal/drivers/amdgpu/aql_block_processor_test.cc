@@ -40,11 +40,43 @@ struct DirectDispatchBlock {
   iree_hal_amdgpu_command_buffer_return_command_t return_command;
 };
 
+template <uint32_t DispatchCount>
+struct DispatchBlock {
+  // Block header at the ABI-defined block base.
+  iree_hal_amdgpu_command_buffer_block_header_t header;
+  // Direct dispatch commands recorded in this block.
+  iree_hal_amdgpu_command_buffer_dispatch_command_t
+      dispatch_commands[DispatchCount];
+  // Return terminator following the dispatch commands.
+  iree_hal_amdgpu_command_buffer_return_command_t return_command;
+};
+
 struct MalformedBlock {
   // Block header at the ABI-defined block base.
   iree_hal_amdgpu_command_buffer_block_header_t header;
   // Non-terminating barrier command used to exercise validation.
   iree_hal_amdgpu_command_buffer_barrier_command_t barrier_command;
+};
+
+struct PacketHeaderSummary {
+  // Counts accumulated across emitted packet headers.
+  struct {
+    // Number of emitted packet headers summarized.
+    uint32_t total;
+    // Number of emitted packet headers carrying the AQL barrier bit.
+    uint32_t barrier;
+    // Number of emitted packet headers with SYSTEM acquire scope.
+    uint32_t system_acquire;
+    // Number of emitted packet headers with SYSTEM release scope.
+    uint32_t system_release;
+  } counts;
+  // Boundary packet headers from the emitted span.
+  struct {
+    // First emitted packet header, or zero for empty spans.
+    uint16_t first;
+    // Last emitted packet header, or zero for empty spans.
+    uint16_t last;
+  } headers;
 };
 
 static void InitializeBlockHeader(
@@ -66,17 +98,48 @@ static void InitializeBlockHeader(
   out_header->rodata_offset = block_length;
 }
 
+static void InitializeReturnCommand(
+    iree_hal_amdgpu_command_buffer_return_command_t* out_command) {
+  std::memset(out_command, 0, sizeof(*out_command));
+  out_command->header.opcode = IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN;
+  out_command->header.length_qwords =
+      sizeof(*out_command) / IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
+}
+
+static uint8_t CommandFlags(uint8_t flags, iree_hsa_fence_scope_t acquire_scope,
+                            iree_hsa_fence_scope_t release_scope) {
+  return iree_hal_amdgpu_command_buffer_command_flags_set_fence_scopes(
+      flags, (uint8_t)acquire_scope, (uint8_t)release_scope);
+}
+
+static void InitializeDirectDispatchCommand(
+    uint32_t command_index, uint8_t command_flags,
+    iree_hal_amdgpu_command_buffer_dispatch_command_t* out_command) {
+  std::memset(out_command, 0, sizeof(*out_command));
+  out_command->header.opcode = IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH;
+  out_command->header.flags = command_flags;
+  out_command->header.length_qwords =
+      sizeof(*out_command) / IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
+  out_command->header.command_index = command_index;
+  out_command->kernel_object = 0xABCDEF0000000000ull + command_index;
+  out_command->payload_reference = sizeof(*out_command);
+  out_command->kernarg_strategy =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_CUSTOM_DIRECT;
+  out_command->setup = 3;
+  out_command->workgroup_size[0] = 1;
+  out_command->workgroup_size[1] = 1;
+  out_command->workgroup_size[2] = 1;
+  out_command->grid_size[0] = 1;
+  out_command->grid_size[1] = 1;
+  out_command->grid_size[2] = 1;
+}
+
 static ReturnBlock MakeReturnBlock() {
   ReturnBlock block;
   InitializeBlockHeader(sizeof(block), sizeof(block.return_command),
                         /*command_count=*/1, /*aql_packet_count=*/0,
                         /*kernarg_length=*/0, &block.header);
-  std::memset(&block.return_command, 0, sizeof(block.return_command));
-  block.return_command.header.opcode =
-      IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN;
-  block.return_command.header.length_qwords =
-      sizeof(block.return_command) /
-      IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
+  InitializeReturnCommand(&block.return_command);
   return block;
 }
 
@@ -146,12 +209,30 @@ static DirectDispatchBlock MakeDirectDispatchBlock() {
   block.tail[0] = 0x0A0B0C0D0E0F1011ull;
   block.tail[1] = 0x1213141516171819ull;
 
-  std::memset(&block.return_command, 0, sizeof(block.return_command));
-  block.return_command.header.opcode =
-      IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN;
-  block.return_command.header.length_qwords =
-      sizeof(block.return_command) /
-      IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
+  block.header.dispatch_count = 1;
+  InitializeReturnCommand(&block.return_command);
+  return block;
+}
+
+template <uint32_t DispatchCount>
+static DispatchBlock<DispatchCount> MakeDispatchBlock(
+    const uint8_t (&dispatch_command_flags)[DispatchCount]) {
+  DispatchBlock<DispatchCount> block;
+  const uint32_t command_length =
+      DispatchCount * sizeof(block.dispatch_commands[0]) +
+      sizeof(block.return_command);
+  InitializeBlockHeader(sizeof(block), command_length,
+                        /*command_count=*/DispatchCount + 1,
+                        /*aql_packet_count=*/DispatchCount,
+                        /*kernarg_length=*/DispatchCount *
+                            sizeof(iree_hal_amdgpu_kernarg_block_t),
+                        &block.header);
+  block.header.dispatch_count = DispatchCount;
+  for (uint32_t i = 0; i < DispatchCount; ++i) {
+    InitializeDirectDispatchCommand(i, dispatch_command_flags[i],
+                                    &block.dispatch_commands[i]);
+  }
+  InitializeReturnCommand(&block.return_command);
   return block;
 }
 
@@ -161,7 +242,11 @@ static iree_hal_amdgpu_aql_block_processor_t MakeProcessor(
     iree_hal_amdgpu_kernarg_block_t* kernarg_blocks,
     uint32_t kernarg_block_count,
     iree_hal_amdgpu_aql_block_processor_flags_t flags =
-        IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_NONE) {
+        IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_NONE,
+    iree_hsa_fence_scope_t inline_acquire_scope = IREE_HSA_FENCE_SCOPE_NONE,
+    iree_hsa_fence_scope_t signal_release_scope = IREE_HSA_FENCE_SCOPE_SYSTEM,
+    iree_hsa_fence_scope_t payload_acquire_scope =
+        IREE_HSA_FENCE_SCOPE_SYSTEM) {
   iree_hal_amdgpu_aql_block_processor_t processor = {};
   processor.packets.ring = ring;
   processor.packets.first_id = 4;
@@ -171,10 +256,79 @@ static iree_hal_amdgpu_aql_block_processor_t MakeProcessor(
   processor.packets.setups = packet_setups;
   processor.kernargs.blocks = kernarg_blocks;
   processor.kernargs.count = kernarg_block_count;
-  processor.submission.signal_release_scope = IREE_HSA_FENCE_SCOPE_SYSTEM;
-  processor.payload.acquire_scope = IREE_HSA_FENCE_SCOPE_SYSTEM;
+  processor.submission.inline_acquire_scope = inline_acquire_scope;
+  processor.submission.signal_release_scope = signal_release_scope;
+  processor.payload.acquire_scope = payload_acquire_scope;
   processor.flags = flags;
   return processor;
+}
+
+static uint16_t AqlHeaderField(uint16_t header, uint32_t bit_offset,
+                               uint32_t bit_width) {
+  return (header >> bit_offset) & ((1u << bit_width) - 1u);
+}
+
+static bool AqlHeaderHasBarrier(uint16_t header) {
+  return AqlHeaderField(header, IREE_HSA_PACKET_HEADER_BARRIER,
+                        IREE_HSA_PACKET_HEADER_WIDTH_BARRIER) != 0;
+}
+
+static iree_hsa_fence_scope_t AqlHeaderAcquireScope(uint16_t header) {
+  return (iree_hsa_fence_scope_t)AqlHeaderField(
+      header, IREE_HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE,
+      IREE_HSA_PACKET_HEADER_WIDTH_SCACQUIRE_FENCE_SCOPE);
+}
+
+static iree_hsa_fence_scope_t AqlHeaderReleaseScope(uint16_t header) {
+  return (iree_hsa_fence_scope_t)AqlHeaderField(
+      header, IREE_HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE,
+      IREE_HSA_PACKET_HEADER_WIDTH_SCRELEASE_FENCE_SCOPE);
+}
+
+static PacketHeaderSummary SummarizePacketHeaders(
+    const uint16_t* packet_headers, uint32_t packet_count) {
+  PacketHeaderSummary summary = {};
+  for (uint32_t i = 0; i < packet_count; ++i) {
+    const uint16_t header = packet_headers[i];
+    if (summary.counts.total == 0) summary.headers.first = header;
+    summary.headers.last = header;
+    ++summary.counts.total;
+    if (AqlHeaderHasBarrier(header)) ++summary.counts.barrier;
+    if (AqlHeaderAcquireScope(header) == IREE_HSA_FENCE_SCOPE_SYSTEM) {
+      ++summary.counts.system_acquire;
+    }
+    if (AqlHeaderReleaseScope(header) == IREE_HSA_FENCE_SCOPE_SYSTEM) {
+      ++summary.counts.system_release;
+    }
+  }
+  return summary;
+}
+
+template <uint32_t DispatchCount>
+static iree_status_t InvokeAndSummarizeDispatchBlock(
+    const DispatchBlock<DispatchCount>& block,
+    iree_hal_amdgpu_aql_block_processor_flags_t flags,
+    iree_hsa_fence_scope_t inline_acquire_scope,
+    iree_hsa_fence_scope_t signal_release_scope,
+    iree_hsa_fence_scope_t payload_acquire_scope,
+    PacketHeaderSummary* out_summary) {
+  alignas(64) iree_hal_amdgpu_aql_packet_t packets[8] = {};
+  iree_hal_amdgpu_aql_ring_t ring = {};
+  ring.base = packets;
+  ring.mask = IREE_ARRAYSIZE(packets) - 1u;
+  uint16_t packet_headers[DispatchCount] = {};
+  uint16_t packet_setups[DispatchCount] = {};
+  iree_hal_amdgpu_kernarg_block_t kernarg_blocks[DispatchCount] = {};
+  iree_hal_amdgpu_aql_block_processor_t processor = MakeProcessor(
+      &ring, /*packet_count=*/DispatchCount, packet_headers, packet_setups,
+      kernarg_blocks, /*kernarg_block_count=*/DispatchCount, flags,
+      inline_acquire_scope, signal_release_scope, payload_acquire_scope);
+
+  iree_hal_amdgpu_aql_block_processor_result_t result;
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_block_processor_invoke(
+      &processor, &block.header, &result));
+  *out_summary = SummarizePacketHeaders(packet_headers, DispatchCount);
+  return iree_ok_status();
 }
 
 TEST(AqlBlockProcessorTest, ReturnTerminatorProducesNoPayload) {
@@ -273,6 +427,156 @@ TEST(AqlBlockProcessorTest, DirectDispatchPopulatesPacketAndKernarg) {
                                         /*is_barrier=*/true,
                                         IREE_HSA_FENCE_SCOPE_SYSTEM,
                                         IREE_HSA_FENCE_SCOPE_SYSTEM));
+}
+
+TEST(AqlBlockProcessorTest,
+     PacketHeadersOmitInteriorBarriersWithoutExecutionBarrier) {
+  const uint8_t dispatch_command_flags[2] = {
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+  };
+  DispatchBlock<2> block = MakeDispatchBlock(dispatch_command_flags);
+
+  PacketHeaderSummary summary = {};
+  IREE_ASSERT_OK(InvokeAndSummarizeDispatchBlock(
+      block, IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_FINAL_PAYLOAD_PACKET,
+      IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HSA_FENCE_SCOPE_NONE, &summary));
+
+  EXPECT_EQ(summary.counts.total, 2u);
+  EXPECT_EQ(summary.counts.barrier, 1u);
+  EXPECT_FALSE(AqlHeaderHasBarrier(summary.headers.first));
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.headers.first),
+            IREE_HSA_FENCE_SCOPE_NONE);
+  EXPECT_TRUE(AqlHeaderHasBarrier(summary.headers.last));
+}
+
+TEST(AqlBlockProcessorTest, PacketHeadersBarrierFirstPayloadForInlineWait) {
+  const uint8_t dispatch_command_flags[2] = {
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+  };
+  DispatchBlock<2> block = MakeDispatchBlock(dispatch_command_flags);
+
+  PacketHeaderSummary summary = {};
+  IREE_ASSERT_OK(InvokeAndSummarizeDispatchBlock(
+      block, IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_FINAL_PAYLOAD_PACKET,
+      IREE_HSA_FENCE_SCOPE_AGENT, IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HSA_FENCE_SCOPE_SYSTEM, &summary));
+
+  EXPECT_EQ(summary.counts.total, 2u);
+  EXPECT_EQ(summary.counts.barrier, 2u);
+  EXPECT_TRUE(AqlHeaderHasBarrier(summary.headers.first));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.headers.first),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.headers.first),
+            IREE_HSA_FENCE_SCOPE_NONE);
+  EXPECT_TRUE(AqlHeaderHasBarrier(summary.headers.last));
+}
+
+TEST(AqlBlockProcessorTest, PacketHeadersPreserveExplicitMemoryBarrierScopes) {
+  const uint8_t dispatch_command_flags[2] = {
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_SYSTEM, IREE_HSA_FENCE_SCOPE_SYSTEM),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS |
+              IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER,
+          IREE_HSA_FENCE_SCOPE_SYSTEM, IREE_HSA_FENCE_SCOPE_AGENT),
+  };
+  DispatchBlock<2> block = MakeDispatchBlock(dispatch_command_flags);
+
+  PacketHeaderSummary summary = {};
+  IREE_ASSERT_OK(InvokeAndSummarizeDispatchBlock(
+      block, IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_FINAL_PAYLOAD_PACKET,
+      IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HSA_FENCE_SCOPE_NONE, &summary));
+
+  EXPECT_EQ(summary.counts.total, 2u);
+  EXPECT_EQ(summary.counts.barrier, 1u);
+  EXPECT_FALSE(AqlHeaderHasBarrier(summary.headers.first));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.headers.first),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.headers.first),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_TRUE(AqlHeaderHasBarrier(summary.headers.last));
+  EXPECT_EQ(AqlHeaderAcquireScope(summary.headers.last),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+  EXPECT_EQ(AqlHeaderReleaseScope(summary.headers.last),
+            IREE_HSA_FENCE_SCOPE_AGENT);
+}
+
+TEST(AqlBlockProcessorTest, PacketHeadersHonorExplicitExecutionBarrier) {
+  const uint8_t dispatch_command_flags[3] = {
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS |
+              IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER,
+          IREE_HSA_FENCE_SCOPE_AGENT, IREE_HSA_FENCE_SCOPE_AGENT),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+  };
+  DispatchBlock<3> block = MakeDispatchBlock(dispatch_command_flags);
+
+  alignas(64) iree_hal_amdgpu_aql_packet_t packets[8] = {};
+  iree_hal_amdgpu_aql_ring_t ring = {};
+  ring.base = packets;
+  ring.mask = IREE_ARRAYSIZE(packets) - 1u;
+  uint16_t packet_headers[3] = {};
+  uint16_t packet_setups[3] = {};
+  iree_hal_amdgpu_kernarg_block_t kernarg_blocks[3] = {};
+  iree_hal_amdgpu_aql_block_processor_t processor = MakeProcessor(
+      &ring, /*packet_count=*/3, packet_headers, packet_setups, kernarg_blocks,
+      /*kernarg_block_count=*/3,
+      IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_FINAL_PAYLOAD_PACKET,
+      IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HSA_FENCE_SCOPE_NONE);
+
+  iree_hal_amdgpu_aql_block_processor_result_t result;
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_block_processor_invoke(
+      &processor, &block.header, &result));
+  PacketHeaderSummary summary = SummarizePacketHeaders(packet_headers, 3);
+
+  EXPECT_EQ(summary.counts.total, 3u);
+  EXPECT_EQ(summary.counts.barrier, 2u);
+  EXPECT_FALSE(AqlHeaderHasBarrier(packet_headers[0]));
+  EXPECT_TRUE(AqlHeaderHasBarrier(packet_headers[1]));
+  EXPECT_TRUE(AqlHeaderHasBarrier(packet_headers[2]));
+}
+
+TEST(AqlBlockProcessorTest,
+     PacketHeadersApplySystemAcquireOnlyToFirstDynamicKernargPacket) {
+  const uint8_t dispatch_command_flags[2] = {
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+      CommandFlags(
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_USES_QUEUE_KERNARGS,
+          IREE_HSA_FENCE_SCOPE_NONE, IREE_HSA_FENCE_SCOPE_NONE),
+  };
+  DispatchBlock<2> block = MakeDispatchBlock(dispatch_command_flags);
+
+  PacketHeaderSummary summary = {};
+  IREE_ASSERT_OK(InvokeAndSummarizeDispatchBlock(
+      block, IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_FLAG_FINAL_PAYLOAD_PACKET,
+      IREE_HSA_FENCE_SCOPE_SYSTEM, IREE_HSA_FENCE_SCOPE_NONE,
+      IREE_HSA_FENCE_SCOPE_SYSTEM, &summary));
+
+  EXPECT_EQ(summary.counts.total, 2u);
+  EXPECT_EQ(summary.counts.barrier, 2u);
+  EXPECT_EQ(summary.counts.system_acquire, 1u);
+  EXPECT_EQ(summary.counts.system_release, 0u);
 }
 
 }  // namespace
