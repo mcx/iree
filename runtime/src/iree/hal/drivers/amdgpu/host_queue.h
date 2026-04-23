@@ -289,63 +289,77 @@ typedef struct iree_hal_amdgpu_host_queue_t {
     uint32_t queue_device_events_enabled : 1;
     // True when selected dispatches may receive profile packet augmentation.
     uint32_t dispatch_profiling_enabled : 1;
-    // Serializes dispatch event batch mutation and flush.
+    // Serializes profile event ring mutation and flush.
     iree_slim_mutex_t event_mutex;
-    // Borrowed fine-grained GPU-agent block pool backing raw signal storage.
-    iree_hal_amdgpu_block_pool_t* signal_block_pool;
-    // Host-side table of queue-owned GPU-agent raw signal blocks indexed by
-    // dispatch event ring slot.
-    iree_hal_amdgpu_block_t** signal_blocks;
-    // Number of entries in |signal_blocks|.
-    uint32_t signal_block_count;
-    // Number of iree_amd_signal_t records in each signal block.
-    uint32_t signals_per_block;
-    // Allocation backing the queue-local dispatch event ring.
-    void* event_storage;
-    // Byte length of |event_storage|.
-    iree_host_size_t event_storage_size;
-    // Device-visible dispatch event records waiting for a sink flush.
-    iree_hal_amdgpu_profile_dispatch_event_t* dispatch_events;
-    // Power-of-two capacity of |dispatch_events| in records.
-    uint32_t dispatch_event_capacity;
-    // Capacity minus one, for mapping logical positions to physical slots.
-    uint32_t dispatch_event_mask;
-    // Logical ring position of the next event to write to the sink.
-    uint64_t dispatch_event_read_position;
-    // Logical ring position one past the last event ready to write.
-    uint64_t dispatch_event_ready_position;
-    // Logical ring position one past the last reserved event.
-    uint64_t dispatch_event_write_position;
-    // Next queue-local dispatch event id assigned during submission.
-    uint64_t next_dispatch_event_id;
-    // Device-visible queue operation records waiting for a sink flush.
-    iree_hal_amdgpu_profile_queue_device_event_t* queue_device_events;
-    // Power-of-two capacity of |queue_device_events| in records.
-    uint32_t queue_device_event_capacity;
-    // Capacity minus one, for mapping logical positions to physical slots.
-    uint32_t queue_device_event_mask;
-    // Logical ring position of the next queue device event to write to sink.
-    uint64_t queue_device_event_read_position;
-    // Logical ring position one past the last queue device event ready to
-    // write.
-    uint64_t queue_device_event_ready_position;
-    // Logical ring position one past the last reserved queue device event.
-    uint64_t queue_device_event_write_position;
-    // Next queue-local device event id assigned during submission.
-    uint64_t next_queue_device_event_id;
-    // Borrowed hardware counter session active for this queue, or NULL.
-    iree_hal_amdgpu_profile_counter_session_t* counter_session;
-    // Host-side slot table pairing dispatch event ring slots with reusable
-    // aqlprofile handles. One logical dispatch event owns |counter_set_count|
-    // contiguous slots until its event ring position is flushed.
-    iree_hal_amdgpu_profile_counter_sample_slot_t* counter_sample_slots;
-    // Number of counter sample slots associated with each dispatch event slot.
-    uint32_t counter_set_count;
-    // Borrowed executable trace session active for this queue, or NULL.
-    iree_hal_amdgpu_profile_trace_session_t* trace_session;
-    // Host-side slot table pairing dispatch event ring slots with per-use
-    // aqlprofile ATT handles retained only until each trace is flushed.
-    iree_hal_amdgpu_profile_trace_slot_t* trace_slots;
+    // Raw completion-signal storage paired with dispatch event slots.
+    struct {
+      // Borrowed fine-grained GPU-agent block pool backing raw signal storage.
+      iree_hal_amdgpu_block_pool_t* block_pool;
+      // Host-side table of queue-owned GPU-agent raw signal blocks.
+      iree_hal_amdgpu_block_t** blocks;
+      // Number of entries in |blocks|.
+      uint32_t block_count;
+      // Number of iree_amd_signal_t records in each block.
+      uint32_t signals_per_block;
+    } signals;
+    // Shared device-visible allocation backing queue-local event rings.
+    struct {
+      // Allocation base returned by HSA memory pool allocation.
+      void* base;
+      // Byte length of |base|.
+      iree_host_size_t size;
+    } event_allocation;
+    // Device-visible dispatch event ring waiting for sink flush.
+    struct {
+      // Dispatch event record storage in the shared event allocation.
+      iree_hal_amdgpu_profile_dispatch_event_t* values;
+      // Power-of-two capacity of |values| in records.
+      uint32_t capacity;
+      // Capacity minus one, for mapping logical positions to physical slots.
+      uint32_t mask;
+      // Logical ring position of the next event to write to the sink.
+      uint64_t read_position;
+      // Logical ring position one past the last event ready to write.
+      uint64_t ready_position;
+      // Logical ring position one past the last reserved event.
+      uint64_t write_position;
+      // Next queue-local dispatch event id assigned during submission.
+      uint64_t next_event_id;
+    } dispatch_events;
+    // Device-visible queue operation event ring waiting for sink flush.
+    struct {
+      // Queue device event record storage in the shared event allocation.
+      iree_hal_amdgpu_profile_queue_device_event_t* values;
+      // Power-of-two capacity of |values| in records.
+      uint32_t capacity;
+      // Capacity minus one, for mapping logical positions to physical slots.
+      uint32_t mask;
+      // Logical ring position of the next event to write to the sink.
+      uint64_t read_position;
+      // Logical ring position one past the last event ready to write.
+      uint64_t ready_position;
+      // Logical ring position one past the last reserved event.
+      uint64_t write_position;
+      // Next queue-local queue-device event id assigned during submission.
+      uint64_t next_event_id;
+    } queue_device_events;
+    // Queue-local hardware counter profile resources.
+    struct {
+      // Borrowed hardware counter session active for this queue, or NULL.
+      iree_hal_amdgpu_profile_counter_session_t* session;
+      // Host-side slot table pairing dispatch event slots with aqlprofile
+      // handles.
+      iree_hal_amdgpu_profile_counter_sample_slot_t* sample_slots;
+      // Number of counter sample slots associated with each dispatch event.
+      uint32_t set_count;
+    } counters;
+    // Queue-local executable trace profile resources.
+    struct {
+      // Borrowed executable trace session active for this queue, or NULL.
+      iree_hal_amdgpu_profile_trace_session_t* session;
+      // Host-side slot table pairing dispatch event slots with ATT handles.
+      iree_hal_amdgpu_profile_trace_slot_t* slots;
+    } traces;
   } profiling;
 
   // False once this queue's accumulated frontier overflows while merging waited

@@ -189,7 +189,7 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
     iree_hal_amdgpu_host_queue_t* queue,
     iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t dispatches,
     iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events) {
-  if (profile_events.event_count == 0 || !queue->profiling.trace_session) {
+  if (profile_events.event_count == 0 || !queue->profiling.traces.session) {
     return iree_ok_status();
   }
   if (IREE_UNLIKELY(dispatches.count != profile_events.event_count)) {

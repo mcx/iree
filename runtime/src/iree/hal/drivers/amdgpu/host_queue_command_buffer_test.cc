@@ -2574,7 +2574,7 @@ TEST_F(HostQueueCommandBufferTest,
   iree_hal_amdgpu_profile_queue_device_event_reservation_t
       exhausted_reservation = {0};
   const uint32_t queue_device_event_capacity =
-      queue->profiling.queue_device_event_capacity;
+      queue->profiling.queue_device_events.capacity;
   ASSERT_GT(queue_device_event_capacity, 0u);
   iree_slim_mutex_lock(&queue->submission_mutex);
   iree_status_t status =

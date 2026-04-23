@@ -377,7 +377,7 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   iree_slim_mutex_initialize(&out_queue->submission_mutex);
   iree_slim_mutex_initialize(&out_queue->post_drain_mutex);
   iree_slim_mutex_initialize(&out_queue->profiling.event_mutex);
-  out_queue->profiling.signal_block_pool = profiling_signal_block_pool;
+  out_queue->profiling.signals.block_pool = profiling_signal_block_pool;
   out_queue->axis = axis;
   out_queue->wait_barrier_strategy = wait_barrier_strategy;
   out_queue->vendor_packet_capabilities = vendor_packet_capabilities;
