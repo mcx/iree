@@ -184,7 +184,8 @@ void iree_hal_amdgpu_host_queue_record_command_buffer_profile_dispatch_source(
   profile_harvest_sources[profile_event_index].completion_signal =
       iree_hal_amdgpu_host_queue_profiling_completion_signal_ptr(
           queue, profile_event_position);
-  profile_harvest_sources[profile_event_index].event = event;
+  profile_harvest_sources[profile_event_index].ticks =
+      iree_hal_amdgpu_profile_dispatch_event_ticks(event);
   *inout_profile_event_index = profile_event_index + 1;
 }
 

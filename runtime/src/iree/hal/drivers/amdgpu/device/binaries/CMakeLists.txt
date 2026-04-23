@@ -58,7 +58,6 @@ endfunction()
 set(_BITCODE_SRCS
   "../blit.c"
   "../dispatch.c"
-  "../profiling.c"
   "../timestamp.c"
 )
 
@@ -77,7 +76,6 @@ set(_BITCODE_HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/../dispatch.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../kernel_tables.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../kernels.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../profiling.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/common.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/kernel.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/queue.h"

@@ -8,7 +8,7 @@
 
 #include <string.h>
 
-#include "iree/hal/drivers/amdgpu/device/profiling.h"
+#include "iree/hal/drivers/amdgpu/device/timestamp.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
@@ -605,7 +605,7 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_dispatch_submission(
   const uint32_t profile_harvest_kernarg_block_count =
       use_profiling_completion_signal
           ? (uint32_t)iree_host_size_ceil_div(
-                iree_hal_amdgpu_device_profile_dispatch_harvest_kernarg_length(
+                iree_hal_amdgpu_device_timestamp_dispatch_harvest_kernarg_length(
                     profile_events.event_count),
                 sizeof(iree_hal_amdgpu_kernarg_block_t))
           : 0u;

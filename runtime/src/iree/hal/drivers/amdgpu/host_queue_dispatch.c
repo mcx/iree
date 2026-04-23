@@ -10,7 +10,7 @@
 
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/device/dispatch.h"
-#include "iree/hal/drivers/amdgpu/device/profiling.h"
+#include "iree/hal/drivers/amdgpu/device/timestamp.h"
 #include "iree/hal/drivers/amdgpu/executable.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile.h"
@@ -543,16 +543,16 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_direct_dispatch(
         event, plan, export_ordinal, executable_id, config,
         IREE_HAL_AMDGPU_PROFILE_DISPATCH_EVENT_FLAG_NONE);
     iree_hal_amdgpu_profile_dispatch_harvest_source_t* sources =
-        iree_hal_amdgpu_device_profile_emplace_dispatch_harvest(
+        iree_hal_amdgpu_device_timestamp_emplace_dispatch_harvest(
             &queue->transfer_context->kernels
-                 ->iree_hal_amdgpu_device_profile_harvest_dispatch_events,
+                 ->iree_hal_amdgpu_device_timestamp_harvest_dispatch_records,
             profile_events.event_count,
             &submission.profile_harvest_slot->dispatch,
             submission.profile_harvest_kernarg_blocks->data);
     sources[0].completion_signal =
         iree_hal_amdgpu_host_queue_profiling_completion_signal_ptr(
             queue, profile_events.first_event_position);
-    sources[0].event = event;
+    sources[0].ticks = iree_hal_amdgpu_profile_dispatch_event_ticks(event);
     submission.profile_harvest_setup =
         submission.profile_harvest_slot->dispatch.setup;
   }
@@ -653,7 +653,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_indirect_dispatch(
   const uint32_t profile_harvest_kernarg_block_count =
       profile_dispatch_packet
           ? (uint32_t)iree_host_size_ceil_div(
-                iree_hal_amdgpu_device_profile_dispatch_harvest_kernarg_length(
+                iree_hal_amdgpu_device_timestamp_dispatch_harvest_kernarg_length(
                     profile_events.event_count),
                 sizeof(iree_hal_amdgpu_kernarg_block_t))
           : 0u;
@@ -763,15 +763,15 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_indirect_dispatch(
         event, plan, export_ordinal, executable_id, config,
         IREE_HAL_AMDGPU_PROFILE_DISPATCH_EVENT_FLAG_INDIRECT_PARAMETERS);
     iree_hal_amdgpu_profile_dispatch_harvest_source_t* sources =
-        iree_hal_amdgpu_device_profile_emplace_dispatch_harvest(
+        iree_hal_amdgpu_device_timestamp_emplace_dispatch_harvest(
             &queue->transfer_context->kernels
-                 ->iree_hal_amdgpu_device_profile_harvest_dispatch_events,
+                 ->iree_hal_amdgpu_device_timestamp_harvest_dispatch_records,
             profile_events.event_count, &profile_harvest_packet->dispatch,
             profile_harvest_kernarg_data);
     sources[0].completion_signal =
         iree_hal_amdgpu_host_queue_profiling_completion_signal_ptr(
             queue, profile_events.first_event_position);
-    sources[0].event = event;
+    sources[0].ticks = iree_hal_amdgpu_profile_dispatch_event_ticks(event);
   }
 
   iree_hal_amdgpu_host_queue_emit_kernel_submission_prefix(queue, resolution,

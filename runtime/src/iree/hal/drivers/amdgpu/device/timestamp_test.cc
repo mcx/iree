@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "iree/hal/drivers/amdgpu/abi/profile.h"
 #include "iree/testing/gtest.h"
 
 namespace iree::hal::amdgpu {
@@ -58,6 +59,24 @@ TEST(TimestampTest, ComputesHarvestKernargLayout) {
             16u);
   EXPECT_EQ(iree_hal_amdgpu_device_timestamp_dispatch_harvest_kernarg_length(3),
             64u);
+}
+
+TEST(TimestampTest, ProfileDispatchHarvestUsesTimestampRangeTarget) {
+  EXPECT_EQ(sizeof(iree_hal_amdgpu_profile_dispatch_harvest_source_t),
+            sizeof(iree_hal_amdgpu_dispatch_timestamp_harvest_source_t));
+  EXPECT_EQ(sizeof(iree_hal_amdgpu_profile_dispatch_harvest_args_t),
+            sizeof(iree_hal_amdgpu_dispatch_timestamp_harvest_args_t));
+
+  iree_hal_amdgpu_profile_dispatch_event_t event = {};
+  iree_hal_amdgpu_timestamp_range_t* ticks =
+      iree_hal_amdgpu_profile_dispatch_event_ticks(&event);
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(ticks),
+            reinterpret_cast<uintptr_t>(&event.start_tick));
+
+  ticks->start_tick = 11;
+  ticks->end_tick = 22;
+  EXPECT_EQ(event.start_tick, 11u);
+  EXPECT_EQ(event.end_tick, 22u);
 }
 
 TEST(TimestampTest, EmplacesDispatchHarvestPacketAndKernargs) {

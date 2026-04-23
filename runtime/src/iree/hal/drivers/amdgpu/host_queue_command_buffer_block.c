@@ -12,7 +12,7 @@
 #include "iree/hal/drivers/amdgpu/aql_block_processor_profile.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
-#include "iree/hal/drivers/amdgpu/device/profiling.h"
+#include "iree/hal/drivers/amdgpu/device/timestamp.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_packet.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_scratch.h"
@@ -707,7 +707,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
   const uint32_t profile_harvest_kernarg_block_count =
       profile_events.event_count != 0
           ? (uint32_t)iree_host_size_ceil_div(
-                iree_hal_amdgpu_device_profile_dispatch_harvest_kernarg_length(
+                iree_hal_amdgpu_device_timestamp_dispatch_harvest_kernarg_length(
                     profile_events.event_count),
                 sizeof(iree_hal_amdgpu_kernarg_block_t))
           : 0u;
@@ -759,9 +759,9 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
       profile_harvest_packet = iree_hal_amdgpu_aql_ring_packet(
           &queue->aql_ring, first_payload_packet_id + emitted_packet_count);
       profile_harvest_sources =
-          iree_hal_amdgpu_device_profile_emplace_dispatch_harvest(
+          iree_hal_amdgpu_device_timestamp_emplace_dispatch_harvest(
               &queue->transfer_context->kernels
-                   ->iree_hal_amdgpu_device_profile_harvest_dispatch_events,
+                   ->iree_hal_amdgpu_device_timestamp_harvest_dispatch_records,
               profile_events.event_count, &profile_harvest_packet->dispatch,
               submission.kernarg_blocks[kernarg_block_count].data);
       profile_harvest_setup = profile_harvest_packet->dispatch.setup;
