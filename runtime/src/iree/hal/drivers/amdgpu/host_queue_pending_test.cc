@@ -19,6 +19,7 @@
 #include "iree/hal/drivers/amdgpu/physical_device.h"
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
 #include "iree/hal/memory/fixed_block_pool.h"
+#include "iree/hal/memory/tlsf_pool.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -279,6 +280,27 @@ static iree_status_t CreateExplicitFixedBlockPool(iree_hal_device_t* device,
   options.block_allocator_options.block_count = 1;
   options.block_allocator_options.frontier_capacity = 2;
   return iree_hal_fixed_block_pool_create(
+      options, backend.slab_provider, backend.notification,
+      iree_hal_pool_epoch_query_null(), iree_allocator_system(), out_pool);
+}
+
+static iree_status_t CreateExplicitTlsfPool(iree_hal_device_t* device,
+                                            iree_device_size_t slab_size,
+                                            iree_hal_pool_t** out_pool) {
+  iree_hal_queue_pool_backend_t backend = {0};
+  IREE_RETURN_IF_ERROR(iree_hal_device_query_queue_pool_backend(
+      device, kQueueAffinity0, &backend));
+  if (!backend.slab_provider || !backend.notification) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "queue pool backend query returned an incomplete backend bundle");
+  }
+  iree_hal_tlsf_pool_options_t options = {};
+  options.tlsf_options.range_length = slab_size;
+  options.tlsf_options.alignment = 16;
+  options.tlsf_options.initial_block_capacity = 16;
+  options.tlsf_options.frontier_capacity = 2;
+  return iree_hal_tlsf_pool_create(
       options, backend.slab_provider, backend.notification,
       iree_hal_pool_epoch_query_null(), iree_allocator_system(), out_pool);
 }
@@ -570,6 +592,71 @@ TEST_F(HostQueuePendingTest, QueueAllocaRejectsWaitableReservationWithoutFlag) {
                             IREE_HAL_ALLOCA_FLAG_NONE, &buffer));
   EXPECT_EQ(buffer, nullptr);
   EXPECT_FALSE(HostQueueHasPendingOps(queue));
+}
+
+TEST_F(HostQueuePendingTest, QueueAllocaTlsfGrowthRetriesThroughColdPath) {
+  const iree_device_size_t allocation_size = 4096;
+
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+  iree_hal_amdgpu_host_queue_t* queue = test_device.first_host_queue();
+  ASSERT_NE(queue, nullptr);
+
+  Ref<iree_hal_pool_t> pool;
+  IREE_ASSERT_OK(CreateExplicitTlsfPool(test_device.base_device(),
+                                        allocation_size, pool.out()));
+
+  Ref<iree_hal_semaphore_t> alloca0_signal;
+  IREE_ASSERT_OK(
+      CreateSemaphore(test_device.base_device(), alloca0_signal.out()));
+  uint64_t alloca0_signal_value = 1;
+  iree_hal_semaphore_t* alloca0_signal_ptr = alloca0_signal.get();
+  const iree_hal_semaphore_list_t alloca0_signal_list =
+      MakeSemaphoreList(&alloca0_signal_ptr, &alloca0_signal_value);
+
+  iree_hal_buffer_t* buffer0 = NULL;
+  IREE_ASSERT_OK(iree_hal_device_queue_alloca(
+      test_device.base_device(), kQueueAffinity0,
+      iree_hal_semaphore_list_empty(), alloca0_signal_list, pool,
+      MakeTransientBufferParams(), allocation_size, IREE_HAL_ALLOCA_FLAG_NONE,
+      &buffer0));
+  ASSERT_NE(buffer0, nullptr);
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(alloca0_signal, alloca0_signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+
+  Ref<iree_hal_semaphore_t> alloca1_signal;
+  IREE_ASSERT_OK(
+      CreateSemaphore(test_device.base_device(), alloca1_signal.out()));
+  uint64_t alloca1_signal_value = 1;
+  iree_hal_semaphore_t* alloca1_signal_ptr = alloca1_signal.get();
+  const iree_hal_semaphore_list_t alloca1_signal_list =
+      MakeSemaphoreList(&alloca1_signal_ptr, &alloca1_signal_value);
+
+  iree_hal_buffer_t* buffer1 = NULL;
+  IREE_ASSERT_OK(iree_hal_device_queue_alloca(
+      test_device.base_device(), kQueueAffinity0,
+      iree_hal_semaphore_list_empty(), alloca1_signal_list, pool,
+      MakeTransientBufferParams(), allocation_size, IREE_HAL_ALLOCA_FLAG_NONE,
+      &buffer1));
+  ASSERT_NE(buffer1, nullptr);
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(alloca1_signal, alloca1_signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+  EXPECT_FALSE(HostQueueHasPendingOps(queue));
+
+  iree_hal_pool_stats_t stats;
+  iree_hal_pool_query_stats(pool, &stats);
+  EXPECT_GE(stats.slab_count, 2u);
+  EXPECT_GE(stats.exhausted_count, 1u);
+
+  iree_hal_buffer_release(buffer1);
+  iree_hal_buffer_release(buffer0);
 }
 
 TEST_F(HostQueuePendingTest, CancelPendingAllocaFrontierWait) {

@@ -825,9 +825,12 @@ static iree_status_t iree_hal_amdgpu_host_queue_alloca(
   // Always ask the pool to surface waitable death-frontier candidates so the
   // queue can distinguish true pool pressure from a dependency the caller did
   // not authorize. The HAL alloca flag is checked before consuming any
-  // OK_NEEDS_WAIT reservation.
+  // OK_NEEDS_WAIT reservation. Disallow growth while submission_mutex is held;
+  // growable pools report that as a cold retry instead of calling into their
+  // slab provider on the serialized queue path.
   const iree_hal_pool_reserve_flags_t reserve_flags =
-      IREE_HAL_POOL_RESERVE_FLAG_ALLOW_WAIT_FRONTIER;
+      IREE_HAL_POOL_RESERVE_FLAG_ALLOW_WAIT_FRONTIER |
+      IREE_HAL_POOL_RESERVE_FLAG_DISALLOW_GROWTH;
 
   iree_hal_amdgpu_host_queue_op_submission_t submission;
   iree_hal_amdgpu_host_queue_op_submission_begin(queue, wait_semaphore_list,
