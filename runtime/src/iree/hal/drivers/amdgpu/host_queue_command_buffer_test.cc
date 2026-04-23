@@ -1248,7 +1248,10 @@ struct TwoDispatchCommandBuffer {
 };
 
 static iree_status_t CreateTwoDispatchCommandBuffer(
-    TestLogicalDevice* test_device, TwoDispatchCommandBuffer* out_fixture) {
+    TestLogicalDevice* test_device, TwoDispatchCommandBuffer* out_fixture,
+    iree_hal_command_buffer_mode_t mode =
+        IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+        IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA) {
   IREE_RETURN_IF_ERROR(LoadCtsExecutable(
       test_device->base_device(),
       iree_make_cstring_view("command_buffer_dispatch_constants_bindings_test."
@@ -1276,11 +1279,9 @@ static iree_status_t CreateTwoDispatchCommandBuffer(
       out_fixture->output_buffer1, /*offset=*/0, IREE_HAL_WHOLE_BUFFER));
 
   IREE_RETURN_IF_ERROR(iree_hal_command_buffer_create(
-      test_device->base_device(),
-      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
-          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
-      IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
-      /*binding_capacity=*/0, out_fixture->command_buffer.out()));
+      test_device->base_device(), mode, IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+      IREE_HAL_QUEUE_AFFINITY_ANY, /*binding_capacity=*/0,
+      out_fixture->command_buffer.out()));
   IREE_RETURN_IF_ERROR(
       iree_hal_command_buffer_begin(out_fixture->command_buffer));
   iree_hal_buffer_ref_t binding_refs0[2] = {
@@ -1340,7 +1341,13 @@ TEST_F(HostQueueCommandBufferTest, DispatchSummariesRetainPacketOrdinals) {
       test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
 
   TwoDispatchCommandBuffer fixture;
-  IREE_ASSERT_OK(CreateTwoDispatchCommandBuffer(&test_device, &fixture));
+  IREE_ASSERT_OK(CreateTwoDispatchCommandBuffer(
+      &test_device, &fixture,
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_DISPATCH_METADATA));
+  EXPECT_EQ(
+      iree_hal_amdgpu_aql_command_buffer_profile_id(fixture.command_buffer),
+      0u);
 
   const iree_hal_amdgpu_aql_program_t* program =
       iree_hal_amdgpu_aql_command_buffer_program(fixture.command_buffer);

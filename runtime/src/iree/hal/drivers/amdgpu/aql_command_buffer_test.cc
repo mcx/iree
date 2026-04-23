@@ -43,11 +43,19 @@ class AqlCommandBufferTest : public ::testing::Test {
   CommandBufferPtr CreateCommandBufferWithMode(
       iree_hal_command_buffer_mode_t mode,
       iree_host_size_t binding_capacity = 0) {
+    return CreateCommandBufferWithProfileMetadata(mode, &profile_metadata_,
+                                                  binding_capacity);
+  }
+
+  CommandBufferPtr CreateCommandBufferWithProfileMetadata(
+      iree_hal_command_buffer_mode_t mode,
+      iree_hal_amdgpu_profile_metadata_registry_t* profile_metadata,
+      iree_host_size_t binding_capacity = 0) {
     iree_hal_command_buffer_t* command_buffer = nullptr;
     IREE_EXPECT_OK(iree_hal_amdgpu_aql_command_buffer_create(
         /*device_allocator=*/nullptr, mode, IREE_HAL_COMMAND_CATEGORY_ANY,
         IREE_HAL_QUEUE_AFFINITY_ANY, binding_capacity, /*device_ordinal=*/0,
-        &profile_metadata_, &block_pool_, &block_pool_, iree_allocator_system(),
+        profile_metadata, &block_pool_, &block_pool_, iree_allocator_system(),
         &command_buffer));
     return CommandBufferPtr(command_buffer);
   }
@@ -150,6 +158,21 @@ TEST_F(AqlCommandBufferTest, RetainedProfileMetadataRegistersOperations) {
   ASSERT_NE(program->first_block, nullptr);
   EXPECT_EQ(program->command_count,
             profile_metadata().command_operation_record_count);
+}
+
+TEST_F(AqlCommandBufferTest, RetainedDispatchMetadataDoesNotRequireProfile) {
+  CommandBufferPtr command_buffer = CreateCommandBufferWithProfileMetadata(
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_DISPATCH_METADATA,
+      /*profile_metadata=*/nullptr);
+  ASSERT_NE(command_buffer, nullptr);
+  EXPECT_EQ(iree_hal_amdgpu_aql_command_buffer_profile_id(command_buffer.get()),
+            0u);
+
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
+  EXPECT_EQ(profile_metadata().command_buffer_record_count, 0u);
+  EXPECT_EQ(profile_metadata().command_operation_record_count, 0u);
 }
 
 TEST_F(AqlCommandBufferTest, BarrierOnlyRecordingHasBarrierAndReturn) {

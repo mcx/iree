@@ -212,8 +212,10 @@ static bool iree_hal_amdgpu_aql_command_buffer_retains_profile_metadata(
 
 static bool iree_hal_amdgpu_aql_command_buffer_retains_dispatch_summaries(
     const iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
-  return iree_hal_amdgpu_aql_command_buffer_retains_profile_metadata(
-      command_buffer);
+  return iree_any_bit_set(
+      command_buffer->base.mode,
+      IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_DISPATCH_METADATA);
 }
 
 static bool iree_hal_amdgpu_aql_command_buffer_validates(
