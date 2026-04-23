@@ -566,11 +566,32 @@ iree_hal_amdgpu_physical_device_query_hdp_flush_registers(
   return hdp_flush;
 }
 
+static bool iree_hal_amdgpu_gfxip_is_pre_gfx908(
+    iree_hal_amdgpu_gfxip_version_t version) {
+  return version.major < 9 ||
+         (version.major == 9 && version.minor == 0 && version.stepping < 8);
+}
+
+static bool iree_hal_amdgpu_gfxip_is_gfx101x(
+    iree_hal_amdgpu_gfxip_version_t version) {
+  return version.major == 10 && (version.minor == 0 || version.minor == 1);
+}
+
+static bool iree_hal_amdgpu_gfxip_allows_hdp_kernarg_publication(
+    iree_hal_amdgpu_gfxip_version_t version) {
+  // Matches the HDP workaround eligibility in CLR's setKernelArgImpl. Devices
+  // outside this set stay on host kernarg memory unless we add a first-class
+  // readback publication mode.
+  return !iree_hal_amdgpu_gfxip_is_pre_gfx908(version) &&
+         !iree_hal_amdgpu_gfxip_is_gfx101x(version);
+}
+
 static iree_status_t iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
     const iree_hal_amdgpu_libhsa_t* libhsa,
     const iree_hal_amdgpu_topology_t* topology,
     const iree_hal_amdgpu_host_memory_pools_t* host_memory_pools,
     hsa_agent_t device_agent, hsa_amd_memory_pool_t device_coarse_memory_pool,
+    iree_hal_amdgpu_gfxip_version_t gfxip_version,
     iree_hal_amdgpu_physical_device_kernarg_ring_memory_t* out_memory) {
   iree_hal_amdgpu_physical_device_use_host_kernarg_memory(
       host_memory_pools, device_agent, out_memory);
@@ -578,6 +599,9 @@ static iree_status_t iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
     return iree_ok_status();
   }
   if (!iree_hal_amdgpu_kernarg_ring_supports_host_write_publication()) {
+    return iree_ok_status();
+  }
+  if (!iree_hal_amdgpu_gfxip_allows_hdp_kernarg_publication(gfxip_version)) {
     return iree_ok_status();
   }
 
@@ -1077,7 +1101,7 @@ iree_status_t iree_hal_amdgpu_physical_device_assign_frontier(
         libhsa, &system->topology, host_memory_pools,
         physical_device->device_agent,
         physical_device->coarse_block_pools.large.memory_pool,
-        &kernarg_ring_memory);
+        physical_device->gfxip_version, &kernarg_ring_memory);
   }
   for (iree_host_size_t queue_ordinal = 0;
        queue_ordinal < physical_device->host_queue_capacity &&
