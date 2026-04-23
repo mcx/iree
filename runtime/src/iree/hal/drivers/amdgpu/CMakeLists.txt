@@ -65,6 +65,8 @@ iree_cc_library(
     "aql_block_processor.h"
     "aql_block_processor_profile.c"
     "aql_block_processor_profile.h"
+    "aql_block_processor_timestamp.c"
+    "aql_block_processor_timestamp.h"
     "aql_command_buffer.c"
     "aql_command_buffer.h"
     "aql_command_buffer_profile.c"
@@ -163,6 +165,7 @@ iree_cc_library(
     iree::hal::drivers::amdgpu::device::dispatch
     iree::hal::drivers::amdgpu::device::headers
     iree::hal::drivers::amdgpu::device::profiling
+    iree::hal::drivers::amdgpu::device::timestamp
     iree::hal::drivers::amdgpu::util::block_pool
     iree::hal::drivers::amdgpu::util::code_object_target
     iree::hal::drivers::amdgpu::util::device_library
@@ -195,6 +198,7 @@ iree_cc_library(
     headers
   HDRS
     "aql_block_processor.h"
+    "aql_block_processor_timestamp.h"
     "aql_command_buffer.h"
     "aql_command_buffer_profile.h"
     "aql_program_builder.h"
@@ -322,6 +326,27 @@ iree_cc_test(
     iree::base
     iree::base::internal::arena
     iree::hal
+    iree::hal::drivers::amdgpu::abi
+    iree::hal::drivers::amdgpu::device::headers
+    iree::hal::drivers::amdgpu::util::packet
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    aql_block_processor_timestamp_test
+  SRCS
+    "aql_block_processor_timestamp_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
     iree::hal::drivers::amdgpu::abi
     iree::hal::drivers::amdgpu::device::headers
     iree::hal::drivers::amdgpu::util::packet
