@@ -311,7 +311,11 @@ iree_cc_test(
     ::amdgpu
     ::headers
     iree::base
+    iree::base::internal::arena
+    iree::hal
     iree::hal::drivers::amdgpu::abi
+    iree::hal::drivers::amdgpu::device::headers
+    iree::hal::drivers::amdgpu::util::packet
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
