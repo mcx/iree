@@ -11,6 +11,7 @@
 #include "iree/hal/api.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
 #include "iree/hal/drivers/amdgpu/host_queue_submission.h"
 #include "iree/hal/drivers/amdgpu/util/kernarg_ring.h"
@@ -86,6 +87,9 @@ typedef struct iree_hal_amdgpu_aql_block_processor_profile_t {
   } payload;
   // Host profile sidecars consumed by profiled replay.
   struct {
+    // Selected dispatches that receive profile packet augmentation.
+    iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_list_t
+        dispatches;
     // Dispatch timestamp event reservation for profiled dispatches.
     iree_hal_amdgpu_profile_dispatch_event_reservation_t dispatch_events;
     // Harvest sources written when dispatch timestamp profiling is active.
