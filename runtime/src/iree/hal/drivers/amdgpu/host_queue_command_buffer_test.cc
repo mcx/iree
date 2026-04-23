@@ -1413,6 +1413,40 @@ TEST_F(HostQueueCommandBufferTest,
   EXPECT_EQ(control.release_fence_scope, IREE_HSA_FENCE_SCOPE_NONE);
 }
 
+TEST_F(HostQueueCommandBufferTest,
+       KernargRingUsesRecordedCpuVisibleCoarseCapability) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+
+  iree_hal_amdgpu_logical_device_t* logical_device =
+      test_device.logical_device();
+  ASSERT_GT(logical_device->physical_device_count, 0u);
+  iree_hal_amdgpu_physical_device_t* physical_device =
+      logical_device->physical_devices[0];
+  iree_hal_amdgpu_host_queue_t* queue = test_device.first_host_queue();
+  ASSERT_NE(queue, nullptr);
+
+  const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t* capability =
+      &physical_device->cpu_visible_device_coarse_memory;
+  const bool uses_cpu_visible_device_coarse = iree_any_bit_set(
+      capability->flags,
+      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE);
+  if (uses_cpu_visible_device_coarse) {
+    EXPECT_EQ(queue->kernarg_ring.publication.mode,
+              capability->host_write_publication.mode);
+    EXPECT_EQ(queue->kernarg_ring.publication.hdp_mem_flush_control,
+              capability->host_write_publication.hdp_mem_flush_control);
+  } else {
+    EXPECT_EQ(queue->kernarg_ring.publication.mode,
+              IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_NONE);
+  }
+}
+
 TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);
