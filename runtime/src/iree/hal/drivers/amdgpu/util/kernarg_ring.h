@@ -8,6 +8,15 @@
 #define IREE_HAL_DRIVERS_AMDGPU_UTIL_KERNARG_RING_H_
 
 #include "iree/base/api.h"
+
+#if defined(IREE_ARCH_X86_64)
+#if defined(IREE_COMPILER_MSVC_COMPAT)
+#include <intrin.h>
+#else
+#include <emmintrin.h>
+#endif  // IREE_COMPILER_MSVC_COMPAT
+#endif  // IREE_ARCH_X86_64
+
 #include "iree/base/internal/atomics.h"
 #include "iree/hal/drivers/amdgpu/util/libhsa.h"
 
@@ -168,6 +177,34 @@ static inline bool iree_hal_amdgpu_kernarg_ring_requires_host_write_publication(
          IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_NONE;
 }
 
+// Returns true if this host architecture has an explicit store fence suitable
+// for ordering BAR/write-combined kernarg writes before device-visible
+// publication.
+static inline bool iree_hal_amdgpu_kernarg_ring_supports_host_write_publication(
+    void) {
+#if defined(IREE_ARCH_X86_64) || \
+    (defined(IREE_ARCH_ARM_64) && defined(IREE_COMPILER_GCC_COMPAT))
+  return true;
+#else
+  return false;
+#endif  // IREE_ARCH_*
+}
+
+// Orders host writes to BAR/write-combined kernarg memory before the
+// device-visible publication operation that follows.
+static inline void iree_hal_amdgpu_kernarg_ring_host_write_fence(void) {
+#if defined(IREE_ARCH_X86_64)
+  _mm_sfence();
+#elif defined(IREE_ARCH_ARM_64) && defined(IREE_COMPILER_GCC_COMPAT)
+  __asm__ __volatile__("dmb oshst" ::: "memory");
+#else
+  // This fallback is only valid for normal host memory. Physical-device
+  // selection must not choose a publication-requiring kernarg pool when
+  // supports_host_write_publication() is false.
+  iree_atomic_thread_fence(iree_memory_order_seq_cst);
+#endif  // IREE_ARCH_*
+}
+
 // Publishes host writes to queue-owned kernargs before their packet headers
 // become visible to the command processor.
 //
@@ -184,7 +221,7 @@ static inline void iree_hal_amdgpu_kernarg_ring_publish_host_writes(
   IREE_ASSERT(ring->publication.mode ==
               IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_HDP_FLUSH);
   IREE_ASSERT(ring->publication.hdp_mem_flush_control);
-  iree_atomic_thread_fence(iree_memory_order_release);
+  iree_hal_amdgpu_kernarg_ring_host_write_fence();
   *ring->publication.hdp_mem_flush_control = 1u;
   (void)*ring->publication.hdp_mem_flush_control;
 }

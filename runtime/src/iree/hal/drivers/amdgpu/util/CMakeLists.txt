@@ -467,6 +467,23 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
+    kernarg_ring_test
+  SRCS
+    "kernarg_ring_test.cc"
+  DEPS
+    ::queue_primitives
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
     kfd_test
   SRCS
     "kfd_test.cc"

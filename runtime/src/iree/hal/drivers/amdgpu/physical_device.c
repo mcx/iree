@@ -577,6 +577,9 @@ static iree_status_t iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
   if (!device_coarse_memory_pool.handle || topology->cpu_agent_count == 0) {
     return iree_ok_status();
   }
+  if (!iree_hal_amdgpu_kernarg_ring_supports_host_write_publication()) {
+    return iree_ok_status();
+  }
 
   const hsa_amd_hdp_flush_t hdp_flush =
       iree_hal_amdgpu_physical_device_query_hdp_flush_registers(libhsa,

@@ -440,6 +440,22 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_test(
+    name = "kernarg_ring_test",
+    srcs = ["kernarg_ring_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":queue_primitives",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
     name = "kfd_test",
     srcs = ["kfd_test.cc"],
     group = "iree-hal-drivers-amdgpu-tests",
