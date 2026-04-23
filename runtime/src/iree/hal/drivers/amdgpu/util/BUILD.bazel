@@ -204,6 +204,36 @@ iree_runtime_cc_library(
 )
 
 iree_runtime_cc_library(
+    name = "code_object_target",
+    srcs = ["code_object_target.c"],
+    hdrs = ["code_object_target.h"],
+    deps = [
+        ":target_id",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/hal/utils:elf_format",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "code_object_target_test",
+    srcs = ["code_object_target_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":code_object_target",
+        ":target_id",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_library(
     name = "kfd",
     srcs = ["kfd.c"],
     hdrs = ["kfd.h"],

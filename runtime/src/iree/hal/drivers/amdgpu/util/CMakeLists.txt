@@ -205,6 +205,40 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
+    code_object_target
+  HDRS
+    "code_object_target.h"
+  SRCS
+    "code_object_target.c"
+  DEPS
+    ::target_id
+    iree::base
+    iree::base::core_headers
+    iree::hal::utils::elf_format
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    code_object_target_test
+  SRCS
+    "code_object_target_test.cc"
+  DEPS
+    ::code_object_target
+    ::target_id
+    iree::base
+    iree::base::core_headers
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_library(
+  NAME
     kfd
   HDRS
     "kfd.h"

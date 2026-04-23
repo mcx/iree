@@ -25,15 +25,21 @@ DEFAULT_TARGET_SELECTIONS = ("all",)
 # family membership follows ROCm/TheRock's cmake/therock_amdgpu_targets.cmake.
 EXACT_TARGET_CODE_OBJECTS = (
     ("gfx900", "gfx9-generic"),
+    ("gfx902", "gfx9-generic"),
+    ("gfx904", "gfx9-generic"),
     ("gfx90c", "gfx9-generic"),
     ("gfx906", "gfx9-generic"),
     ("gfx908", "gfx908"),
+    ("gfx909", "gfx9-generic"),
     ("gfx90a", "gfx90a"),
+    ("gfx940", "gfx9-4-generic"),
+    ("gfx941", "gfx9-4-generic"),
     ("gfx942", "gfx9-4-generic"),
     ("gfx950", "gfx9-4-generic"),
     ("gfx1010", "gfx10-1-generic"),
     ("gfx1011", "gfx10-1-generic"),
     ("gfx1012", "gfx10-1-generic"),
+    ("gfx1013", "gfx10-1-generic"),
     ("gfx1030", "gfx10-3-generic"),
     ("gfx1031", "gfx10-3-generic"),
     ("gfx1032", "gfx10-3-generic"),
@@ -49,23 +55,35 @@ EXACT_TARGET_CODE_OBJECTS = (
     ("gfx1151", "gfx11-generic"),
     ("gfx1152", "gfx11-generic"),
     ("gfx1153", "gfx11-generic"),
+    ("gfx1170", "gfx11-generic"),
+    ("gfx1171", "gfx11-generic"),
+    ("gfx1172", "gfx11-generic"),
     ("gfx1200", "gfx12-generic"),
     ("gfx1201", "gfx12-generic"),
+    ("gfx1250", "gfx12-5-generic"),
+    ("gfx1251", "gfx12-5-generic"),
 )
 
 ALL_EXACT_TARGETS = object()
 
 TARGET_FAMILIES = (
     ("all", ALL_EXACT_TARGETS),
-    ("dcgpu-all", ("gfx908", "gfx90a", "gfx942", "gfx950")),
+    (
+        "dcgpu-all",
+        ("gfx908", "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950"),
+    ),
     (
         "dgpu-all",
         (
             "gfx900",
+            "gfx902",
+            "gfx904",
             "gfx906",
+            "gfx909",
             "gfx1010",
             "gfx1011",
             "gfx1012",
+            "gfx1013",
             "gfx1030",
             "gfx1031",
             "gfx1032",
@@ -82,12 +100,12 @@ TARGET_FAMILIES = (
     ("gfx908-dcgpu", ("gfx908",)),
     ("gfx90a-dcgpu", ("gfx90a",)),
     ("gfx90c-igpu", ("gfx90c",)),
-    ("gfx94X-all", ("gfx942",)),
-    ("gfx94X-dcgpu", ("gfx942",)),
+    ("gfx94X-all", ("gfx940", "gfx941", "gfx942")),
+    ("gfx94X-dcgpu", ("gfx940", "gfx941", "gfx942")),
     ("gfx950-all", ("gfx950",)),
     ("gfx950-dcgpu", ("gfx950",)),
-    ("gfx101X-all", ("gfx1010", "gfx1011", "gfx1012")),
-    ("gfx101X-dgpu", ("gfx1010", "gfx1011", "gfx1012")),
+    ("gfx101X-all", ("gfx1010", "gfx1011", "gfx1012", "gfx1013")),
+    ("gfx101X-dgpu", ("gfx1010", "gfx1011", "gfx1012", "gfx1013")),
     (
         "gfx103X-all",
         (
@@ -107,7 +125,9 @@ TARGET_FAMILIES = (
     ("gfx110X-igpu", ("gfx1103",)),
     ("gfx115X-all", ("gfx1150", "gfx1151", "gfx1152", "gfx1153")),
     ("gfx115X-igpu", ("gfx1150", "gfx1151", "gfx1152", "gfx1153")),
+    ("gfx117X-all", ("gfx1170", "gfx1171", "gfx1172")),
     ("gfx120X-all", ("gfx1200", "gfx1201")),
+    ("gfx125X-all", ("gfx1250", "gfx1251")),
     (
         "igpu-all",
         (

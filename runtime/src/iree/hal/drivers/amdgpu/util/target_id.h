@@ -53,6 +53,8 @@ typedef struct iree_hal_amdgpu_target_id_t {
   iree_hal_amdgpu_target_kind_t kind;
   // Parsed gfx IP version or generic family version.
   iree_hal_amdgpu_gfxip_version_t version;
+  // Generic code-object format version from ELF e_flags, or 0 if unspecified.
+  uint32_t generic_version;
   // SRAM ECC selector state.
   iree_hal_amdgpu_target_feature_state_t sramecc;
   // XNACK selector state.
@@ -82,10 +84,12 @@ typedef enum iree_hal_amdgpu_target_compatibility_bits_e {
   IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_PROCESSOR = 1u << 0,
   // Generic processor family does not match the agent's mapped family.
   IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY = 1u << 1,
+  // Generic code-object version is older than the agent's supported floor.
+  IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_VERSION = 1u << 2,
   // Explicit SRAM ECC mode does not match the agent.
-  IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_SRAMECC = 1u << 2,
+  IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_SRAMECC = 1u << 3,
   // Explicit XNACK mode does not match the agent.
-  IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK = 1u << 3,
+  IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK = 1u << 4,
 } iree_hal_amdgpu_target_compatibility_bits_t;
 typedef uint32_t iree_hal_amdgpu_target_compatibility_t;
 
@@ -122,6 +126,15 @@ iree_hal_amdgpu_target_compatibility_t
 iree_hal_amdgpu_target_id_check_compatible(
     const iree_hal_amdgpu_target_id_t* code_object_target_id,
     const iree_hal_amdgpu_target_id_t* agent_target_id);
+
+// Formats compatibility mismatch bits into a comma-separated diagnostic string.
+//
+// If |buffer_capacity| is insufficient, |out_buffer_length| still receives the
+// required character length excluding the NUL terminator.
+iree_status_t iree_hal_amdgpu_target_compatibility_format(
+    iree_hal_amdgpu_target_compatibility_t compatibility,
+    iree_host_size_t buffer_capacity, char* buffer,
+    iree_host_size_t* out_buffer_length);
 
 #ifdef __cplusplus
 }  // extern "C"

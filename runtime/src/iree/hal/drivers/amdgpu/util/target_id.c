@@ -412,6 +412,11 @@ static bool iree_hal_amdgpu_target_feature_compatible(
   return true;
 }
 
+static uint32_t iree_hal_amdgpu_generic_code_object_minimum_version(
+    const iree_hal_amdgpu_target_id_t* generic_target_id) {
+  return generic_target_id->kind == IREE_HAL_AMDGPU_TARGET_KIND_GENERIC ? 1 : 0;
+}
+
 IREE_API_EXPORT iree_hal_amdgpu_target_compatibility_t
 iree_hal_amdgpu_target_id_check_compatible(
     const iree_hal_amdgpu_target_id_t* code_object_target_id,
@@ -447,6 +452,14 @@ iree_hal_amdgpu_target_id_check_compatible(
       compatibility |=
           IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY;
     }
+    const uint32_t minimum_generic_version =
+        iree_hal_amdgpu_generic_code_object_minimum_version(
+            code_object_target_id);
+    if (code_object_target_id->generic_version != 0 &&
+        code_object_target_id->generic_version < minimum_generic_version) {
+      compatibility |=
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_VERSION;
+    }
   }
   if (!iree_hal_amdgpu_target_feature_compatible(code_object_target_id->sramecc,
                                                  agent_target_id->sramecc)) {
@@ -457,4 +470,69 @@ iree_hal_amdgpu_target_id_check_compatible(
     compatibility |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK;
   }
   return compatibility;
+}
+
+static void iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+    iree_hal_amdgpu_target_id_formatter_t* formatter,
+    iree_host_size_t* inout_reason_count, iree_string_view_t reason) {
+  if (*inout_reason_count != 0) {
+    iree_hal_amdgpu_target_id_formatter_append(formatter, IREE_SV(", "));
+  }
+  iree_hal_amdgpu_target_id_formatter_append(formatter, reason);
+  ++*inout_reason_count;
+}
+
+IREE_API_EXPORT iree_status_t iree_hal_amdgpu_target_compatibility_format(
+    iree_hal_amdgpu_target_compatibility_t compatibility,
+    iree_host_size_t buffer_capacity, char* buffer,
+    iree_host_size_t* out_buffer_length) {
+  iree_hal_amdgpu_target_id_formatter_t formatter = {
+      .buffer = buffer,
+      .capacity = buffer_capacity,
+      .length = 0,
+  };
+  if (buffer != NULL && buffer_capacity > 0) buffer[0] = 0;
+
+  iree_host_size_t reason_count = 0;
+  if (compatibility == IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("compatible"));
+  }
+  if (iree_any_bit_set(
+          compatibility,
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_PROCESSOR)) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("processor"));
+  }
+  if (iree_any_bit_set(
+          compatibility,
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY)) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("generic family"));
+  }
+  if (iree_any_bit_set(
+          compatibility,
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_VERSION)) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("generic version"));
+  }
+  if (iree_any_bit_set(compatibility,
+                       IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_SRAMECC)) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("sramecc"));
+  }
+  if (iree_any_bit_set(compatibility,
+                       IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK)) {
+    iree_hal_amdgpu_target_compatibility_formatter_append_reason(
+        &formatter, &reason_count, IREE_SV("xnack"));
+  }
+  if (out_buffer_length != NULL) {
+    *out_buffer_length = formatter.length;
+  }
+  if (buffer != NULL && buffer_capacity <= formatter.length) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AMDGPU target compatibility buffer capacity exceeded");
+  }
+  return iree_ok_status();
 }

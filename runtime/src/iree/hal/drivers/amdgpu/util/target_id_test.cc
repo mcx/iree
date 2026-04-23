@@ -198,6 +198,30 @@ TEST(TargetIdTest, ChecksGenericCompatibilityWithMappedFamily) {
       iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
                                                  &agent_target_id),
       IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY));
+
+  code_object_target_id = ParseTargetId("gfx9-4-generic");
+  agent_target_id = ParseTargetId("gfx940");
+  EXPECT_EQ(iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
+                                                       &agent_target_id),
+            IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE);
+
+  code_object_target_id = ParseTargetId("gfx9-generic");
+  EXPECT_TRUE(iree_any_bit_set(
+      iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
+                                                 &agent_target_id),
+      IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY));
+
+  code_object_target_id = ParseTargetId("gfx12-5-generic");
+  agent_target_id = ParseTargetId("gfx1250");
+  EXPECT_EQ(iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
+                                                       &agent_target_id),
+            IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE);
+
+  code_object_target_id = ParseTargetId("gfx12-generic");
+  EXPECT_TRUE(iree_any_bit_set(
+      iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
+                                                 &agent_target_id),
+      IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY));
 }
 
 TEST(TargetIdTest, ChecksFeatureCompatibility) {
@@ -213,6 +237,16 @@ TEST(TargetIdTest, ChecksFeatureCompatibility) {
   EXPECT_EQ(iree_hal_amdgpu_target_id_check_compatible(&code_object_target_id,
                                                        &agent_target_id),
             IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE);
+}
+
+TEST(TargetIdTest, FormatsCompatibilityReasons) {
+  char buffer[64] = {0};
+  IREE_ASSERT_OK(iree_hal_amdgpu_target_compatibility_format(
+      IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY |
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_SRAMECC |
+          IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK,
+      sizeof(buffer), buffer, /*out_buffer_length=*/nullptr));
+  EXPECT_STREQ(buffer, "generic family, sramecc, xnack");
 }
 
 }  // namespace
