@@ -14,6 +14,7 @@
 #include "iree/base/threading/thread.h"
 #include "iree/hal/drivers/amdgpu/host_queue_blit.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_scratch.h"
 #include "iree/hal/drivers/amdgpu/host_queue_dispatch.h"
 #include "iree/hal/drivers/amdgpu/host_queue_file.h"
 #include "iree/hal/drivers/amdgpu/host_queue_host_call.h"
@@ -587,6 +588,11 @@ void iree_hal_amdgpu_host_queue_deinitialize(
 
   iree_hal_amdgpu_host_queue_deallocate_profiling_completion_signals(queue);
   iree_hal_amdgpu_host_queue_deallocate_profile_events(queue);
+
+  if (queue->command_buffer_scratch) {
+    iree_allocator_free(queue->host_allocator, queue->command_buffer_scratch);
+    queue->command_buffer_scratch = NULL;
+  }
 
   if (queue->completion_thread_stop_signal.handle) {
     iree_hal_amdgpu_hsa_cleanup_assert_success(iree_hsa_signal_destroy_raw(

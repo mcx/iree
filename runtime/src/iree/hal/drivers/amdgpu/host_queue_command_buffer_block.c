@@ -13,12 +13,24 @@
 #include "iree/hal/drivers/amdgpu/device/profiling.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_internal.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_scratch.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile.h"
 #include "iree/hal/drivers/amdgpu/profile_counters.h"
 #include "iree/hal/drivers/amdgpu/profile_traces.h"
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
 #include "iree/hal/utils/resource_set.h"
+
+static iree_status_t iree_hal_amdgpu_host_queue_ensure_command_buffer_scratch(
+    iree_hal_amdgpu_host_queue_t* queue) {
+  if (queue->command_buffer_scratch) return iree_ok_status();
+  iree_hal_amdgpu_host_queue_command_buffer_scratch_t* scratch = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+      queue->host_allocator, sizeof(*scratch), (void**)&scratch));
+  memset(scratch, 0, sizeof(*scratch));
+  queue->command_buffer_scratch = scratch;
+  return iree_ok_status();
+}
 
 static iree_status_t iree_hal_amdgpu_host_queue_resolve_dispatch_binding_ptr(
     const iree_hal_buffer_binding_t* binding, uint64_t* out_binding_ptr) {
@@ -82,7 +94,9 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
   uint64_t* binding_ptrs = NULL;
   if (command_buffer->binding_count <=
       IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_BINDING_SCRATCH_CAPACITY) {
-    binding_ptrs = queue->command_buffer_binding_ptr_scratch;
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_host_queue_ensure_command_buffer_scratch(queue));
+    binding_ptrs = queue->command_buffer_scratch->bindings.ptrs;
   } else {
     iree_host_size_t binding_ptr_bytes = 0;
     IREE_RETURN_IF_ERROR(IREE_STRUCT_LAYOUT(
@@ -147,8 +161,10 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_packet_metadata(
   uint16_t* packet_setups = NULL;
   if (packet_count <=
       IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_SCRATCH_CAPACITY) {
-    packet_headers = queue->command_buffer_packet_header_scratch;
-    packet_setups = queue->command_buffer_packet_setup_scratch;
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_host_queue_ensure_command_buffer_scratch(queue));
+    packet_headers = queue->command_buffer_scratch->packets.headers;
+    packet_setups = queue->command_buffer_scratch->packets.setups;
   } else {
     iree_host_size_t packet_metadata_bytes = 0;
     IREE_RETURN_IF_ERROR(

@@ -92,6 +92,7 @@ iree_cc_library(
     "host_queue_command_buffer_profile.c"
     "host_queue_command_buffer_profile.h"
     "host_queue_command_buffer_replay.c"
+    "host_queue_command_buffer_scratch.h"
     "host_queue_dispatch.c"
     "host_queue_dispatch.h"
     "host_queue_file.c"
