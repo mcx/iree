@@ -923,8 +923,8 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch(
       &plan));
 
   iree_hal_resource_t** operation_resources =
-      queue->dispatch_operation_resource_scratch;
-  uint64_t* binding_ptrs = queue->dispatch_binding_ptr_scratch;
+      queue->dispatch_scratch.operation_resources;
+  uint64_t* binding_ptrs = queue->dispatch_scratch.binding_ptrs;
 
   const bool uses_custom_direct_arguments =
       iree_any_bit_set(flags, IREE_HAL_DISPATCH_FLAG_CUSTOM_DIRECT_ARGUMENTS);

@@ -256,16 +256,15 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   // post_drain_mutex.
   iree_hal_amdgpu_host_queue_post_drain_action_t* post_drain_tail;
 
-  // Queue-local resource channel used by queue_dispatch under
-  // submission_mutex before finish_dispatch_submission copies entries into the
-  // notification reclaim entry.
-  iree_hal_resource_t* dispatch_operation_resource_scratch
-      [IREE_HAL_AMDGPU_HOST_QUEUE_DISPATCH_SCRATCH_RESOURCE_CAPACITY];
-
-  // Queue-local resolved device-pointer channel used by queue_dispatch under
-  // submission_mutex before final kernargs are written to the kernarg ring.
-  uint64_t dispatch_binding_ptr_scratch
-      [IREE_HAL_AMDGPU_HOST_QUEUE_DISPATCH_SCRATCH_BINDING_CAPACITY];
+  // Queue-local scratch used by queue_dispatch under submission_mutex.
+  struct {
+    // Operation resources copied into the notification reclaim entry.
+    iree_hal_resource_t* operation_resources
+        [IREE_HAL_AMDGPU_HOST_QUEUE_DISPATCH_SCRATCH_RESOURCE_CAPACITY];
+    // Resolved device pointers written into final dispatch kernargs.
+    uint64_t binding_ptrs
+        [IREE_HAL_AMDGPU_HOST_QUEUE_DISPATCH_SCRATCH_BINDING_CAPACITY];
+  } dispatch_scratch;
 
   // Lazily allocated queue_execute scratch storage. Kept out of the host queue
   // object so direct-dispatch hot state does not carry command-buffer sideband
