@@ -191,6 +191,20 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
+    target_id
+  HDRS
+    "target_id.h"
+  TEXTUAL_HDRS
+    "target_id_map.inl"
+  SRCS
+    "target_id.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     kfd
   HDRS
     "kfd.h"
@@ -280,10 +294,10 @@ iree_cc_library(
     "device_library.c"
   DEPS
     ::libhsa
+    ::target_id
     ::topology
     iree::base
     iree::base::internal
-    iree::hal::drivers::amdgpu::device::binaries::target_map
     iree::hal::drivers::amdgpu::device::binaries::toc
     iree::hal::drivers::amdgpu::device::headers
   PUBLIC
@@ -301,6 +315,7 @@ iree_cc_library(
     ::packet
     ::pm4_program
     ::queue_primitives
+    ::target_id
     ::vmem
   PUBLIC
 )
@@ -372,6 +387,23 @@ iree_cc_test(
     ::topology
     iree::base
     iree::hal::drivers::amdgpu::device::headers
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    target_id_test
+  SRCS
+    "target_id_test.cc"
+  DEPS
+    ::target_id
+    iree::base
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS

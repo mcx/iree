@@ -4,7 +4,6 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//build_tools/bazel:build_defs.oss.bzl", "iree_runtime_cc_library")
 load(":targets.bzl", "iree_hal_amdgpu_device_binaries")
 
 package(
@@ -29,11 +28,6 @@ ABI_HDRS = [
 BITCODE_HDRS = [
     "//runtime/src/iree/hal/drivers/amdgpu/device:bitcode_hdrs",
 ] + ABI_HDRS
-
-iree_runtime_cc_library(
-    name = "target_map",
-    textual_hdrs = ["target_map.inl"],
-)
 
 iree_hal_amdgpu_device_binaries(
     name = "toc",

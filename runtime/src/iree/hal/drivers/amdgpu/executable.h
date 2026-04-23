@@ -36,11 +36,11 @@ iree_status_t iree_hal_amdgpu_verify_device_isa_commonality(
 // Returns whether the IREE HAL executable |format| is supported by all GPU
 // devices in |topology|. Some devices may support multiple ISAs.
 //
-// Supports both the target architecture names used by the compiler
-// (`gfx1100`) and the canonical ISA names reported by HSA
-// (`amdgcn-amd-amdhsa--gfx1100`). The runtime normalizes executable flatbuffer
-// formats to the HSA ISA spelling, but device target matching queries use the
-// compiler target format directly during VM initialization.
+// Supports AMDGPU target IDs in both compiler spelling (`gfx1100`,
+// `gfx942:xnack-`) and the canonical ISA names reported by HSA
+// (`amdgcn-amd-amdhsa--gfx1100`). The runtime normalizes executable
+// flatbuffer formats to the HSA ISA spelling, but device target matching
+// queries use the compiler target format directly during VM initialization.
 //
 // Optionally |out_isa| can be used to get the agent ISA for the given format.
 // Note that this will be from the first device but should match all other

@@ -194,6 +194,16 @@ iree_runtime_cc_library(
 )
 
 iree_runtime_cc_library(
+    name = "target_id",
+    srcs = ["target_id.c"],
+    hdrs = ["target_id.h"],
+    textual_hdrs = ["target_id_map.inl"],
+    deps = [
+        "//runtime/src/iree/base",
+    ],
+)
+
+iree_runtime_cc_library(
     name = "kfd",
     srcs = ["kfd.c"],
     hdrs = ["kfd.h"],
@@ -270,11 +280,11 @@ iree_runtime_cc_library(
     hdrs = ["device_library.h"],
     deps = [
         ":libhsa",
+        ":target_id",
         ":topology",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/hal/drivers/amdgpu/device:headers",
-        "//runtime/src/iree/hal/drivers/amdgpu/device/binaries:target_map",
         "//runtime/src/iree/hal/drivers/amdgpu/device/binaries:toc",
     ],
 )
@@ -290,6 +300,7 @@ iree_runtime_cc_library(
         ":packet",
         ":pm4_program",
         ":queue_primitives",
+        ":target_id",
         ":vmem",
     ],
 )
@@ -360,6 +371,22 @@ iree_runtime_cc_test(
         ":topology",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal/drivers/amdgpu/device:headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "target_id_test",
+    srcs = ["target_id_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":target_id",
+        "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

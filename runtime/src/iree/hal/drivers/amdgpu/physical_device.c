@@ -56,12 +56,6 @@ static hsa_status_t iree_hal_amdgpu_record_first_isa(hsa_isa_t isa,
   return HSA_STATUS_SUCCESS;
 }
 
-static bool iree_hal_amdgpu_parse_decimal_digit(char c, uint32_t* out_value) {
-  if (c < '0' || c > '9') return false;
-  *out_value = (uint32_t)(c - '0');
-  return true;
-}
-
 static bool iree_hal_amdgpu_parse_hex_digit(char c, uint32_t* out_value) {
   if (c >= '0' && c <= '9') {
     *out_value = (uint32_t)(c - '0');
@@ -76,60 +70,14 @@ static bool iree_hal_amdgpu_parse_hex_digit(char c, uint32_t* out_value) {
   return false;
 }
 
-static iree_status_t iree_hal_amdgpu_parse_gfxip_version(
-    iree_string_view_t isa_name, iree_hal_amdgpu_gfxip_version_t* out_version) {
-  IREE_ASSERT_ARGUMENT(out_version);
-  memset(out_version, 0, sizeof(*out_version));
-
-  iree_host_size_t gfx_ordinal = isa_name.size;
-  for (iree_host_size_t i = 0; i + 3 <= isa_name.size; ++i) {
-    if (isa_name.data[i] == 'g' && isa_name.data[i + 1] == 'f' &&
-        isa_name.data[i + 2] == 'x') {
-      gfx_ordinal = i + 3;
-      break;
-    }
-  }
-  if (gfx_ordinal >= isa_name.size) {
-    return iree_make_status(IREE_STATUS_NOT_FOUND,
-                            "ISA name does not contain gfx version: %.*s",
-                            (int)isa_name.size, isa_name.data);
-  }
-
-  const char* version = isa_name.data + gfx_ordinal;
-  const iree_host_size_t version_length = isa_name.size - gfx_ordinal;
-  uint32_t major0 = 0;
-  uint32_t major1 = 0;
-  uint32_t minor = 0;
-  uint32_t stepping = 0;
-  if (version_length >= 4 &&
-      iree_hal_amdgpu_parse_decimal_digit(version[0], &major0) && major0 == 1 &&
-      iree_hal_amdgpu_parse_decimal_digit(version[1], &major1) &&
-      iree_hal_amdgpu_parse_decimal_digit(version[2], &minor) &&
-      iree_hal_amdgpu_parse_hex_digit(version[3], &stepping)) {
-    out_version->major = 10 + major1;
-    out_version->minor = minor;
-    out_version->stepping = stepping;
-    return iree_ok_status();
-  }
-  if (version_length >= 3 &&
-      iree_hal_amdgpu_parse_decimal_digit(version[0], &major0) &&
-      iree_hal_amdgpu_parse_decimal_digit(version[1], &minor) &&
-      iree_hal_amdgpu_parse_hex_digit(version[2], &stepping)) {
-    out_version->major = major0;
-    out_version->minor = minor;
-    out_version->stepping = stepping;
-    return iree_ok_status();
-  }
-  return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                          "unsupported ISA gfx version syntax: %.*s",
-                          (int)isa_name.size, isa_name.data);
-}
-
-static iree_status_t iree_hal_amdgpu_query_agent_gfxip_version(
+static iree_status_t iree_hal_amdgpu_query_agent_target_id(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t agent,
-    iree_hal_amdgpu_gfxip_version_t* out_version) {
+    iree_host_size_t target_id_processor_capacity,
+    char* target_id_processor_storage,
+    iree_hal_amdgpu_target_id_t* out_target_id) {
   IREE_ASSERT_ARGUMENT(libhsa);
-  IREE_ASSERT_ARGUMENT(out_version);
+  IREE_ASSERT_ARGUMENT(target_id_processor_storage);
+  IREE_ASSERT_ARGUMENT(out_target_id);
 
   iree_hal_amdgpu_agent_first_isa_t first_isa;
   memset(&first_isa, 0, sizeof(first_isa));
@@ -154,9 +102,21 @@ static iree_status_t iree_hal_amdgpu_query_agent_gfxip_version(
   IREE_RETURN_IF_ERROR(
       iree_hsa_isa_get_info_alt(IREE_LIBHSA(libhsa), first_isa.value,
                                 HSA_ISA_INFO_NAME, isa_name_buffer));
-  return iree_hal_amdgpu_parse_gfxip_version(
+  iree_hal_amdgpu_target_id_t target_id;
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_id_parse_hsa_isa_name(
       iree_make_string_view(isa_name_buffer, isa_name_length - /*NUL*/ 1),
-      out_version);
+      &target_id));
+  if (target_id.processor.size >= target_id_processor_capacity) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "target ID processor storage too small");
+  }
+  memcpy(target_id_processor_storage, target_id.processor.data,
+         target_id.processor.size);
+  target_id_processor_storage[target_id.processor.size] = 0;
+  target_id.processor = iree_make_string_view(target_id_processor_storage,
+                                              target_id.processor.size);
+  *out_target_id = target_id;
+  return iree_ok_status();
 }
 
 static iree_status_t iree_hal_amdgpu_query_agent_uuid(
@@ -885,9 +845,11 @@ iree_hal_amdgpu_physical_device_initialize_vendor_packet_strategy(
     const iree_hal_amdgpu_physical_device_options_t* options,
     hsa_agent_t device_agent,
     iree_hal_amdgpu_physical_device_t* out_physical_device) {
-  iree_hal_amdgpu_gfxip_version_t gfxip_version = {0};
-  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_agent_gfxip_version(
-      libhsa, device_agent, &gfxip_version));
+  iree_hal_amdgpu_target_id_t target_id;
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_agent_target_id(
+      libhsa, device_agent, sizeof(out_physical_device->target_id_processor),
+      out_physical_device->target_id_processor, &target_id));
+  iree_hal_amdgpu_gfxip_version_t gfxip_version = target_id.version;
 
   iree_hal_amdgpu_vendor_packet_capability_flags_t vendor_packet_capabilities =
       iree_hal_amdgpu_select_vendor_packet_capabilities(gfxip_version);
@@ -897,6 +859,7 @@ iree_hal_amdgpu_physical_device_initialize_vendor_packet_strategy(
     wait_barrier_strategy = iree_hal_amdgpu_select_wait_barrier_strategy(
         vendor_packet_capabilities);
   }
+  out_physical_device->target_id = target_id;
   out_physical_device->gfxip_version = gfxip_version;
   out_physical_device->vendor_packet_capabilities = vendor_packet_capabilities;
   out_physical_device->wait_barrier_strategy = wait_barrier_strategy;

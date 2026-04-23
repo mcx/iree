@@ -26,9 +26,9 @@ Running the script emits small generated fragments:
 
 - `target_map.bzl`, loaded by `targets.bzl` for Bazel selector expansion;
 - `target_map.cmake`, included by `CMakeLists.txt` for CMake selector expansion;
-- `target_map.inl`, included by
-  `runtime/src/iree/hal/drivers/amdgpu/util/device_library.c` so runtime ISA
-  lookup uses the same exact-to-code-object map as the build.
+- `runtime/src/iree/hal/drivers/amdgpu/util/target_id_map.inl`, included by
+  `target_id.c` so runtime ISA lookup uses the same exact-to-code-object map as
+  the build.
 
 The generated files are checked in. Pre-commit runs
 `python build_tools/scripts/amdgpu_target_map.py --check` so CI catches drift
@@ -49,6 +49,6 @@ When a new AMDGPU architecture is supported:
 5. Run `buildifier`, `clang-format`, the target-map pre-commit check, and the
    focused AMDGPU device-library build/test targets.
 
-Do not hand-edit `target_map.bzl`, `target_map.cmake`, or `target_map.inl`.
+Do not hand-edit `target_map.bzl`, `target_map.cmake`, or `target_id_map.inl`.
 Do not add a parallel table in `device_library.c`; the runtime loader consumes
-`target_map.inl` directly.
+`target_id` helpers directly.

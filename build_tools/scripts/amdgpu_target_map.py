@@ -314,12 +314,12 @@ def render_cmake():
     return "\n".join(lines)
 
 
-def render_inl():
-    output_path = "runtime/src/iree/hal/drivers/amdgpu/device/binaries/target_map.inl"
+def render_target_id_inl():
+    output_path = "runtime/src/iree/hal/drivers/amdgpu/util/target_id_map.inl"
     lines = [
         generated_header("//", output_path),
         "//",
-        "// Included inside iree_hal_amdgpu_device_library_isa_mappings.",
+        "// Included inside iree_hal_amdgpu_target_id_mappings.",
         "",
         "// clang-format off",
     ]
@@ -334,11 +334,14 @@ def render_inl():
 
 
 def generated_outputs(repo_root):
-    output_dir = repo_root / "runtime/src/iree/hal/drivers/amdgpu/device/binaries"
+    binary_output_dir = (
+        repo_root / "runtime/src/iree/hal/drivers/amdgpu/device/binaries"
+    )
+    util_output_dir = repo_root / "runtime/src/iree/hal/drivers/amdgpu/util"
     return {
-        output_dir / "target_map.bzl": render_bzl(),
-        output_dir / "target_map.cmake": render_cmake(),
-        output_dir / "target_map.inl": render_inl(),
+        binary_output_dir / "target_map.bzl": render_bzl(),
+        binary_output_dir / "target_map.cmake": render_cmake(),
+        util_output_dir / "target_id_map.inl": render_target_id_inl(),
     }
 
 

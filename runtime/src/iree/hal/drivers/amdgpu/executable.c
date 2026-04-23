@@ -10,6 +10,7 @@
 #include "iree/hal/drivers/amdgpu/queue_affinity.h"
 #include "iree/hal/drivers/amdgpu/util/hsaco_metadata.h"
 #include "iree/hal/drivers/amdgpu/util/kernarg_ring.h"
+#include "iree/hal/drivers/amdgpu/util/target_id.h"
 #include "iree/hal/drivers/amdgpu/util/topology.h"
 #include "iree/hal/drivers/amdgpu/util/vmem.h"
 #include "iree/hal/utils/elf_format.h"
@@ -127,12 +128,18 @@ iree_status_t iree_hal_amdgpu_executable_format_supported(
   *out_supported = false;
   if (out_isa) out_isa->handle = 0;
 
-  const iree_string_view_t hsa_triple_prefix =
-      iree_make_cstring_view("amdgcn-amd-amdhsa-");
-  const iree_string_view_t hsa_short_arch_prefix =
-      iree_make_cstring_view("amdgcn-amd-amdhsa--");
-  const bool format_is_hsa_isa =
-      iree_string_view_starts_with(format, hsa_triple_prefix);
+  if (!iree_string_view_starts_with(format, IREE_SV("gfx")) &&
+      !iree_string_view_starts_with(format, IREE_SV("amdgcn-amd-amdhsa--"))) {
+    return iree_ok_status();
+  }
+
+  iree_hal_amdgpu_target_id_t format_target_id;
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_id_parse(
+      format,
+      IREE_HAL_AMDGPU_TARGET_ID_PARSE_FLAG_ALLOW_HSA_PREFIX |
+          IREE_HAL_AMDGPU_TARGET_ID_PARSE_FLAG_ALLOW_ARCH_ONLY |
+          IREE_HAL_AMDGPU_TARGET_ID_PARSE_FLAG_ALLOW_FEATURE_SUFFIXES,
+      &format_target_id));
 
   // Query all available ISAs supported by any GPU agent.
   // This list is ordered by descending priority.
@@ -163,15 +170,12 @@ iree_status_t iree_hal_amdgpu_executable_format_supported(
         IREE_LIBHSA(libhsa), isa, HSA_ISA_INFO_NAME, isa_name_buffer));
     iree_string_view_t isa_name =
         iree_make_string_view(isa_name_buffer, isa_name_length - /*NUL*/ 1);
-
-    // Compare exact HSA ISA names or compiler target-architecture names.
-    iree_string_view_t comparable_isa_name = isa_name;
-    if (!format_is_hsa_isa &&
-        iree_string_view_starts_with(isa_name, hsa_short_arch_prefix)) {
-      comparable_isa_name = iree_string_view_substr(
-          isa_name, hsa_short_arch_prefix.size, IREE_STRING_VIEW_NPOS);
-    }
-    if (iree_string_view_equal(format, comparable_isa_name)) {
+    iree_hal_amdgpu_target_id_t isa_target_id;
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_target_id_parse_hsa_isa_name(isa_name, &isa_target_id));
+    if (iree_hal_amdgpu_target_id_check_compatible(&format_target_id,
+                                                   &isa_target_id) ==
+        IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE) {
       *out_supported = true;
       if (out_isa) *out_isa = isa;
       return iree_ok_status();
