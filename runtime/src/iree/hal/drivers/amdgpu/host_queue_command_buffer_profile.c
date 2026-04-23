@@ -87,6 +87,7 @@ void iree_hal_amdgpu_host_queue_commit_command_buffer_profile_timestamp_range(
 bool iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch(
     const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
     const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command) {
+  if (command_buffer_id == 0) return false;
   if (!queue->profiling.hsa_queue_timestamps_enabled) return false;
   const uint32_t physical_device_ordinal = queue->device_ordinal <= UINT32_MAX
                                                ? (uint32_t)queue->device_ordinal
@@ -101,40 +102,108 @@ bool iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch(
       queue_ordinal);
 }
 
-uint32_t
-iree_hal_amdgpu_host_queue_count_command_buffer_profile_dispatch_events(
-    const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
-    const iree_hal_amdgpu_command_buffer_block_header_t* block) {
-  if (!queue->profiling.hsa_queue_timestamps_enabled) return 0;
+static bool iree_hal_amdgpu_host_queue_profiles_command_buffer_dispatches(
+    const iree_hal_amdgpu_host_queue_t* queue) {
+  iree_hal_amdgpu_logical_device_t* logical_device =
+      (iree_hal_amdgpu_logical_device_t*)queue->logical_device;
+  return iree_any_bit_set(logical_device->profiling.options.data_families,
+                          IREE_HAL_DEVICE_PROFILING_DATA_DISPATCH_EVENTS |
+                              IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES |
+                              IREE_HAL_DEVICE_PROFILING_DATA_EXECUTABLE_TRACES);
+}
 
-  const iree_hal_amdgpu_command_buffer_command_header_t* command =
-      iree_hal_amdgpu_command_buffer_block_commands_const(block);
-  uint32_t dispatch_event_count = 0;
-  for (uint16_t command_ordinal = 0; command_ordinal < block->command_count;
-       ++command_ordinal) {
-    switch (command->opcode) {
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH: {
-        const iree_hal_amdgpu_command_buffer_dispatch_command_t*
-            dispatch_command =
-                (const iree_hal_amdgpu_command_buffer_dispatch_command_t*)
-                    command;
-        if (iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch(
-                queue, command_buffer_id, dispatch_command)) {
-          ++dispatch_event_count;
-        }
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-        break;
-      }
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH:
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COND_BRANCH:
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN:
-        return dispatch_event_count;
-      default:
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-        break;
-    }
+static bool
+iree_hal_amdgpu_host_queue_should_profile_all_command_buffer_dispatches(
+    const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id) {
+  if (command_buffer_id == 0) return false;
+  if (!queue->profiling.hsa_queue_timestamps_enabled) return false;
+
+  iree_hal_amdgpu_logical_device_t* logical_device =
+      (iree_hal_amdgpu_logical_device_t*)queue->logical_device;
+  const iree_hal_profile_capture_filter_t* filter =
+      &logical_device->profiling.options.capture_filter;
+  if (iree_any_bit_set(
+          filter->flags,
+          IREE_HAL_PROFILE_CAPTURE_FILTER_FLAG_COMMAND_INDEX |
+              IREE_HAL_PROFILE_CAPTURE_FILTER_FLAG_EXECUTABLE_EXPORT_PATTERN)) {
+    return false;
   }
-  return dispatch_event_count;
+
+  const uint32_t physical_device_ordinal = queue->device_ordinal <= UINT32_MAX
+                                               ? (uint32_t)queue->device_ordinal
+                                               : UINT32_MAX;
+  const uint32_t queue_ordinal = iree_async_axis_queue_index(queue->axis);
+  return iree_hal_profile_capture_filter_matches_location(
+      filter, command_buffer_id, /*command_index=*/0, physical_device_ordinal,
+      queue_ordinal);
+}
+
+static bool
+iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch_summary(
+    const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
+    const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t*
+        summary) {
+  if (command_buffer_id == 0) return false;
+  if (!queue->profiling.hsa_queue_timestamps_enabled) return false;
+  const uint32_t physical_device_ordinal = queue->device_ordinal <= UINT32_MAX
+                                               ? (uint32_t)queue->device_ordinal
+                                               : UINT32_MAX;
+  const uint32_t queue_ordinal = iree_async_axis_queue_index(queue->axis);
+  iree_hal_amdgpu_logical_device_t* logical_device =
+      (iree_hal_amdgpu_logical_device_t*)queue->logical_device;
+  return iree_hal_amdgpu_logical_device_should_profile_dispatch(
+      logical_device, summary->executable_id, summary->export_ordinal,
+      command_buffer_id, summary->command_index, physical_device_ordinal,
+      queue_ordinal);
+}
+
+iree_status_t
+iree_hal_amdgpu_host_queue_count_command_buffer_profile_dispatch_events(
+    const iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_command_buffer_t* command_buffer,
+    const iree_hal_amdgpu_command_buffer_block_header_t* block,
+    uint32_t* out_dispatch_event_count) {
+  *out_dispatch_event_count = 0;
+  const uint64_t command_buffer_id =
+      iree_hal_amdgpu_aql_command_buffer_profile_id(command_buffer);
+  if (command_buffer_id == 0) return iree_ok_status();
+  if (!queue->profiling.hsa_queue_timestamps_enabled) return iree_ok_status();
+  if (!iree_hal_amdgpu_host_queue_profiles_command_buffer_dispatches(queue)) {
+    return iree_ok_status();
+  }
+  if (iree_hal_amdgpu_host_queue_should_profile_all_command_buffer_dispatches(
+          queue, command_buffer_id)) {
+    *out_dispatch_event_count = block->dispatch_count;
+    return iree_ok_status();
+  }
+
+  uint32_t summary_count = 0;
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* summary =
+      iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+          command_buffer, block, &summary_count);
+  if (IREE_UNLIKELY(summary_count != block->dispatch_count)) {
+    return iree_make_status(
+        IREE_STATUS_INTERNAL,
+        "retained dispatch summary count mismatch: expected %u but got %u",
+        block->dispatch_count, summary_count);
+  }
+  uint32_t dispatch_event_count = 0;
+  for (uint32_t summary_ordinal = 0; summary_ordinal < summary_count;
+       ++summary_ordinal) {
+    if (IREE_UNLIKELY(!summary)) {
+      return iree_make_status(
+          IREE_STATUS_INTERNAL,
+          "retained dispatch summary list ended after %u of %u entries",
+          summary_ordinal, summary_count);
+    }
+    if (iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch_summary(
+            queue, command_buffer_id, summary)) {
+      ++dispatch_event_count;
+    }
+    summary = summary->next;
+  }
+  *out_dispatch_event_count = dispatch_event_count;
+  return iree_ok_status();
 }
 
 static bool iree_hal_amdgpu_command_buffer_dispatch_uses_indirect_parameters(
@@ -199,47 +268,47 @@ void iree_hal_amdgpu_host_queue_record_command_buffer_profile_dispatch_source(
 
 iree_status_t
 iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
-    iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
+    iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_command_buffer_t* command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events) {
   if (profile_events.event_count == 0 || !queue->profiling.trace_session) {
     return iree_ok_status();
   }
 
-  const iree_hal_amdgpu_command_buffer_command_header_t* command =
-      iree_hal_amdgpu_command_buffer_block_commands_const(block);
+  const uint64_t command_buffer_id =
+      iree_hal_amdgpu_aql_command_buffer_profile_id(command_buffer);
+  uint32_t summary_count = 0;
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* summary =
+      iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+          command_buffer, block, &summary_count);
+  if (IREE_UNLIKELY(summary_count != block->dispatch_count)) {
+    return iree_make_status(
+        IREE_STATUS_INTERNAL,
+        "retained dispatch summary count mismatch: expected %u but got %u",
+        block->dispatch_count, summary_count);
+  }
+
   uint32_t profile_event_index = 0;
-  bool reached_terminator = false;
   iree_status_t status = iree_ok_status();
-  for (uint16_t command_ordinal = 0;
-       command_ordinal < block->command_count && iree_status_is_ok(status) &&
-       !reached_terminator;
-       ++command_ordinal) {
-    switch (command->opcode) {
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH: {
-        const iree_hal_amdgpu_command_buffer_dispatch_command_t*
-            dispatch_command =
-                (const iree_hal_amdgpu_command_buffer_dispatch_command_t*)
-                    command;
-        if (iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch(
-                queue, command_buffer_id, dispatch_command)) {
-          const uint64_t event_position =
-              profile_events.first_event_position + profile_event_index++;
-          status = iree_hal_amdgpu_host_queue_prepare_profile_trace_code_object(
-              queue, event_position, dispatch_command->executable_id);
-        }
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-        break;
-      }
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH:
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COND_BRANCH:
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN:
-        reached_terminator = true;
-        break;
-      default:
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-        break;
+  for (uint32_t summary_ordinal = 0;
+       summary_ordinal < summary_count && iree_status_is_ok(status);
+       ++summary_ordinal) {
+    if (IREE_UNLIKELY(!summary)) {
+      status = iree_make_status(
+          IREE_STATUS_INTERNAL,
+          "retained dispatch summary list ended after %u of %u entries",
+          summary_ordinal, summary_count);
+      break;
     }
+    if (iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch_summary(
+            queue, command_buffer_id, summary)) {
+      const uint64_t event_position =
+          profile_events.first_event_position + profile_event_index++;
+      status = iree_hal_amdgpu_host_queue_prepare_profile_trace_code_object(
+          queue, event_position, summary->executable_id);
+    }
+    summary = summary->next;
   }
   if (iree_status_is_ok(status) &&
       IREE_UNLIKELY(profile_event_index != profile_events.event_count)) {

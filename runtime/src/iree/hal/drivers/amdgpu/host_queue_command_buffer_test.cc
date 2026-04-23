@@ -16,7 +16,7 @@
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/executable.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
-#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_internal.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_packet.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
 #include "iree/hal/drivers/amdgpu/logical_device.h"
 #include "iree/hal/drivers/amdgpu/physical_device.h"
@@ -1276,7 +1276,9 @@ static iree_status_t CreateTwoDispatchCommandBuffer(
       out_fixture->output_buffer1, /*offset=*/0, IREE_HAL_WHOLE_BUFFER));
 
   IREE_RETURN_IF_ERROR(iree_hal_command_buffer_create(
-      test_device->base_device(), IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT,
+      test_device->base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/0, out_fixture->command_buffer.out()));
   IREE_RETURN_IF_ERROR(
@@ -2411,7 +2413,8 @@ TEST_F(HostQueueCommandBufferTest,
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
-      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      test_device.base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_TRANSFER, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/0, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
@@ -3163,7 +3166,9 @@ TEST_F(HostQueueCommandBufferTest,
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
-      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT,
+      test_device.base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/0, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
@@ -3384,7 +3389,8 @@ TEST_F(HostQueueCommandBufferTest,
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
-      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      test_device.base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_TRANSFER, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/0, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
@@ -3777,7 +3783,8 @@ TEST_F(HostQueueCommandBufferTest,
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
-      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      test_device.base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_TRANSFER, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/1, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));

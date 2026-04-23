@@ -124,7 +124,7 @@ TEST_F(AqlCommandBufferTest, UnvalidatedCommandBufferCannotRerecord) {
   const uint32_t command_count = program->command_count;
   const iree_host_size_t profile_operation_count =
       profile_metadata().command_operation_record_count;
-  EXPECT_EQ(profile_operation_count, command_count);
+  EXPECT_EQ(profile_operation_count, 0u);
 
   IREE_EXPECT_STATUS_IS(IREE_STATUS_FAILED_PRECONDITION,
                         iree_hal_command_buffer_begin(command_buffer.get()));
@@ -133,6 +133,22 @@ TEST_F(AqlCommandBufferTest, UnvalidatedCommandBufferCannotRerecord) {
   EXPECT_EQ(first_block, program->first_block);
   EXPECT_EQ(command_count, program->command_count);
   EXPECT_EQ(profile_operation_count,
+            profile_metadata().command_operation_record_count);
+}
+
+TEST_F(AqlCommandBufferTest, RetainedProfileMetadataRegistersOperations) {
+  CommandBufferPtr command_buffer = CreateCommandBufferWithMode(
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+      IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA);
+  ASSERT_NE(command_buffer, nullptr);
+
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
+
+  const iree_hal_amdgpu_aql_program_t* program =
+      iree_hal_amdgpu_aql_command_buffer_program(command_buffer.get());
+  ASSERT_NE(program->first_block, nullptr);
+  EXPECT_EQ(program->command_count,
             profile_metadata().command_operation_record_count);
 }
 

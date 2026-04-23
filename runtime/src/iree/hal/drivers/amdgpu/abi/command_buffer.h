@@ -130,8 +130,14 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint32_t rodata_offset;
   // Total bytes occupied by block-local read-only payload data.
   uint32_t rodata_length;
+  // Number of dispatch command records in this block.
+  uint16_t dispatch_count;
+  // Number of dispatch command records using indirect parameters.
+  uint16_t indirect_dispatch_count;
+  // Number of profile marker command records in this block.
+  uint16_t profile_marker_count;
   // Reserved bytes that must be zero in version 0.
-  uint32_t reserved0[2];
+  uint16_t reserved0;
 } iree_hal_amdgpu_command_buffer_block_header_t;
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_block_header_t) == 64,

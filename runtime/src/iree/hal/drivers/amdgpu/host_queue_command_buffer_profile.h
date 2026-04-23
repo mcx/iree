@@ -10,6 +10,7 @@
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
 #include "iree/hal/drivers/amdgpu/abi/command_buffer.h"
+#include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
@@ -42,10 +43,12 @@ void iree_hal_amdgpu_host_queue_commit_command_buffer_profile_timestamp_range(
     iree_hal_amdgpu_profile_queue_device_event_t* queue_device_event);
 
 // Counts dispatch commands in |block| selected by the active capture filter.
-uint32_t
+iree_status_t
 iree_hal_amdgpu_host_queue_count_command_buffer_profile_dispatch_events(
-    const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
-    const iree_hal_amdgpu_command_buffer_block_header_t* block);
+    const iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_command_buffer_t* command_buffer,
+    const iree_hal_amdgpu_command_buffer_block_header_t* block,
+    uint32_t* out_dispatch_event_count);
 
 // Returns true when |dispatch_command| should receive exact dispatch timestamp
 // profiling in this queue and profile session.
@@ -66,7 +69,8 @@ void iree_hal_amdgpu_host_queue_record_command_buffer_profile_dispatch_source(
 // dispatch events in |block|.
 iree_status_t
 iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
-    iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
+    iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_command_buffer_t* command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events);
 

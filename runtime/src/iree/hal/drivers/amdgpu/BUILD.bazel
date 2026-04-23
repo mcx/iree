@@ -51,6 +51,10 @@ iree_runtime_cc_library(
     srcs = [
         "allocator.c",
         "allocator.h",
+        "aql_block_processor.c",
+        "aql_block_processor.h",
+        "aql_block_processor_profile.c",
+        "aql_block_processor_profile.h",
         "aql_command_buffer.c",
         "aql_command_buffer.h",
         "aql_command_buffer_profile.c",
@@ -73,6 +77,8 @@ iree_runtime_cc_library(
         "host_queue_command_buffer.h",
         "host_queue_command_buffer_block.c",
         "host_queue_command_buffer_internal.h",
+        "host_queue_command_buffer_packet.c",
+        "host_queue_command_buffer_packet.h",
         "host_queue_command_buffer_profile.c",
         "host_queue_command_buffer_profile.h",
         "host_queue_command_buffer_replay.c",
@@ -177,6 +183,7 @@ iree_runtime_cc_library(
 iree_runtime_cc_library(
     name = "headers",
     hdrs = [
+        "aql_block_processor.h",
         "aql_command_buffer.h",
         "aql_command_buffer_profile.h",
         "aql_program_builder.h",
@@ -286,6 +293,24 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_test(
+    name = "aql_block_processor_test",
+    srcs = ["aql_block_processor_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":amdgpu",
+        ":headers",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal/drivers/amdgpu/abi",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
     name = "aql_command_buffer_test",
     srcs = ["aql_command_buffer_test.cc"],
     group = "iree-hal-drivers-amdgpu-tests",
@@ -341,6 +366,7 @@ iree_runtime_cc_test(
     name = "host_queue_command_buffer_test",
     srcs = [
         "host_queue_command_buffer_internal.h",
+        "host_queue_command_buffer_packet.h",
         "host_queue_command_buffer_test.cc",
     ],
     group = "iree-hal-drivers-amdgpu-tests",

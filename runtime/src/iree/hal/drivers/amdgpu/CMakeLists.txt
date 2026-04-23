@@ -61,6 +61,10 @@ iree_cc_library(
   SRCS
     "allocator.c"
     "allocator.h"
+    "aql_block_processor.c"
+    "aql_block_processor.h"
+    "aql_block_processor_profile.c"
+    "aql_block_processor_profile.h"
     "aql_command_buffer.c"
     "aql_command_buffer.h"
     "aql_command_buffer_profile.c"
@@ -83,6 +87,8 @@ iree_cc_library(
     "host_queue_command_buffer.h"
     "host_queue_command_buffer_block.c"
     "host_queue_command_buffer_internal.h"
+    "host_queue_command_buffer_packet.c"
+    "host_queue_command_buffer_packet.h"
     "host_queue_command_buffer_profile.c"
     "host_queue_command_buffer_profile.h"
     "host_queue_command_buffer_replay.c"
@@ -182,6 +188,7 @@ iree_cc_library(
   NAME
     headers
   HDRS
+    "aql_block_processor.h"
     "aql_command_buffer.h"
     "aql_command_buffer_profile.h"
     "aql_program_builder.h"
@@ -296,6 +303,25 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
+    aql_block_processor_test
+  SRCS
+    "aql_block_processor_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
+    iree::hal::drivers::amdgpu::abi
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
     aql_command_buffer_test
   SRCS
     "aql_command_buffer_test.cc"
@@ -355,6 +381,7 @@ iree_cc_test(
     host_queue_command_buffer_test
   SRCS
     "host_queue_command_buffer_internal.h"
+    "host_queue_command_buffer_packet.h"
     "host_queue_command_buffer_test.cc"
   DEPS
     ::amdgpu

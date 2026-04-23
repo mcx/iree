@@ -120,13 +120,13 @@ void iree_hal_amdgpu_aql_program_builder_deinitialize(
   }
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  if (builder->current_block) {
+  if (builder->current_block.header) {
     iree_arena_block_t* arena_block = iree_hal_amdgpu_aql_program_arena_block(
-        builder->block_pool, builder->current_block);
+        builder->block_pool, builder->current_block.header);
     arena_block->next = NULL;
     iree_arena_block_pool_release(builder->block_pool, arena_block,
                                   arena_block);
-    builder->current_block = NULL;
+    builder->current_block.header = NULL;
   }
 
   if (builder->first_block) {
@@ -171,17 +171,21 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_begin_block(
   block->command_offset = sizeof(*block);
   block->rodata_offset = block->block_length;
 
-  builder->current_block = block;
-  builder->command_cursor = (uint8_t*)block + sizeof(*block);
-  builder->binding_source_cursor =
+  builder->current_block.header = block;
+  builder->current_block.command_cursor = (uint8_t*)block + sizeof(*block);
+  builder->current_block.binding_source_cursor =
       (uint8_t*)block + builder->block_pool->usable_block_size;
-  builder->current_block_command_count = 0;
-  builder->current_block_binding_source_count = 0;
-  builder->current_block_aql_packet_count = 0;
-  builder->current_block_kernarg_length = 0;
-  builder->current_block_initial_barrier_packet_count = 0;
-  builder->pending_barrier_acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
-  builder->current_block_flags = IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_NONE;
+  builder->current_block.command_count = 0;
+  builder->current_block.binding_source_count = 0;
+  builder->current_block.dispatch_count = 0;
+  builder->current_block.indirect_dispatch_count = 0;
+  builder->current_block.profile_marker_count = 0;
+  builder->current_block.aql_packet_count = 0;
+  builder->current_block.kernarg_length = 0;
+  builder->current_block.initial_barrier_packet_count = 0;
+  builder->current_block.pending_barrier_acquire_scope =
+      IREE_HSA_FENCE_SCOPE_NONE;
+  builder->current_block.flags = IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_NONE;
   ++builder->block_count;
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -189,20 +193,26 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_begin_block(
 
 static void iree_hal_amdgpu_aql_program_builder_finalize_block(
     iree_hal_amdgpu_aql_program_builder_t* builder) {
-  iree_hal_amdgpu_command_buffer_block_header_t* block = builder->current_block;
-  block->command_length = (uint32_t)(builder->command_cursor -
+  iree_hal_amdgpu_command_buffer_block_header_t* block =
+      builder->current_block.header;
+  block->command_length = (uint32_t)(builder->current_block.command_cursor -
                                      ((uint8_t*)block + block->command_offset));
   block->binding_source_offset =
-      (uint32_t)(builder->binding_source_cursor - (uint8_t*)block);
-  block->command_count = builder->current_block_command_count;
-  block->binding_source_count = builder->current_block_binding_source_count;
-  block->aql_packet_count = builder->current_block_aql_packet_count;
-  block->kernarg_length = builder->current_block_kernarg_length;
+      (uint32_t)(builder->current_block.binding_source_cursor -
+                 (uint8_t*)block);
+  block->command_count = builder->current_block.command_count;
+  block->binding_source_count = builder->current_block.binding_source_count;
+  block->aql_packet_count = builder->current_block.aql_packet_count;
+  block->kernarg_length = builder->current_block.kernarg_length;
+  block->dispatch_count = builder->current_block.dispatch_count;
+  block->indirect_dispatch_count =
+      builder->current_block.indirect_dispatch_count;
+  block->profile_marker_count = builder->current_block.profile_marker_count;
   block->initial_barrier_packet_count =
       iree_any_bit_set(
-          builder->current_block_flags,
+          builder->current_block.flags,
           IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET)
-          ? builder->current_block_initial_barrier_packet_count
+          ? builder->current_block.initial_barrier_packet_count
           : block->aql_packet_count;
 
   if (block->aql_packet_count > builder->max_block_aql_packet_count) {
@@ -224,21 +234,21 @@ static void iree_hal_amdgpu_aql_program_builder_finalize_block(
   }
   builder->last_block = block;
 
-  builder->current_block = NULL;
-  builder->command_cursor = NULL;
-  builder->binding_source_cursor = NULL;
+  builder->current_block.header = NULL;
+  builder->current_block.command_cursor = NULL;
+  builder->current_block.binding_source_cursor = NULL;
 }
 
 static iree_host_size_t iree_hal_amdgpu_aql_program_builder_remaining(
     const iree_hal_amdgpu_aql_program_builder_t* builder) {
-  return (iree_host_size_t)(builder->binding_source_cursor -
-                            builder->command_cursor);
+  return (iree_host_size_t)(builder->current_block.binding_source_cursor -
+                            builder->current_block.command_cursor);
 }
 
 static iree_status_t iree_hal_amdgpu_aql_program_builder_append_terminator(
     iree_hal_amdgpu_aql_program_builder_t* builder, uint8_t opcode,
     uint32_t target_block_ordinal) {
-  if (IREE_UNLIKELY(builder->current_block_command_count == UINT16_MAX ||
+  if (IREE_UNLIKELY(builder->current_block.command_count == UINT16_MAX ||
                     builder->command_count == UINT32_MAX)) {
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "command-buffer command count overflow");
@@ -262,7 +272,8 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_append_terminator(
   }
 
   iree_hal_amdgpu_command_buffer_command_header_t* header =
-      (iree_hal_amdgpu_command_buffer_command_header_t*)builder->command_cursor;
+      (iree_hal_amdgpu_command_buffer_command_header_t*)
+          builder->current_block.command_cursor;
   memset(header, 0, command_length);
   header->opcode = opcode;
   header->length_qwords =
@@ -276,9 +287,9 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_append_terminator(
     branch_command->target_block_ordinal = target_block_ordinal;
   }
 
-  builder->command_cursor += command_length;
+  builder->current_block.command_cursor += command_length;
   ++builder->command_count;
-  ++builder->current_block_command_count;
+  ++builder->current_block.command_count;
   return iree_ok_status();
 }
 
@@ -293,10 +304,10 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_split_block(
                             "command-buffer block count overflow");
   }
   const iree_hal_amdgpu_aql_program_builder_flags_t carried_flags =
-      builder->current_block_flags &
+      builder->current_block.flags &
       IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
   const uint8_t carried_acquire_scope =
-      carried_flags ? builder->pending_barrier_acquire_scope
+      carried_flags ? builder->current_block.pending_barrier_acquire_scope
                     : IREE_HSA_FENCE_SCOPE_NONE;
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_program_builder_append_terminator(
       builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH,
@@ -304,8 +315,8 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_split_block(
   iree_hal_amdgpu_aql_program_builder_finalize_block(builder);
   IREE_RETURN_IF_ERROR(
       iree_hal_amdgpu_aql_program_builder_begin_block(builder));
-  builder->current_block_flags |= carried_flags;
-  builder->pending_barrier_acquire_scope = carried_acquire_scope;
+  builder->current_block.flags |= carried_flags;
+  builder->current_block.pending_barrier_acquire_scope = carried_acquire_scope;
   return iree_ok_status();
 }
 
@@ -314,7 +325,7 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_validate_command(
     iree_host_size_t command_length, uint16_t binding_source_count,
     iree_host_size_t* out_required_length,
     iree_host_size_t* out_binding_source_length) {
-  if (IREE_UNLIKELY(!builder->current_block)) {
+  if (IREE_UNLIKELY(!builder->current_block.header)) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                             "command-buffer builder is not recording");
   }
@@ -377,15 +388,15 @@ static bool iree_hal_amdgpu_aql_program_command_fits_current_block(
     const iree_hal_amdgpu_aql_program_builder_t* builder,
     uint16_t binding_source_count, uint32_t aql_packet_count,
     uint32_t kernarg_length) {
-  if (builder->current_block_command_count > UINT16_MAX - 2) return false;
+  if (builder->current_block.command_count > UINT16_MAX - 2) return false;
   if (binding_source_count >
-      UINT16_MAX - builder->current_block_binding_source_count) {
+      UINT16_MAX - builder->current_block.binding_source_count) {
     return false;
   }
-  if (aql_packet_count > UINT32_MAX - builder->current_block_aql_packet_count) {
+  if (aql_packet_count > UINT32_MAX - builder->current_block.aql_packet_count) {
     return false;
   }
-  if (kernarg_length > UINT32_MAX - builder->current_block_kernarg_length) {
+  if (kernarg_length > UINT32_MAX - builder->current_block.kernarg_length) {
     return false;
   }
   return true;
@@ -415,7 +426,7 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_begin(
         IREE_STATUS_INVALID_ARGUMENT,
         "command-buffer block pool usable size must fit in the block ABI");
   }
-  if (IREE_UNLIKELY(builder->current_block || builder->first_block)) {
+  if (IREE_UNLIKELY(builder->current_block.header || builder->first_block)) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                             "command-buffer builder already has a recording");
   }
@@ -432,7 +443,7 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_end(
   }
   memset(out_program, 0, sizeof(*out_program));
 
-  if (IREE_UNLIKELY(!builder->current_block)) {
+  if (IREE_UNLIKELY(!builder->current_block.header)) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                             "command-buffer builder is not recording");
   }
@@ -513,15 +524,16 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
   }
 
   iree_hal_amdgpu_command_buffer_command_header_t* command =
-      (iree_hal_amdgpu_command_buffer_command_header_t*)builder->command_cursor;
+      (iree_hal_amdgpu_command_buffer_command_header_t*)
+          builder->current_block.command_cursor;
   memset(command, 0, command_length);
-  builder->command_cursor += command_length;
+  builder->current_block.command_cursor += command_length;
 
   iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources = NULL;
   if (binding_source_length > 0) {
-    builder->binding_source_cursor -= binding_source_length;
+    builder->current_block.binding_source_cursor -= binding_source_length;
     binding_sources = (iree_hal_amdgpu_command_buffer_binding_source_t*)
-                          builder->binding_source_cursor;
+                          builder->current_block.binding_source_cursor;
     memset(binding_sources, 0, binding_source_length);
   }
 
@@ -532,7 +544,7 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
   }
   const bool command_has_payload = aql_packet_count != 0;
   const bool has_pending_execution_barrier = iree_any_bit_set(
-      builder->current_block_flags,
+      builder->current_block.flags,
       IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER);
   const bool command_forces_barrier = iree_any_bit_set(
       command_flags, IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER);
@@ -545,7 +557,7 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
     uint8_t acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
     uint8_t release_scope = IREE_HSA_FENCE_SCOPE_NONE;
     if (has_pending_execution_barrier) {
-      acquire_scope = builder->pending_barrier_acquire_scope;
+      acquire_scope = builder->current_block.pending_barrier_acquire_scope;
     }
     if (command_forces_barrier) {
       if (acquire_scope < IREE_HSA_FENCE_SCOPE_AGENT) {
@@ -566,30 +578,36 @@ iree_status_t iree_hal_amdgpu_aql_program_builder_append_command(
 
   if (command_has_barrier_packet &&
       !iree_any_bit_set(
-          builder->current_block_flags,
+          builder->current_block.flags,
           IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET)) {
-    builder->current_block_initial_barrier_packet_count =
-        builder->current_block_aql_packet_count + 1;
-    builder->current_block_flags |=
+    builder->current_block.initial_barrier_packet_count =
+        builder->current_block.aql_packet_count + 1;
+    builder->current_block.flags |=
         IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_INITIAL_BARRIER_PACKET;
   }
   if (opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER) {
-    builder->current_block_flags |=
+    builder->current_block.flags |=
         IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
   } else if (command_has_payload) {
-    builder->current_block_flags &=
+    builder->current_block.flags &=
         ~IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER;
-    builder->pending_barrier_acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
+    builder->current_block.pending_barrier_acquire_scope =
+        IREE_HSA_FENCE_SCOPE_NONE;
   }
   if (command_has_payload) {
     builder->last_payload_command = command;
   }
 
   ++builder->command_count;
-  ++builder->current_block_command_count;
-  builder->current_block_binding_source_count += binding_source_count;
-  builder->current_block_aql_packet_count += aql_packet_count;
-  builder->current_block_kernarg_length += kernarg_length;
+  ++builder->current_block.command_count;
+  if (opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH) {
+    ++builder->current_block.dispatch_count;
+  } else if (opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_PROFILE_MARKER) {
+    ++builder->current_block.profile_marker_count;
+  }
+  builder->current_block.binding_source_count += binding_source_count;
+  builder->current_block.aql_packet_count += aql_packet_count;
+  builder->current_block.kernarg_length += kernarg_length;
 
   *out_command = command;
   if (out_binding_sources) *out_binding_sources = binding_sources;
@@ -600,7 +618,7 @@ void iree_hal_amdgpu_aql_program_builder_set_pending_barrier_scopes(
     iree_hal_amdgpu_aql_program_builder_t* builder, uint8_t acquire_scope,
     uint8_t release_scope) {
   if (!iree_any_bit_set(
-          builder->current_block_flags,
+          builder->current_block.flags,
           IREE_HAL_AMDGPU_AQL_PROGRAM_BUILDER_FLAG_HAS_PENDING_EXECUTION_BARRIER)) {
     return;
   }
@@ -618,7 +636,7 @@ void iree_hal_amdgpu_aql_program_builder_set_pending_barrier_scopes(
               release_scope);
     }
   }
-  if (acquire_scope > builder->pending_barrier_acquire_scope) {
-    builder->pending_barrier_acquire_scope = acquire_scope;
+  if (acquire_scope > builder->current_block.pending_barrier_acquire_scope) {
+    builder->current_block.pending_barrier_acquire_scope = acquire_scope;
   }
 }

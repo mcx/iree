@@ -160,6 +160,9 @@ TEST_F(AqlProgramBuilderTest, AppendsCommandAndBindingSources) {
       program.first_block;
   EXPECT_EQ(block->command_count, 2u);
   EXPECT_EQ(block->binding_source_count, 2u);
+  EXPECT_EQ(block->dispatch_count, 1u);
+  EXPECT_EQ(block->indirect_dispatch_count, 0u);
+  EXPECT_EQ(block->profile_marker_count, 0u);
   EXPECT_EQ(block->aql_packet_count, 1u);
   EXPECT_EQ(block->kernarg_length, 128u);
   EXPECT_EQ(program.max_block_aql_packet_count, 1u);
