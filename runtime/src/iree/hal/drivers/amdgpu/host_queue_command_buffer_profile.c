@@ -68,8 +68,7 @@ iree_hal_amdgpu_host_queue_should_profile_all_command_buffer_dispatches(
 static bool
 iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch_summary(
     const iree_hal_amdgpu_host_queue_t* queue, uint64_t command_buffer_id,
-    const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t*
-        summary) {
+    const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary) {
   if (command_buffer_id == 0) return false;
   if (!queue->profiling.hsa_queue_timestamps_enabled) return false;
   const uint32_t physical_device_ordinal = queue->device_ordinal <= UINT32_MAX
@@ -79,9 +78,9 @@ iree_hal_amdgpu_host_queue_should_profile_command_buffer_dispatch_summary(
   iree_hal_amdgpu_logical_device_t* logical_device =
       (iree_hal_amdgpu_logical_device_t*)queue->logical_device;
   return iree_hal_amdgpu_logical_device_should_profile_dispatch(
-      logical_device, summary->executable_id, summary->export_ordinal,
-      command_buffer_id, summary->command_index, physical_device_ordinal,
-      queue_ordinal);
+      logical_device, summary->metadata.executable_id,
+      summary->metadata.export_ordinal, command_buffer_id,
+      summary->metadata.command_index, physical_device_ordinal, queue_ordinal);
 }
 
 iree_status_t
@@ -105,8 +104,8 @@ iree_hal_amdgpu_host_queue_count_command_buffer_profile_dispatch_events(
   }
 
   uint32_t summary_count = 0;
-  const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* summary =
-      iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary =
+      iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
           command_buffer, block, &summary_count);
   if (IREE_UNLIKELY(summary_count != block->dispatch_count)) {
     return iree_make_status(
@@ -206,8 +205,8 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
   const uint64_t command_buffer_id =
       iree_hal_amdgpu_aql_command_buffer_profile_id(command_buffer);
   uint32_t summary_count = 0;
-  const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* summary =
-      iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary =
+      iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
           command_buffer, block, &summary_count);
   if (IREE_UNLIKELY(summary_count != block->dispatch_count)) {
     return iree_make_status(
@@ -233,7 +232,7 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
       const uint64_t event_position =
           profile_events.first_event_position + profile_event_index++;
       status = iree_hal_amdgpu_host_queue_prepare_profile_trace_code_object(
-          queue, event_position, summary->executable_id);
+          queue, event_position, summary->metadata.executable_id);
     }
     summary = summary->next;
   }

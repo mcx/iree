@@ -101,21 +101,21 @@ static_assert(
         IREE_HAL_AMDGPU_AQL_PROGRAM_DEFAULT_BLOCK_SIZE,
     "rodata segment page should fit in a default command-buffer block");
 
-typedef struct iree_hal_amdgpu_aql_command_buffer_profile_block_t {
+typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t {
   // Next block summary in recording order.
-  struct iree_hal_amdgpu_aql_command_buffer_profile_block_t* next;
+  struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t* next;
   // Recorded command-buffer block this summary describes.
   const iree_hal_amdgpu_command_buffer_block_header_t* header;
-  // Retained dispatch profile summaries for this block.
+  // Retained dispatch summaries for this block.
   struct {
     // First dispatch summary in command order.
-    iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* first;
+    iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* first;
     // Final dispatch summary in command order.
-    iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* last;
+    iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* last;
     // Number of dispatch summaries in this block.
     uint32_t count;
   } dispatch;
-} iree_hal_amdgpu_aql_command_buffer_profile_block_t;
+} iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t;
 
 typedef struct iree_hal_amdgpu_aql_command_buffer_t {
   // Base HAL command-buffer resource.
@@ -169,19 +169,19 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_t {
     // Producer-local profile command-buffer id, or 0 when profile metadata is
     // not retained for this command buffer.
     uint64_t id;
-    // Retained dispatch summaries.
-    struct {
-      // Block-level dispatch summary list.
-      struct {
-        // First block with retained dispatch summaries.
-        iree_hal_amdgpu_aql_command_buffer_profile_block_t* first;
-        // Current recording block with retained dispatch summaries.
-        iree_hal_amdgpu_aql_command_buffer_profile_block_t* current;
-      } block;
-      // Total retained dispatch summaries across all blocks.
-      uint32_t count;
-    } dispatch;
   } profile;
+  // Recording-time sidecars retained for profiling and timestamp planning.
+  struct {
+    // Block-level dispatch summary list.
+    struct {
+      // First block with retained dispatch summaries.
+      iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t* first;
+      // Current recording block with retained dispatch summaries.
+      iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t* current;
+    } block;
+    // Total retained dispatch summaries across all blocks.
+    uint32_t count;
+  } dispatch_summaries;
   // Builder used only during begin/end recording.
   iree_hal_amdgpu_aql_program_builder_t builder;
   // Program produced by end() and consumed by queue execution.
@@ -210,6 +210,12 @@ static bool iree_hal_amdgpu_aql_command_buffer_retains_profile_metadata(
       IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA);
 }
 
+static bool iree_hal_amdgpu_aql_command_buffer_retains_dispatch_summaries(
+    const iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
+  return iree_hal_amdgpu_aql_command_buffer_retains_profile_metadata(
+      command_buffer);
+}
+
 static bool iree_hal_amdgpu_aql_command_buffer_validates(
     const iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
 #if IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
@@ -234,9 +240,9 @@ static void iree_hal_amdgpu_aql_command_buffer_reset_resources(
   command_buffer->rodata.first_page = NULL;
   command_buffer->rodata.current_page = NULL;
   command_buffer->rodata.segment_count = 0;
-  command_buffer->profile.dispatch.block.first = NULL;
-  command_buffer->profile.dispatch.block.current = NULL;
-  command_buffer->profile.dispatch.count = 0;
+  command_buffer->dispatch_summaries.block.first = NULL;
+  command_buffer->dispatch_summaries.block.current = NULL;
+  command_buffer->dispatch_summaries.count = 0;
 }
 
 static void iree_hal_amdgpu_aql_command_buffer_discard_recording(
@@ -781,8 +787,8 @@ uint64_t iree_hal_amdgpu_aql_command_buffer_profile_id(
   return command_buffer->profile.id;
 }
 
-const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t*
-iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t*
+iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
     iree_hal_command_buffer_t* base_command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     uint32_t* out_count) {
@@ -790,14 +796,14 @@ iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
   *out_count = 0;
   iree_hal_amdgpu_aql_command_buffer_t* command_buffer =
       iree_hal_amdgpu_aql_command_buffer_cast(base_command_buffer);
-  for (const iree_hal_amdgpu_aql_command_buffer_profile_block_t* profile_block =
-           command_buffer->profile.dispatch.block.first;
-       profile_block; profile_block = profile_block->next) {
-    if (profile_block->header == block) {
-      *out_count = profile_block->dispatch.count;
-      return profile_block->dispatch.first;
+  for (const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t*
+           summary_block = command_buffer->dispatch_summaries.block.first;
+       summary_block; summary_block = summary_block->next) {
+    if (summary_block->header == block) {
+      *out_count = summary_block->dispatch.count;
+      return summary_block->dispatch.first;
     }
-    if (profile_block->header->block_ordinal > block->block_ordinal) {
+    if (summary_block->header->block_ordinal > block->block_ordinal) {
       break;
     }
   }
@@ -1936,57 +1942,66 @@ static void iree_hal_amdgpu_aql_command_buffer_initialize_dispatch_command(
 }
 
 static iree_status_t
-iree_hal_amdgpu_aql_command_buffer_ensure_current_profile_block(
+iree_hal_amdgpu_aql_command_buffer_ensure_current_dispatch_summary_block(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
-    iree_hal_amdgpu_aql_command_buffer_profile_block_t** out_profile_block) {
-  *out_profile_block = command_buffer->profile.dispatch.block.current;
-  if (*out_profile_block && (*out_profile_block)->header == block) {
+    iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t**
+        out_summary_block) {
+  *out_summary_block = command_buffer->dispatch_summaries.block.current;
+  if (*out_summary_block && (*out_summary_block)->header == block) {
     return iree_ok_status();
   }
 
-  iree_hal_amdgpu_aql_command_buffer_profile_block_t* profile_block = NULL;
+  iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t* summary_block =
+      NULL;
   IREE_RETURN_IF_ERROR(iree_arena_allocate(&command_buffer->recording_arena,
-                                           sizeof(*profile_block),
-                                           (void**)&profile_block));
-  memset(profile_block, 0, sizeof(*profile_block));
-  profile_block->header = block;
-  if (command_buffer->profile.dispatch.block.current) {
-    command_buffer->profile.dispatch.block.current->next = profile_block;
+                                           sizeof(*summary_block),
+                                           (void**)&summary_block));
+  memset(summary_block, 0, sizeof(*summary_block));
+  summary_block->header = block;
+  if (command_buffer->dispatch_summaries.block.current) {
+    command_buffer->dispatch_summaries.block.current->next = summary_block;
   } else {
-    command_buffer->profile.dispatch.block.first = profile_block;
+    command_buffer->dispatch_summaries.block.first = summary_block;
   }
-  command_buffer->profile.dispatch.block.current = profile_block;
-  *out_profile_block = profile_block;
+  command_buffer->dispatch_summaries.block.current = summary_block;
+  *out_summary_block = summary_block;
   return iree_ok_status();
 }
 
-static iree_status_t
-iree_hal_amdgpu_aql_command_buffer_record_dispatch_profile_summary(
+static iree_status_t iree_hal_amdgpu_aql_command_buffer_record_dispatch_summary(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
-    const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command) {
-  if (!iree_hal_amdgpu_aql_command_buffer_retains_profile_metadata(
+    const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command,
+    const iree_hal_amdgpu_aql_dispatch_layout_t* layout) {
+  if (!iree_hal_amdgpu_aql_command_buffer_retains_dispatch_summaries(
           command_buffer)) {
     return iree_ok_status();
   }
 
-  iree_hal_amdgpu_aql_command_buffer_profile_block_t* profile_block = NULL;
+  iree_hal_amdgpu_aql_command_buffer_dispatch_summary_block_t* summary_block =
+      NULL;
   IREE_RETURN_IF_ERROR(
-      iree_hal_amdgpu_aql_command_buffer_ensure_current_profile_block(
+      iree_hal_amdgpu_aql_command_buffer_ensure_current_dispatch_summary_block(
           command_buffer, command_buffer->builder.current_block.header,
-          &profile_block));
+          &summary_block));
 
-  iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t* summary = NULL;
+  iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary = NULL;
   IREE_RETURN_IF_ERROR(iree_arena_allocate(&command_buffer->recording_arena,
                                            sizeof(*summary), (void**)&summary));
   memset(summary, 0, sizeof(*summary));
-  summary->executable_id = dispatch_command->executable_id;
-  summary->command_index = dispatch_command->header.command_index;
-  summary->export_ordinal = dispatch_command->export_ordinal;
-  summary->dispatch_flags = dispatch_command->dispatch_flags;
+  const uint32_t first_packet_ordinal =
+      command_buffer->builder.current_block.aql_packet_count -
+      layout->command.aql_packet_count;
+  summary->packets.first_ordinal = first_packet_ordinal;
   const bool uses_indirect_parameters = iree_any_bit_set(
       dispatch_command->dispatch_flags,
       IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_INDIRECT_PARAMETERS);
+  summary->packets.dispatch_ordinal =
+      first_packet_ordinal + (uses_indirect_parameters ? 1u : 0u);
+  summary->metadata.executable_id = dispatch_command->executable_id;
+  summary->metadata.command_index = dispatch_command->header.command_index;
+  summary->metadata.export_ordinal = dispatch_command->export_ordinal;
+  summary->metadata.dispatch_flags = dispatch_command->dispatch_flags;
   for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(summary->workgroup.size);
        ++i) {
     summary->workgroup.size[i] = dispatch_command->workgroup_size[i];
@@ -1996,14 +2011,14 @@ iree_hal_amdgpu_aql_command_buffer_record_dispatch_profile_summary(
     }
   }
 
-  if (profile_block->dispatch.last) {
-    profile_block->dispatch.last->next = summary;
+  if (summary_block->dispatch.last) {
+    summary_block->dispatch.last->next = summary;
   } else {
-    profile_block->dispatch.first = summary;
+    summary_block->dispatch.first = summary;
   }
-  profile_block->dispatch.last = summary;
-  ++profile_block->dispatch.count;
-  ++command_buffer->profile.dispatch.count;
+  summary_block->dispatch.last = summary;
+  ++summary_block->dispatch.count;
+  ++command_buffer->dispatch_summaries.count;
   return iree_ok_status();
 }
 
@@ -2334,8 +2349,8 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_dispatch(
       iree_hal_amdgpu_aql_command_buffer_write_dispatch_payload(
           command_buffer, &inputs, &plan, &layout, dispatch_command,
           binding_sources));
-  return iree_hal_amdgpu_aql_command_buffer_record_dispatch_profile_summary(
-      command_buffer, dispatch_command);
+  return iree_hal_amdgpu_aql_command_buffer_record_dispatch_summary(
+      command_buffer, dispatch_command, &layout);
 }
 
 //===----------------------------------------------------------------------===//

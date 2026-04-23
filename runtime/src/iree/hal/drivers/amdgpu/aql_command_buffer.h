@@ -38,17 +38,31 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
 bool iree_hal_amdgpu_aql_command_buffer_isa(
     iree_hal_command_buffer_t* command_buffer);
 
-// Retained command-buffer profiling metadata for one dispatch operation.
-typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t {
+// Retained command-buffer metadata for one dispatch operation.
+typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t {
   // Next retained dispatch summary in the same command-buffer block.
-  const struct iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t*
-      next;
-  // Session-local profile executable id used for event attribution.
-  uint64_t executable_id;
-  // Program-global command index used for profiling/source attribution.
-  uint32_t command_index;
-  // Executable export ordinal used for profiling and diagnostics.
-  uint32_t export_ordinal;
+  const struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* next;
+  // Payload packet ordinals produced by command-buffer replay.
+  struct {
+    // First payload packet ordinal emitted for this command.
+    uint32_t first_ordinal;
+    // Payload packet ordinal of the dispatch whose completion signal represents
+    // this command.
+    uint32_t dispatch_ordinal;
+  } packets;
+  // Correlation metadata used by profiling, timestamps, and diagnostics.
+  struct {
+    // Session-local profile executable id used for event attribution.
+    uint64_t executable_id;
+    // Program-global command index used for profiling/source attribution.
+    uint32_t command_index;
+    // Executable export ordinal used for profiling and diagnostics.
+    uint32_t export_ordinal;
+    // Dispatch flags from iree_hal_amdgpu_command_buffer_dispatch_flag_bits_t.
+    uint8_t dispatch_flags;
+    // Reserved bytes that must be zero.
+    uint8_t reserved0[3];
+  } metadata;
   // Dispatch launch dimensions used for event metadata.
   struct {
     // Static workgroup counts. Zero for indirect dispatches whose counts are
@@ -57,11 +71,7 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t {
     // AQL dispatch packet workgroup size fields.
     uint16_t size[3];
   } workgroup;
-  // Dispatch flags from iree_hal_amdgpu_command_buffer_dispatch_flag_bits_t.
-  uint8_t dispatch_flags;
-  // Reserved bytes that must be zero.
-  uint8_t reserved0[3];
-} iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t;
+} iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t;
 
 // Returns the immutable program produced by end().
 const iree_hal_amdgpu_aql_program_t* iree_hal_amdgpu_aql_command_buffer_program(
@@ -76,10 +86,10 @@ iree_host_size_t iree_hal_amdgpu_aql_command_buffer_device_ordinal(
 uint64_t iree_hal_amdgpu_aql_command_buffer_profile_id(
     iree_hal_command_buffer_t* command_buffer);
 
-// Returns retained dispatch profile summaries for |block|, or NULL when no
+// Returns retained dispatch summaries for |block|, or NULL when no
 // summaries were retained. |out_count| receives the number of linked summaries.
-const iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summary_t*
-iree_hal_amdgpu_aql_command_buffer_dispatch_profile_summaries(
+const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t*
+iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
     iree_hal_command_buffer_t* command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     uint32_t* out_count);

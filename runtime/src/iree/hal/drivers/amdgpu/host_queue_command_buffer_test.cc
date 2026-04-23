@@ -1330,6 +1330,50 @@ static void ExpectTwoDispatchOutputs(const TwoDispatchCommandBuffer& fixture) {
             memcmp(output_values1, expected_values, sizeof(expected_values)));
 }
 
+TEST_F(HostQueueCommandBufferTest, DispatchSummariesRetainPacketOrdinals) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+
+  TwoDispatchCommandBuffer fixture;
+  IREE_ASSERT_OK(CreateTwoDispatchCommandBuffer(&test_device, &fixture));
+
+  const iree_hal_amdgpu_aql_program_t* program =
+      iree_hal_amdgpu_aql_command_buffer_program(fixture.command_buffer);
+  ASSERT_NE(program, nullptr);
+  ASSERT_NE(program->first_block, nullptr);
+  EXPECT_EQ(program->first_block->dispatch_count, 2u);
+  EXPECT_EQ(program->first_block->aql_packet_count, 2u);
+
+  uint32_t summary_count = 0;
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary =
+      iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
+          fixture.command_buffer, program->first_block, &summary_count);
+  ASSERT_NE(summary, nullptr);
+  EXPECT_EQ(summary_count, 2u);
+
+  EXPECT_EQ(summary->packets.first_ordinal, 0u);
+  EXPECT_EQ(summary->packets.dispatch_ordinal, 0u);
+  EXPECT_EQ(summary->metadata.command_index, 0u);
+  EXPECT_EQ(summary->metadata.export_ordinal, 0u);
+  EXPECT_EQ(summary->metadata.dispatch_flags,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_NONE);
+
+  ASSERT_NE(summary->next, nullptr);
+  summary = summary->next;
+  EXPECT_EQ(summary->packets.first_ordinal, 1u);
+  EXPECT_EQ(summary->packets.dispatch_ordinal, 1u);
+  EXPECT_EQ(summary->metadata.command_index, 1u);
+  EXPECT_EQ(summary->metadata.export_ordinal, 0u);
+  EXPECT_EQ(summary->metadata.dispatch_flags,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_NONE);
+  EXPECT_EQ(summary->next, nullptr);
+}
+
 TEST_F(HostQueueCommandBufferTest,
        PacketControlBarriersFirstPayloadPacketForInlineWait) {
   iree_hal_amdgpu_logical_device_options_t options;
