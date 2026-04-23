@@ -18,6 +18,7 @@
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_scratch.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile.h"
+#include "iree/hal/drivers/amdgpu/host_queue_timestamp.h"
 #include "iree/hal/drivers/amdgpu/profile_counters.h"
 #include "iree/hal/drivers/amdgpu/profile_traces.h"
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
@@ -514,13 +515,13 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
   if (queue_device_event) {
     const uint64_t start_packet_id =
         submission->first_packet_id + resolution->barrier_count;
-    iree_hal_amdgpu_host_queue_commit_command_buffer_profile_start(
+    iree_hal_amdgpu_host_queue_commit_timestamp_start(
         queue, start_packet_id,
         iree_hal_amdgpu_host_queue_command_buffer_packet_control(
             queue, resolution, signal_semaphore_list, /*packet_index=*/0,
             IREE_HSA_FENCE_SCOPE_NONE,
             IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_NONE),
-        queue_device_event);
+        &queue_device_event->start_tick);
   }
 
   for (uint32_t i = 0; i < emitted_packet_count; ++i) {
@@ -559,7 +560,7 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
     const uint32_t end_packet_index =
         profile_queue_device_prefix_packet_count + emitted_packet_count +
         (profile->dispatch_events.event_count != 0 ? 1u : 0u);
-    iree_hal_amdgpu_host_queue_commit_command_buffer_profile_end(
+    iree_hal_amdgpu_host_queue_commit_timestamp_end(
         queue, end_packet_id,
         iree_hal_amdgpu_host_queue_command_buffer_packet_control(
             queue, resolution, signal_semaphore_list, end_packet_index,
@@ -567,7 +568,7 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
             IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_FINAL),
         iree_hal_amdgpu_notification_ring_epoch_signal(
             &queue->notification_ring),
-        queue_device_event);
+        &queue_device_event->end_tick);
   }
   iree_hal_amdgpu_aql_ring_doorbell(
       &queue->aql_ring,

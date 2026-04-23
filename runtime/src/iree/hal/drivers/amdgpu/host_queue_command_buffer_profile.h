@@ -13,34 +13,10 @@
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
-#include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif  // __cplusplus
-
-// Emits a PM4 timestamp packet that writes the start tick for a profiled
-// command-buffer queue operation.
-void iree_hal_amdgpu_host_queue_commit_command_buffer_profile_start(
-    iree_hal_amdgpu_host_queue_t* queue, uint64_t packet_id,
-    iree_hal_amdgpu_aql_packet_control_t packet_control,
-    iree_hal_amdgpu_profile_queue_device_event_t* queue_device_event);
-
-// Emits a PM4 timestamp packet that writes the end tick for a profiled
-// command-buffer queue operation.
-void iree_hal_amdgpu_host_queue_commit_command_buffer_profile_end(
-    iree_hal_amdgpu_host_queue_t* queue, uint64_t packet_id,
-    iree_hal_amdgpu_aql_packet_control_t packet_control,
-    iree_hsa_signal_t completion_signal,
-    iree_hal_amdgpu_profile_queue_device_event_t* queue_device_event);
-
-// Emits a single PM4 packet that writes both start and end ticks for an empty
-// profiled command-buffer queue operation.
-void iree_hal_amdgpu_host_queue_commit_command_buffer_profile_timestamp_range(
-    iree_hal_amdgpu_host_queue_t* queue, uint64_t packet_id,
-    iree_hal_amdgpu_aql_packet_control_t packet_control,
-    iree_hsa_signal_t completion_signal,
-    iree_hal_amdgpu_profile_queue_device_event_t* queue_device_event);
 
 // Counts dispatch commands in |block| selected by the active capture filter.
 iree_status_t

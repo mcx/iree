@@ -13,10 +13,10 @@
 #include "iree/hal/drivers/amdgpu/aql_program_validation.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_block.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_packet.h"
-#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
+#include "iree/hal/drivers/amdgpu/host_queue_timestamp.h"
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
 #include "iree/hal/utils/resource_set.h"
 
@@ -229,7 +229,7 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
     if (queue_device_event) {
       const uint64_t timestamp_packet_id =
           submission.first_packet_id + submission.packet_count - 1;
-      iree_hal_amdgpu_host_queue_commit_command_buffer_profile_timestamp_range(
+      iree_hal_amdgpu_host_queue_commit_timestamp_range(
           replay->queue, timestamp_packet_id,
           iree_hal_amdgpu_host_queue_command_buffer_packet_control(
               replay->queue, resolution, replay->signal_semaphore_list,
@@ -237,7 +237,7 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
               IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_PACKET_FLAG_FINAL),
           iree_hal_amdgpu_notification_ring_epoch_signal(
               &replay->queue->notification_ring),
-          queue_device_event);
+          &queue_device_event->start_tick, &queue_device_event->end_tick);
     } else {
       iree_hal_amdgpu_aql_packet_t* packet = iree_hal_amdgpu_aql_ring_packet(
           &replay->queue->aql_ring,
