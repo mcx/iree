@@ -101,24 +101,24 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
   action->fn = fn;
   action->user_data = user_data;
 
-  iree_slim_mutex_lock(&queue->post_drain_mutex);
-  if (queue->post_drain_tail) {
-    queue->post_drain_tail->next = action;
+  iree_slim_mutex_lock(&queue->locks.post_drain_mutex);
+  if (queue->post_drain.tail) {
+    queue->post_drain.tail->next = action;
   } else {
-    queue->post_drain_head = action;
+    queue->post_drain.head = action;
   }
-  queue->post_drain_tail = action;
-  iree_slim_mutex_unlock(&queue->post_drain_mutex);
+  queue->post_drain.tail = action;
+  iree_slim_mutex_unlock(&queue->locks.post_drain_mutex);
 }
 
 static void iree_hal_amdgpu_host_queue_run_post_drain_actions(
     iree_hal_amdgpu_host_queue_t* queue) {
-  iree_slim_mutex_lock(&queue->post_drain_mutex);
+  iree_slim_mutex_lock(&queue->locks.post_drain_mutex);
   iree_hal_amdgpu_host_queue_post_drain_action_t* action =
-      queue->post_drain_head;
-  queue->post_drain_head = NULL;
-  queue->post_drain_tail = NULL;
-  iree_slim_mutex_unlock(&queue->post_drain_mutex);
+      queue->post_drain.head;
+  queue->post_drain.head = NULL;
+  queue->post_drain.tail = NULL;
+  iree_slim_mutex_unlock(&queue->locks.post_drain_mutex);
 
   while (action) {
     iree_hal_amdgpu_host_queue_post_drain_action_t* next_action = action->next;
@@ -190,9 +190,9 @@ static bool iree_hal_amdgpu_host_queue_store_error(
 
 static void iree_hal_amdgpu_host_queue_request_completion_thread_stop(
     iree_hal_amdgpu_host_queue_t* queue) {
-  if (queue->completion_thread_stop_signal.handle) {
+  if (queue->completion.stop_signal.handle) {
     iree_hsa_signal_store_screlease(IREE_LIBHSA(queue->libhsa),
-                                    queue->completion_thread_stop_signal, 1);
+                                    queue->completion.stop_signal, 1);
   }
 }
 
@@ -224,7 +224,7 @@ static int iree_hal_amdgpu_host_queue_completion_thread_main(void* entry_arg) {
 
   hsa_signal_t epoch_signal =
       iree_hal_amdgpu_notification_ring_epoch_signal(&queue->notification_ring);
-  hsa_signal_t stop_signal = queue->completion_thread_stop_signal;
+  hsa_signal_t stop_signal = queue->completion.stop_signal;
   hsa_signal_value_t last_epoch_value =
       iree_hal_amdgpu_host_queue_last_drained_signal_value(queue);
 
@@ -374,8 +374,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   out_queue->host_allocator = host_allocator;
 
   // Submission pipeline state.
-  iree_slim_mutex_initialize(&out_queue->submission_mutex);
-  iree_slim_mutex_initialize(&out_queue->post_drain_mutex);
+  iree_slim_mutex_initialize(&out_queue->locks.submission_mutex);
+  iree_slim_mutex_initialize(&out_queue->locks.post_drain_mutex);
   iree_slim_mutex_initialize(&out_queue->profiling.event_mutex);
   out_queue->profiling.signals.block_pool = profiling_signal_block_pool;
   out_queue->axis = axis;
@@ -409,7 +409,7 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     status = iree_hsa_amd_signal_create(
         IREE_LIBHSA(libhsa), /*initial_value=*/0,
         /*num_consumers=*/0, /*consumers=*/NULL, /*attributes=*/0,
-        &out_queue->completion_thread_stop_signal);
+        &out_queue->completion.stop_signal);
   }
 
   // Create the HSA hardware AQL queue.
@@ -487,7 +487,7 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     thread_params.initial_affinity = completion_thread_affinity;
     status = iree_thread_create(
         iree_hal_amdgpu_host_queue_completion_thread_main, out_queue,
-        thread_params, host_allocator, &out_queue->completion_thread);
+        thread_params, host_allocator, &out_queue->completion.thread);
   }
   if (!iree_status_is_ok(status)) {
     iree_hal_amdgpu_host_queue_deinitialize(out_queue);
@@ -502,15 +502,15 @@ void iree_hal_amdgpu_host_queue_deinitialize(
   IREE_ASSERT_ARGUMENT(queue);
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   queue->is_shutting_down = true;
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
-  if (queue->completion_thread) {
+  if (queue->completion.thread) {
     iree_hal_amdgpu_host_queue_request_completion_thread_stop(queue);
     // There is only one owner for the thread, so this also joins the thread.
-    iree_thread_release(queue->completion_thread);
-    queue->completion_thread = NULL;
+    iree_thread_release(queue->completion.thread);
+    queue->completion.thread = NULL;
   }
 
   // Destroy the hardware queue before the remaining host-side resources so the
@@ -594,15 +594,15 @@ void iree_hal_amdgpu_host_queue_deinitialize(
     queue->command_buffer_scratch = NULL;
   }
 
-  if (queue->completion_thread_stop_signal.handle) {
+  if (queue->completion.stop_signal.handle) {
     iree_hal_amdgpu_hsa_cleanup_assert_success(iree_hsa_signal_destroy_raw(
-        queue->libhsa, queue->completion_thread_stop_signal));
-    queue->completion_thread_stop_signal.handle = 0;
+        queue->libhsa, queue->completion.stop_signal));
+    queue->completion.stop_signal.handle = 0;
   }
 
-  iree_slim_mutex_deinitialize(&queue->post_drain_mutex);
+  iree_slim_mutex_deinitialize(&queue->locks.post_drain_mutex);
   iree_slim_mutex_deinitialize(&queue->profiling.event_mutex);
-  iree_slim_mutex_deinitialize(&queue->submission_mutex);
+  iree_slim_mutex_deinitialize(&queue->locks.submission_mutex);
 
   IREE_TRACE_ZONE_END(z0);
 }
@@ -672,7 +672,7 @@ static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
   out_submission->ready = true;
   out_submission->wait_for_capacity = false;
 
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_hal_amdgpu_host_queue_resolve_waits(queue, wait_semaphore_list,
                                            &out_submission->resolution);
 }
@@ -689,7 +689,7 @@ static inline void iree_hal_amdgpu_host_queue_op_submission_defer_for_capacity(
 static inline iree_status_t iree_hal_amdgpu_host_queue_op_submission_end(
     iree_hal_amdgpu_host_queue_op_submission_t* submission,
     iree_status_t status) {
-  iree_slim_mutex_unlock(&submission->queue->submission_mutex);
+  iree_slim_mutex_unlock(&submission->queue->locks.submission_mutex);
 
   if (iree_status_is_ok(status) && submission->deferred_op) {
     status = iree_hal_amdgpu_pending_op_start(submission->deferred_op,
@@ -701,12 +701,12 @@ static inline iree_status_t iree_hal_amdgpu_host_queue_op_submission_end(
 static iree_status_t iree_hal_amdgpu_host_queue_signal_empty_barrier(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_semaphore_list_t signal_semaphore_list) {
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_status_t status = iree_ok_status();
   if (IREE_UNLIKELY(queue->is_shutting_down)) {
     status = iree_make_status(IREE_STATUS_CANCELLED, "queue shutting down");
   }
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
   if (iree_status_is_ok(status)) {
     // Signal outside submission_mutex: semaphore signaling dispatches satisfied

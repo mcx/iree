@@ -1481,7 +1481,7 @@ class QueueBenchmark : public benchmark::Fixture {
     iree_hal_amdgpu_host_queue_t* host_queue = nullptr;
     IREE_RETURN_IF_ERROR(LookupHostQueue(queue_affinity, &host_queue));
 
-    iree_slim_mutex_lock(&host_queue->submission_mutex);
+    iree_slim_mutex_lock(&host_queue->locks.submission_mutex);
     iree_hal_amdgpu_wait_resolution_t resolution;
     iree_hal_amdgpu_host_queue_resolve_waits(host_queue, wait_semaphore_list,
                                              &resolution);
@@ -1530,7 +1530,7 @@ class QueueBenchmark : public benchmark::Fixture {
             &submission);
       }
     }
-    iree_slim_mutex_unlock(&host_queue->submission_mutex);
+    iree_slim_mutex_unlock(&host_queue->locks.submission_mutex);
     return status;
   }
 

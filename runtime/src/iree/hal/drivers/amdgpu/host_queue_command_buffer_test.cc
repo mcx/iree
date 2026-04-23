@@ -262,9 +262,9 @@ static iree_status_t EnqueueRawBlockingBarrier(
 }
 
 static bool HostQueueHasPostDrainAction(iree_hal_amdgpu_host_queue_t* queue) {
-  iree_slim_mutex_lock(&queue->post_drain_mutex);
-  const bool has_action = queue->post_drain_head != NULL;
-  iree_slim_mutex_unlock(&queue->post_drain_mutex);
+  iree_slim_mutex_lock(&queue->locks.post_drain_mutex);
+  const bool has_action = queue->post_drain.head != NULL;
+  iree_slim_mutex_unlock(&queue->locks.post_drain_mutex);
   return has_action;
 }
 
@@ -2529,7 +2529,7 @@ TEST_F(HostQueueCommandBufferTest,
       0};
   const uint32_t dispatch_event_capacity =
       iree_hal_amdgpu_host_queue_profile_dispatch_event_capacity(queue);
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_status_t status =
       iree_hal_amdgpu_host_queue_reserve_profile_dispatch_events(
           queue, dispatch_event_capacity, &reservation);
@@ -2538,7 +2538,7 @@ TEST_F(HostQueueCommandBufferTest,
         queue, 1, &exhausted_reservation);
   }
   iree_hal_amdgpu_host_queue_cancel_profile_dispatch_events(queue, reservation);
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
   IREE_ASSERT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED, status);
   EXPECT_EQ(dispatch_event_capacity, reservation.event_count);
   EXPECT_EQ(0u, exhausted_reservation.event_count);
@@ -2576,7 +2576,7 @@ TEST_F(HostQueueCommandBufferTest,
   const uint32_t queue_device_event_capacity =
       queue->profiling.queue_device_events.capacity;
   ASSERT_GT(queue_device_event_capacity, 0u);
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_status_t status =
       iree_hal_amdgpu_host_queue_reserve_profile_queue_device_events(
           queue, queue_device_event_capacity, &reservation);
@@ -2586,7 +2586,7 @@ TEST_F(HostQueueCommandBufferTest,
   }
   iree_hal_amdgpu_host_queue_cancel_profile_queue_device_events(queue,
                                                                 reservation);
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
   IREE_ASSERT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED, status);
   EXPECT_EQ(queue_device_event_capacity, reservation.event_count);
   EXPECT_EQ(0u, exhausted_reservation.event_count);

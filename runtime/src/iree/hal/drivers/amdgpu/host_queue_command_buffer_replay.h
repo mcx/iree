@@ -14,7 +14,7 @@ extern "C" {
 #endif  // __cplusplus
 
 // Starts multi-block command-buffer replay. Caller must hold
-// |queue->submission_mutex|.
+// |queue->locks.submission_mutex|.
 iree_status_t iree_hal_amdgpu_command_buffer_replay_start_under_lock(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_wait_resolution_t* resolution,

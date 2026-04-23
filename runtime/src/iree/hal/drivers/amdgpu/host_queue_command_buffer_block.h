@@ -14,7 +14,7 @@ extern "C" {
 #endif  // __cplusplus
 
 // Submits one finalized command-buffer block to the queue. Caller must hold
-// |queue->submission_mutex|.
+// |queue->locks.submission_mutex|.
 iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_wait_resolution_t* resolution,

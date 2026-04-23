@@ -165,7 +165,7 @@ static void ExpectDispatchSubmissionPlan(
 
   bool is_ready = false;
   iree_hal_amdgpu_host_queue_dispatch_submission_t submission = {};
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_status_t status = iree_ok_status();
   if (plan_case.reserve_dispatch_event) {
     status = iree_hal_amdgpu_host_queue_reserve_profile_dispatch_events(
@@ -212,7 +212,7 @@ static void ExpectDispatchSubmissionPlan(
     iree_hal_amdgpu_host_queue_cancel_profile_dispatch_events(queue,
                                                               profile_events);
   }
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
   IREE_EXPECT_OK(status);
   EXPECT_TRUE(is_ready);
@@ -246,7 +246,7 @@ static void ExpectPm4IbSubmissionPlan(
 
   bool is_ready = false;
   iree_hal_amdgpu_host_queue_pm4_ib_submission_t submission = {};
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_status_t status = iree_hal_amdgpu_host_queue_try_begin_pm4_ib_submission(
       queue, &resolution, empty_signal_list,
       /*operation_resource_count=*/0, &profile_queue_event_info, &is_ready,
@@ -268,7 +268,7 @@ static void ExpectPm4IbSubmissionPlan(
     iree_hal_amdgpu_host_queue_fail_kernel_submission(queue,
                                                       &submission.kernel);
   }
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
   IREE_EXPECT_OK(status);
   EXPECT_TRUE(is_ready);

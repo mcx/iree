@@ -357,11 +357,11 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
 static void iree_hal_amdgpu_command_buffer_replay_post_drain(void* user_data) {
   iree_hal_amdgpu_command_buffer_replay_t* replay =
       (iree_hal_amdgpu_command_buffer_replay_t*)user_data;
-  iree_slim_mutex_lock(&replay->queue->submission_mutex);
+  iree_slim_mutex_lock(&replay->queue->locks.submission_mutex);
   iree_status_t status =
       iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
           replay, iree_hal_amdgpu_command_buffer_replay_post_drain);
-  iree_slim_mutex_unlock(&replay->queue->submission_mutex);
+  iree_slim_mutex_unlock(&replay->queue->locks.submission_mutex);
   if (!iree_status_is_ok(status)) {
     iree_hal_amdgpu_command_buffer_replay_fail_signals(replay, status);
   }

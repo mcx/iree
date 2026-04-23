@@ -182,14 +182,17 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   // semaphore signals. The completion thread drains this ring.
   iree_hal_amdgpu_notification_ring_t notification_ring;
 
-  // Host thread blocked on the queue epoch signal and draining completed
-  // notification-ring entries.
-  iree_thread_t* completion_thread;
-
-  // HSA signal used to wake the completion thread during teardown or after an
-  // unrecoverable HSA queue error. Value 0 means the thread should continue
-  // waiting for completions; any other value requests exit after a final drain.
-  hsa_signal_t completion_thread_stop_signal;
+  // Completion-thread state for queue epoch drain and teardown/error wakeups.
+  struct {
+    // Host thread blocked on the queue epoch signal and draining completed
+    // notification-ring entries.
+    iree_thread_t* thread;
+    // HSA signal used to wake the completion thread during teardown or after
+    // an unrecoverable HSA queue error. Value 0 means the thread should
+    // continue waiting for completions; any other value requests exit after a
+    // final drain.
+    hsa_signal_t stop_signal;
+  } completion;
 
   //--- Submission pipeline state -------------------------------------------//
   //
@@ -209,7 +212,7 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   //
   //   HSA error callback (HSA runtime thread):
   //     Writes error_status via atomic CAS. Signals
-  //     completion_thread_stop_signal so the completion thread wakes and fails
+  //     completion.stop_signal so the completion thread wakes and fails
   //     outstanding notifications.
   //
   // Wait-resolution fast-path contract:
@@ -241,20 +244,25 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   //     sufficient because all transitive waits are encoded before the
   //     producer queue epoch can complete.
 
-  // Serializes the submission path. All queue operations (dispatch, copy,
-  // fill, execute, etc.) acquire this before touching submission state and
-  // release after signal commit. The proactor thread does not acquire this.
-  iree_slim_mutex_t submission_mutex;
+  // Queue-local locks. Keep the 4-byte slim mutexes packed before pointer-sized
+  // continuation state.
+  struct {
+    // Serializes the submission path. All queue operations (dispatch, copy,
+    // fill, execute, etc.) acquire this before touching submission state and
+    // release after signal commit. The proactor thread does not acquire this.
+    iree_slim_mutex_t submission_mutex;
+    // Serializes the post-drain continuation list.
+    iree_slim_mutex_t post_drain_mutex;
+  } locks;
 
-  // Serializes the post-drain continuation list.
-  iree_slim_mutex_t post_drain_mutex;
-
-  // First queued post-drain continuation. Protected by post_drain_mutex.
-  iree_hal_amdgpu_host_queue_post_drain_action_t* post_drain_head;
-
-  // Tail pointer for appending post-drain continuations. Protected by
-  // post_drain_mutex.
-  iree_hal_amdgpu_host_queue_post_drain_action_t* post_drain_tail;
+  // Post-drain continuation queue for work that cannot run while notification
+  // drain is still publishing or reclaiming ring state.
+  struct {
+    // First queued post-drain continuation.
+    iree_hal_amdgpu_host_queue_post_drain_action_t* head;
+    // Tail pointer for appending post-drain continuations.
+    iree_hal_amdgpu_host_queue_post_drain_action_t* tail;
+  } post_drain;
 
   // Queue-local scratch used by queue_dispatch under submission_mutex.
   struct {

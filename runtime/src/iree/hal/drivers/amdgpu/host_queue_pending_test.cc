@@ -234,16 +234,16 @@ TEST_F(HostQueuePendingTest, DefaultPoolServesOptimalHostLocalMappedAlloca) {
 }
 
 static bool HostQueueHasPendingOps(iree_hal_amdgpu_host_queue_t* queue) {
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   const bool has_pending_ops = queue->pending_head != NULL;
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
   return has_pending_ops;
 }
 
 static bool HostQueueHasPostDrainAction(iree_hal_amdgpu_host_queue_t* queue) {
-  iree_slim_mutex_lock(&queue->post_drain_mutex);
-  const bool has_action = queue->post_drain_head != NULL;
-  iree_slim_mutex_unlock(&queue->post_drain_mutex);
+  iree_slim_mutex_lock(&queue->locks.post_drain_mutex);
+  const bool has_action = queue->post_drain.head != NULL;
+  iree_slim_mutex_unlock(&queue->locks.post_drain_mutex);
   return has_action;
 }
 

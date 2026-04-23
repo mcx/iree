@@ -78,9 +78,9 @@ uint32_t iree_hal_amdgpu_host_queue_profile_counter_set_count(
 
 // Prepares counter sample slots for |reservation|.
 //
-// Caller must hold queue->submission_mutex and must call this only after the
-// dispatch profile events have been reserved. Handles are created lazily per
-// event-ring slot and then reused only after the dispatch event cursor has
+// Caller must hold queue->locks.submission_mutex and must call this only after
+// the dispatch profile events have been reserved. Handles are created lazily
+// per event-ring slot and then reused only after the dispatch event cursor has
 // advanced past the slot.
 iree_status_t iree_hal_amdgpu_host_queue_prepare_profile_counter_samples(
     iree_hal_amdgpu_host_queue_t* queue,

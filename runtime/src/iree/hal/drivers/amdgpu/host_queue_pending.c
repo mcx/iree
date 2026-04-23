@@ -1047,7 +1047,7 @@ static iree_status_t iree_hal_amdgpu_pending_op_allocate(
 // submission_mutex to emit AQL packets and commit signals.
 static void iree_hal_amdgpu_pending_op_issue(iree_hal_amdgpu_pending_op_t* op) {
   iree_hal_amdgpu_host_queue_t* queue = op->queue;
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
 
   iree_status_t status = iree_ok_status();
   bool ready = true;
@@ -1151,7 +1151,7 @@ static void iree_hal_amdgpu_pending_op_issue(iree_hal_amdgpu_pending_op_t* op) {
             IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_NONE, op,
             &memory_wait_op, &ready);
         if (iree_status_is_ok(status) && memory_wait_op) {
-          iree_slim_mutex_unlock(&queue->submission_mutex);
+          iree_slim_mutex_unlock(&queue->locks.submission_mutex);
           iree_hal_amdgpu_pending_op_enqueue_alloca_memory_wait(memory_wait_op);
           return;
         }
@@ -1199,7 +1199,7 @@ static void iree_hal_amdgpu_pending_op_issue(iree_hal_amdgpu_pending_op_t* op) {
 
   if (iree_status_is_ok(status) && !ready) {
     iree_hal_amdgpu_pending_op_enqueue_capacity_retry(op);
-    iree_slim_mutex_unlock(&queue->submission_mutex);
+    iree_slim_mutex_unlock(&queue->locks.submission_mutex);
     return;
   }
 
@@ -1220,7 +1220,7 @@ static void iree_hal_amdgpu_pending_op_issue(iree_hal_amdgpu_pending_op_t* op) {
   iree_notification_deinitialize(&op->callback_notification);
   iree_arena_deinitialize(&op->arena);
 
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 }
 
 // Fails a deferred operation. Propagates the error to all signal semaphores
@@ -1240,9 +1240,9 @@ static void iree_hal_amdgpu_pending_op_fail(iree_hal_amdgpu_pending_op_t* op,
   iree_hal_amdgpu_pending_op_release_retained(op);
   // Release wait semaphores (separately retained by the clone).
   iree_hal_semaphore_list_release(op->wait_semaphore_list);
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_hal_amdgpu_pending_op_unlink(op);
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
   iree_notification_deinitialize(&op->callback_notification);
   iree_arena_deinitialize(&op->arena);
 }
@@ -1254,13 +1254,13 @@ static void iree_hal_amdgpu_pending_op_fail(iree_hal_amdgpu_pending_op_t* op,
 void iree_hal_amdgpu_host_queue_cancel_pending(
     iree_hal_amdgpu_host_queue_t* queue, iree_status_code_t status_code,
     const char* status_message) {
-  iree_slim_mutex_lock(&queue->submission_mutex);
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
   queue->is_shutting_down = true;
-  iree_slim_mutex_unlock(&queue->submission_mutex);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
   for (;;) {
     iree_hal_amdgpu_pending_op_t* op = NULL;
-    iree_slim_mutex_lock(&queue->submission_mutex);
+    iree_slim_mutex_lock(&queue->locks.submission_mutex);
     for (iree_hal_amdgpu_pending_op_t* candidate = queue->pending_head;
          candidate != NULL; candidate = candidate->next) {
       int32_t expected_state = IREE_HAL_AMDGPU_PENDING_OP_LIFECYCLE_PENDING;
@@ -1274,7 +1274,7 @@ void iree_hal_amdgpu_host_queue_cancel_pending(
       }
     }
     bool has_pending_ops = queue->pending_head != NULL;
-    iree_slim_mutex_unlock(&queue->submission_mutex);
+    iree_slim_mutex_unlock(&queue->locks.submission_mutex);
 
     if (op == NULL) {
       if (!has_pending_ops) break;
