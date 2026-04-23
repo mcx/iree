@@ -108,6 +108,8 @@ iree_cc_library(
     "host_queue_memory.h"
     "host_queue_pending.c"
     "host_queue_pending.h"
+    "host_queue_pending_operation.h"
+    "host_queue_pending_payload.c"
     "host_queue_policy.c"
     "host_queue_policy.h"
     "host_queue_profile.c"
