@@ -16,22 +16,6 @@
 #include "iree/hal/drivers/amdgpu/util/aql_emitter.h"
 #include "iree/hal/utils/resource_set.h"
 
-typedef uint8_t iree_hal_amdgpu_command_buffer_block_terminator_kind_t;
-enum iree_hal_amdgpu_command_buffer_block_terminator_kind_e {
-  IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_RETURN = 0,
-  IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_BRANCH = 1,
-};
-
-typedef struct iree_hal_amdgpu_command_buffer_block_terminator_t {
-  // Terminator opcode class from
-  // iree_hal_amdgpu_command_buffer_block_terminator_kind_t.
-  iree_hal_amdgpu_command_buffer_block_terminator_kind_t kind;
-  // Reserved padding.
-  uint8_t reserved0[3];
-  // Target block ordinal for BRANCH terminators.
-  uint32_t target_block_ordinal;
-} iree_hal_amdgpu_command_buffer_block_terminator_t;
-
 typedef struct iree_hal_amdgpu_command_buffer_replay_t {
   // Reference-counted replay continuation resource.
   iree_hal_resource_t resource;
@@ -57,41 +41,22 @@ typedef struct iree_hal_amdgpu_command_buffer_replay_t {
   iree_hal_amdgpu_host_queue_post_drain_action_t post_drain_action;
 } iree_hal_amdgpu_command_buffer_replay_t;
 
-static iree_status_t iree_hal_amdgpu_command_buffer_read_block_terminator(
-    const iree_hal_amdgpu_command_buffer_block_header_t* block,
-    iree_hal_amdgpu_command_buffer_block_terminator_t* out_terminator) {
-  memset(out_terminator, 0, sizeof(*out_terminator));
-  const iree_hal_amdgpu_command_buffer_command_header_t* command =
-      iree_hal_amdgpu_command_buffer_block_commands_const(block);
-  for (uint16_t command_ordinal = 0; command_ordinal < block->command_count;
-       ++command_ordinal) {
-    switch (command->opcode) {
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH: {
-        const iree_hal_amdgpu_command_buffer_branch_command_t* branch_command =
-            (const iree_hal_amdgpu_command_buffer_branch_command_t*)command;
-        out_terminator->kind =
-            IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_BRANCH;
-        out_terminator->target_block_ordinal =
-            branch_command->target_block_ordinal;
-        return iree_ok_status();
-      }
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COND_BRANCH:
-        return iree_make_status(
-            IREE_STATUS_UNIMPLEMENTED,
-            "conditional AQL command-buffer branch replay not yet wired");
-      case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN:
-        out_terminator->kind =
-            IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_RETURN;
-        return iree_ok_status();
-      default:
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-        break;
-    }
+static iree_status_t iree_hal_amdgpu_command_buffer_validate_block_terminator(
+    const iree_hal_amdgpu_command_buffer_block_header_t* block) {
+  switch (block->terminator_opcode) {
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH:
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN:
+      return iree_ok_status();
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COND_BRANCH:
+      return iree_make_status(
+          IREE_STATUS_UNIMPLEMENTED,
+          "conditional AQL command-buffer branch replay not yet wired");
+    default:
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "AQL command-buffer block %" PRIu32
+                              " has no terminator",
+                              block->block_ordinal);
   }
-  return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                          "AQL command-buffer block %" PRIu32
-                          " has no terminator",
-                          block->block_ordinal);
 }
 
 static iree_status_t iree_hal_amdgpu_command_buffer_next_linear_block(
@@ -341,14 +306,13 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
 
   iree_status_t status = iree_ok_status();
   while (iree_status_is_ok(status) && replay->current_block) {
-    iree_hal_amdgpu_command_buffer_block_terminator_t terminator;
-    status = iree_hal_amdgpu_command_buffer_read_block_terminator(
-        replay->current_block, &terminator);
+    status = iree_hal_amdgpu_command_buffer_validate_block_terminator(
+        replay->current_block);
     if (!iree_status_is_ok(status)) break;
+    const uint8_t terminator_opcode = replay->current_block->terminator_opcode;
 
     if (replay->current_block->aql_packet_count == 0) {
-      if (terminator.kind ==
-          IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_RETURN) {
+      if (terminator_opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN) {
         const iree_hal_amdgpu_wait_resolution_t* current_resolution =
             &replay->wait_resolution;
         bool ready = false;
@@ -364,7 +328,7 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
       const iree_hal_amdgpu_command_buffer_block_header_t* next_block = NULL;
       status = iree_hal_amdgpu_command_buffer_next_linear_block(
           replay->program, replay->current_block,
-          terminator.target_block_ordinal, &next_block);
+          replay->current_block->terminator_target_block_ordinal, &next_block);
       if (iree_status_is_ok(status)) {
         replay->current_block = next_block;
       }
@@ -374,8 +338,7 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
     const iree_hal_amdgpu_wait_resolution_t* current_resolution =
         &replay->wait_resolution;
 
-    if (terminator.kind ==
-        IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_TERMINATOR_RETURN) {
+    if (terminator_opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN) {
       iree_hal_resource_t* replay_resource = &replay->resource;
       bool ready = false;
       status = iree_hal_amdgpu_host_queue_submit_command_buffer_block(
@@ -397,8 +360,8 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
 
     const iree_hal_amdgpu_command_buffer_block_header_t* next_block = NULL;
     status = iree_hal_amdgpu_command_buffer_next_linear_block(
-        replay->program, replay->current_block, terminator.target_block_ordinal,
-        &next_block);
+        replay->program, replay->current_block,
+        replay->current_block->terminator_target_block_ordinal, &next_block);
     if (!iree_status_is_ok(status)) break;
 
     iree_hal_resource_t* replay_resource = &replay->resource;

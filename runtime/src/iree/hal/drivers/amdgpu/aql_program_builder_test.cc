@@ -110,6 +110,9 @@ TEST_F(AqlProgramBuilderTest, EmptyProgramRecordsReturnBlock) {
   EXPECT_EQ(block->binding_source_count, 0u);
   EXPECT_EQ(block->aql_packet_count, 0u);
   EXPECT_EQ(block->kernarg_length, 0u);
+  EXPECT_EQ(block->terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
+  EXPECT_EQ(block->terminator_target_block_ordinal, 0u);
 
   const iree_hal_amdgpu_command_buffer_command_header_t* command =
       FirstCommand(block);
@@ -165,6 +168,9 @@ TEST_F(AqlProgramBuilderTest, AppendsCommandAndBindingSources) {
   EXPECT_EQ(block->profile_marker_count, 0u);
   EXPECT_EQ(block->aql_packet_count, 1u);
   EXPECT_EQ(block->kernarg_length, 128u);
+  EXPECT_EQ(block->terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
+  EXPECT_EQ(block->terminator_target_block_ordinal, 0u);
   EXPECT_EQ(program.max_block_aql_packet_count, 1u);
   EXPECT_EQ(program.max_block_kernarg_length, 128u);
 
@@ -314,6 +320,9 @@ TEST_F(AqlProgramBuilderTest, SplitsBlocksWithBranchTerminator) {
       LastCommand(first_block);
   ASSERT_EQ(first_terminator->opcode,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH);
+  EXPECT_EQ(first_block->terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH);
+  EXPECT_EQ(first_block->terminator_target_block_ordinal, 1u);
   const auto* branch =
       reinterpret_cast<const iree_hal_amdgpu_command_buffer_branch_command_t*>(
           first_terminator);
@@ -323,6 +332,9 @@ TEST_F(AqlProgramBuilderTest, SplitsBlocksWithBranchTerminator) {
       iree_hal_amdgpu_aql_program_block_next(block_pool(), first_block);
   ASSERT_NE(second_block, nullptr);
   EXPECT_EQ(second_block->block_ordinal, 1u);
+  EXPECT_EQ(second_block->terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
+  EXPECT_EQ(second_block->terminator_target_block_ordinal, 0u);
 
   iree_hal_amdgpu_aql_program_release(&program);
 }

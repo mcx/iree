@@ -286,6 +286,11 @@ static iree_status_t iree_hal_amdgpu_aql_program_builder_append_terminator(
         (iree_hal_amdgpu_command_buffer_branch_command_t*)header;
     branch_command->target_block_ordinal = target_block_ordinal;
   }
+  builder->current_block.header->terminator_opcode = opcode;
+  builder->current_block.header->terminator_target_block_ordinal =
+      opcode == IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH
+          ? target_block_ordinal
+          : 0;
 
   builder->current_block.command_cursor += command_length;
   ++builder->command_count;

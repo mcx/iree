@@ -106,6 +106,21 @@ static void InitializeReturnCommand(
       sizeof(*out_command) / IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
 }
 
+static void SetReturnTerminator(
+    iree_hal_amdgpu_command_buffer_block_header_t* block_header) {
+  block_header->terminator_opcode =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN;
+  block_header->terminator_target_block_ordinal = 0;
+}
+
+static void SetBranchTerminator(
+    uint32_t target_block_ordinal,
+    iree_hal_amdgpu_command_buffer_block_header_t* block_header) {
+  block_header->terminator_opcode =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH;
+  block_header->terminator_target_block_ordinal = target_block_ordinal;
+}
+
 static uint8_t CommandFlags(uint8_t flags, iree_hsa_fence_scope_t acquire_scope,
                             iree_hsa_fence_scope_t release_scope) {
   return iree_hal_amdgpu_command_buffer_command_flags_set_fence_scopes(
@@ -140,6 +155,7 @@ static ReturnBlock MakeReturnBlock() {
                         /*command_count=*/1, /*aql_packet_count=*/0,
                         /*kernarg_length=*/0, &block.header);
   InitializeReturnCommand(&block.return_command);
+  SetReturnTerminator(&block.header);
   return block;
 }
 
@@ -155,6 +171,7 @@ static BranchBlock MakeBranchBlock(uint32_t target_block_ordinal) {
       sizeof(block.branch_command) /
       IREE_HAL_AMDGPU_COMMAND_BUFFER_RECORD_ALIGNMENT;
   block.branch_command.target_block_ordinal = target_block_ordinal;
+  SetBranchTerminator(target_block_ordinal, &block.header);
   return block;
 }
 
@@ -211,6 +228,7 @@ static DirectDispatchBlock MakeDirectDispatchBlock() {
 
   block.header.dispatch_count = 1;
   InitializeReturnCommand(&block.return_command);
+  SetReturnTerminator(&block.header);
   return block;
 }
 
@@ -233,6 +251,7 @@ static DispatchBlock<DispatchCount> MakeDispatchBlock(
                                     &block.dispatch_commands[i]);
   }
   InitializeReturnCommand(&block.return_command);
+  SetReturnTerminator(&block.header);
   return block;
 }
 
@@ -344,6 +363,8 @@ TEST(AqlBlockProcessorTest, ReturnTerminatorProducesNoPayload) {
 
   EXPECT_EQ(result.terminator,
             IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_TERMINATOR_RETURN);
+  EXPECT_EQ(block.header.terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
   EXPECT_EQ(result.packets.recorded, 0u);
   EXPECT_EQ(result.packets.emitted, 0u);
   EXPECT_EQ(result.kernargs.consumed, 0u);
@@ -363,6 +384,10 @@ TEST(AqlBlockProcessorTest, BranchTerminatorReportsTargetBlock) {
   EXPECT_EQ(result.terminator,
             IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_TERMINATOR_BRANCH);
   EXPECT_EQ(result.target_block_ordinal, 7u);
+  EXPECT_EQ(block.header.terminator_opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH);
+  EXPECT_EQ(block.header.terminator_target_block_ordinal,
+            result.target_block_ordinal);
   EXPECT_EQ(result.packets.recorded, 0u);
   EXPECT_EQ(result.packets.emitted, 0u);
   EXPECT_EQ(result.kernargs.consumed, 0u);

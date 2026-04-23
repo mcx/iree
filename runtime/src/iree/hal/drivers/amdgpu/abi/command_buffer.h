@@ -104,8 +104,8 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint16_t header_length;
   // Ordinal of this block within the command-buffer program.
   uint32_t block_ordinal;
-  // Block flags reserved for replay strategy selection.
-  uint32_t flags;
+  // Branch target block ordinal when |terminator_opcode| is BRANCH, or zero.
+  uint32_t terminator_target_block_ordinal;
   // Total byte capacity of this block, including this header.
   uint32_t block_length;
   // Byte offset from this header to the first command record.
@@ -136,8 +136,10 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint16_t indirect_dispatch_count;
   // Number of profile marker command records in this block.
   uint16_t profile_marker_count;
-  // Reserved bytes that must be zero in version 0.
-  uint16_t reserved0;
+  // Terminator opcode from iree_hal_amdgpu_command_buffer_opcode_t.
+  uint8_t terminator_opcode;
+  // Reserved byte that must be zero in version 0.
+  uint8_t reserved0;
 } iree_hal_amdgpu_command_buffer_block_header_t;
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_block_header_t) == 64,
