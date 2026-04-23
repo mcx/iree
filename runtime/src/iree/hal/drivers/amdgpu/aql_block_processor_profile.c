@@ -64,7 +64,7 @@ typedef struct iree_hal_amdgpu_aql_block_processor_dispatch_profile_t {
   // Event-ring position for this dispatch when DISPATCH_PACKET is set.
   uint64_t event_position;
   // Selected dispatch profile sidecar when DISPATCH_PACKET is set.
-  const iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_t* dispatch;
+  const iree_hal_amdgpu_aql_block_processor_profile_dispatch_t* dispatch;
 } iree_hal_amdgpu_aql_block_processor_dispatch_profile_t;
 
 static iree_status_t
@@ -830,7 +830,7 @@ static void iree_hal_amdgpu_aql_block_processor_profile_emit_source(
       &state->profile.event);
 }
 
-static const iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_t*
+static const iree_hal_amdgpu_aql_block_processor_profile_dispatch_t*
 iree_hal_amdgpu_aql_block_processor_profile_current_dispatch(
     const iree_hal_amdgpu_aql_block_processor_profile_t* processor,
     const iree_hal_amdgpu_aql_block_processor_profile_state_t* state,
@@ -838,7 +838,7 @@ iree_hal_amdgpu_aql_block_processor_profile_current_dispatch(
   if (state->profile.event >= processor->profile.dispatches.count) {
     return NULL;
   }
-  const iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_t* dispatch =
+  const iree_hal_amdgpu_aql_block_processor_profile_dispatch_t* dispatch =
       &processor->profile.dispatches.values[state->profile.event];
   if (IREE_UNLIKELY(!dispatch->summary)) return NULL;
   if (dispatch->summary->packets.dispatch_ordinal != dispatch_packet_ordinal) {
@@ -854,7 +854,7 @@ iree_hal_amdgpu_aql_block_processor_profile_dispatch_profile(
     uint32_t recorded_packet_count, uint32_t dispatch_packet_ordinal) {
   iree_hal_amdgpu_aql_block_processor_dispatch_profile_flags_t flags =
       IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_DISPATCH_PROFILE_FLAG_NONE;
-  const iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_t*
+  const iree_hal_amdgpu_aql_block_processor_profile_dispatch_t*
       profile_dispatch =
           iree_hal_amdgpu_aql_block_processor_profile_current_dispatch(
               processor, state, dispatch_packet_ordinal);

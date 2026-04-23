@@ -258,7 +258,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_write_command_buffer_block(
     uint32_t emitted_packet_count, uint32_t profile_counter_set_count,
     uint32_t profile_trace_packet_count,
     iree_hal_amdgpu_profile_dispatch_harvest_source_t* profile_harvest_sources,
-    iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_list_t
+    iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t
         profile_dispatches) {
   const iree_hsa_fence_scope_t payload_acquire_scope =
       iree_hal_amdgpu_host_queue_command_buffer_block_payload_acquire_scope(
@@ -600,7 +600,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
       block->kernarg_length, sizeof(iree_hal_amdgpu_kernarg_block_t));
   iree_arena_allocator_t scratch_arena;
   iree_arena_initialize(queue->block_pool, &scratch_arena);
-  iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_list_t
+  iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t
       profile_dispatches = {0};
   iree_status_t status =
       iree_hal_amdgpu_host_queue_select_command_buffer_profile_dispatches(

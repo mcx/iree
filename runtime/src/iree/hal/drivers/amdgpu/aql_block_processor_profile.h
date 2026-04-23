@@ -11,7 +11,6 @@
 #include "iree/hal/api.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
-#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_profile_events.h"
 #include "iree/hal/drivers/amdgpu/host_queue_submission.h"
 #include "iree/hal/drivers/amdgpu/util/kernarg_ring.h"
@@ -35,6 +34,20 @@ enum iree_hal_amdgpu_aql_block_processor_profile_terminator_e {
   IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_PROFILE_TERMINATOR_RETURN = 1u,
   IREE_HAL_AMDGPU_AQL_BLOCK_PROCESSOR_PROFILE_TERMINATOR_BRANCH = 2u,
 };
+
+// Selected command-buffer dispatch for host profile packet augmentation.
+typedef struct iree_hal_amdgpu_aql_block_processor_profile_dispatch_t {
+  // Retained dispatch summary selected by the active capture filter.
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary;
+} iree_hal_amdgpu_aql_block_processor_profile_dispatch_t;
+
+// Selected command-buffer dispatches in command order.
+typedef struct iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t {
+  // Selected dispatch entries allocated from caller-owned scratch storage.
+  const iree_hal_amdgpu_aql_block_processor_profile_dispatch_t* values;
+  // Number of selected dispatch entries.
+  uint32_t count;
+} iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t;
 
 // Host-side processor for one profiled AQL command-buffer block.
 typedef struct iree_hal_amdgpu_aql_block_processor_profile_t {
@@ -88,8 +101,7 @@ typedef struct iree_hal_amdgpu_aql_block_processor_profile_t {
   // Host profile sidecars consumed by profiled replay.
   struct {
     // Selected dispatches that receive profile packet augmentation.
-    iree_hal_amdgpu_host_queue_command_buffer_profile_dispatch_list_t
-        dispatches;
+    iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t dispatches;
     // Dispatch timestamp event reservation for profiled dispatches.
     iree_hal_amdgpu_profile_dispatch_event_reservation_t dispatch_events;
     // Harvest sources written when dispatch timestamp profiling is active.
