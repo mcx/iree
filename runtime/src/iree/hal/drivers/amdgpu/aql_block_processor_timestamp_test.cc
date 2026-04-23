@@ -268,6 +268,81 @@ TEST(AqlBlockProcessorTimestampTest,
   EXPECT_EQ(result.harvest.setup, harvest_kernel_args.setup);
 }
 
+TEST(AqlBlockProcessorTimestampTest,
+     DispatchListInitializesSidecarsFromSummaries) {
+  iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t summaries[2] = {};
+  summaries[0].next = &summaries[1];
+  summaries[0].packets.first_ordinal = 0;
+  summaries[0].packets.dispatch_ordinal = 0;
+  summaries[0].metadata.executable_id = 0xA0;
+  summaries[0].metadata.command_index = 12;
+  summaries[0].metadata.export_ordinal = 2;
+  summaries[0].metadata.dispatch_flags =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_NONE;
+  summaries[1].packets.first_ordinal = 1;
+  summaries[1].packets.dispatch_ordinal = 2;
+  summaries[1].metadata.executable_id = 0xB0;
+  summaries[1].metadata.command_index = 13;
+  summaries[1].metadata.export_ordinal = 4;
+  summaries[1].metadata.dispatch_flags =
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_INDIRECT_PARAMETERS;
+
+  iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t dispatches[2] = {};
+  iree_amd_signal_t completion_signals[2] = {};
+  iree_hal_amdgpu_dispatch_timestamp_record_t records[2] = {};
+  const iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_params_t
+      params = {
+          .summaries =
+              {
+                  .first = summaries,
+                  .count = 2,
+              },
+          .metadata =
+              {
+                  .command_buffer_id = 0xCAFE,
+                  .block_ordinal = 5,
+                  .first_record_ordinal = 9,
+              },
+          .storage =
+              {
+                  .dispatches = dispatches,
+                  .completion_signals = completion_signals,
+                  .records = records,
+              },
+      };
+
+  iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t list;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_initialize(
+          &params, &list));
+
+  ASSERT_EQ(list.values, dispatches);
+  ASSERT_EQ(list.count, 2u);
+  EXPECT_EQ(dispatches[0].ordinals.packet_ordinal, 0u);
+  EXPECT_EQ(dispatches[0].ordinals.record_ordinal, 9u);
+  EXPECT_EQ(dispatches[0].metadata.command_buffer_id, 0xCAFEull);
+  EXPECT_EQ(dispatches[0].metadata.executable_id, 0xA0ull);
+  EXPECT_EQ(dispatches[0].metadata.block_ordinal, 5u);
+  EXPECT_EQ(dispatches[0].metadata.command_index, 12u);
+  EXPECT_EQ(dispatches[0].metadata.export_ordinal, 2u);
+  EXPECT_EQ(dispatches[0].metadata.flags,
+            IREE_HAL_AMDGPU_DISPATCH_TIMESTAMP_RECORD_FLAG_NONE);
+  EXPECT_EQ(dispatches[0].target.completion_signal, &completion_signals[0]);
+  EXPECT_EQ(dispatches[0].target.record, &records[0]);
+
+  EXPECT_EQ(dispatches[1].ordinals.packet_ordinal, 2u);
+  EXPECT_EQ(dispatches[1].ordinals.record_ordinal, 10u);
+  EXPECT_EQ(dispatches[1].metadata.command_buffer_id, 0xCAFEull);
+  EXPECT_EQ(dispatches[1].metadata.executable_id, 0xB0ull);
+  EXPECT_EQ(dispatches[1].metadata.block_ordinal, 5u);
+  EXPECT_EQ(dispatches[1].metadata.command_index, 13u);
+  EXPECT_EQ(dispatches[1].metadata.export_ordinal, 4u);
+  EXPECT_EQ(dispatches[1].metadata.flags,
+            IREE_HAL_AMDGPU_DISPATCH_TIMESTAMP_RECORD_FLAG_INDIRECT_PARAMETERS);
+  EXPECT_EQ(dispatches[1].target.completion_signal, &completion_signals[1]);
+  EXPECT_EQ(dispatches[1].target.record, &records[1]);
+}
+
 TEST(AqlBlockProcessorTimestampTest, RejectsPartialCommandBufferTimestampPlan) {
   DirectDispatchBlock block = MakeDirectDispatchBlock();
   alignas(64) iree_hal_amdgpu_aql_packet_t packets[8] = {};

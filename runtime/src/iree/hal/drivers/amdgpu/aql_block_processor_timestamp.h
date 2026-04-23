@@ -50,6 +50,46 @@ typedef struct iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t {
   } target;
 } iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t;
 
+// Dispatch timestamp sidecars in command order.
+typedef struct iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t {
+  // Dispatch timestamp sidecars selected for this block.
+  const iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t* values;
+  // Number of entries in |values|.
+  uint32_t count;
+} iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t;
+
+// Parameters for materializing dispatch timestamp sidecars from retained
+// command-buffer dispatch summaries.
+typedef struct
+    iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_params_t {
+  // Retained command-buffer dispatch summaries in command order.
+  struct {
+    // First retained dispatch summary in a linked block-local list.
+    const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* first;
+    // Number of retained dispatch summaries expected in |first|.
+    uint32_t count;
+  } summaries;
+  // Timestamp metadata shared by every materialized dispatch sidecar.
+  struct {
+    // Producer-defined command-buffer identifier used for correlation.
+    uint64_t command_buffer_id;
+    // Command-buffer block ordinal containing these dispatches.
+    uint32_t block_ordinal;
+    // First dispatch timestamp record ordinal assigned to this list.
+    uint32_t first_record_ordinal;
+  } metadata;
+  // Caller-owned storage receiving sidecar records and timestamp targets.
+  struct {
+    // Sidecar array with capacity for |summaries.count| entries.
+    iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t* dispatches;
+    // Raw completion signal targets with capacity for |summaries.count|
+    // entries.
+    iree_amd_signal_t* completion_signals;
+    // Fixed timestamp records with capacity for |summaries.count| entries.
+    iree_hal_amdgpu_dispatch_timestamp_record_t* records;
+  } storage;
+} iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_params_t;
+
 // Opt-in timestamp processor for one AQL command-buffer block.
 typedef struct iree_hal_amdgpu_aql_block_processor_timestamp_t {
   // Base payload processor configuration. Its packet span excludes timestamp
@@ -96,12 +136,7 @@ typedef struct iree_hal_amdgpu_aql_block_processor_timestamp_t {
     } packets;
   } command_buffer;
   // Optional dispatch timestamp records patched into payload packets.
-  struct {
-    // Dispatch timestamp sidecars selected for this block.
-    const iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t* values;
-    // Number of entries in |values|.
-    uint32_t count;
-  } dispatches;
+  iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t dispatches;
   // Optional dispatch-timestamp harvest packet and kernargs.
   struct {
     // Builtin harvest kernel arguments.
@@ -160,6 +195,15 @@ void iree_hal_amdgpu_aql_block_processor_timestamp_initialize(
 // Deinitializes |processor|. This currently releases no resources.
 void iree_hal_amdgpu_aql_block_processor_timestamp_deinitialize(
     iree_hal_amdgpu_aql_block_processor_timestamp_t* processor);
+
+// Materializes dispatch timestamp sidecars from retained command-buffer
+// dispatch summaries and caller-owned target storage.
+iree_status_t
+iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_initialize(
+    const iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_params_t*
+        params,
+    iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t*
+        out_dispatches);
 
 // Invokes |processor| on |block| and populates payload packets plus any
 // timestamp sidecars selected by the caller.

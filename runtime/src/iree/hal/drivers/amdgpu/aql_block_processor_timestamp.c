@@ -30,6 +30,19 @@ static bool iree_hal_amdgpu_aql_block_processor_timestamp_has_dispatches(
   return processor->dispatches.count != 0;
 }
 
+static iree_hal_amdgpu_dispatch_timestamp_record_flags_t
+iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_flags(
+    const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary) {
+  iree_hal_amdgpu_dispatch_timestamp_record_flags_t flags =
+      IREE_HAL_AMDGPU_DISPATCH_TIMESTAMP_RECORD_FLAG_NONE;
+  if (iree_any_bit_set(
+          summary->metadata.dispatch_flags,
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_INDIRECT_PARAMETERS)) {
+    flags |= IREE_HAL_AMDGPU_DISPATCH_TIMESTAMP_RECORD_FLAG_INDIRECT_PARAMETERS;
+  }
+  return flags;
+}
+
 static iree_hsa_signal_t
 iree_hal_amdgpu_aql_block_processor_timestamp_completion_signal(
     const iree_amd_signal_t* signal) {
@@ -193,6 +206,66 @@ void iree_hal_amdgpu_aql_block_processor_timestamp_initialize(
 void iree_hal_amdgpu_aql_block_processor_timestamp_deinitialize(
     iree_hal_amdgpu_aql_block_processor_timestamp_t* processor) {
   memset(processor, 0, sizeof(*processor));
+}
+
+iree_status_t
+iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_initialize(
+    const iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_params_t*
+        params,
+    iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_list_t*
+        out_dispatches) {
+  IREE_ASSERT_ARGUMENT(params);
+  IREE_ASSERT_ARGUMENT(out_dispatches);
+  memset(out_dispatches, 0, sizeof(*out_dispatches));
+  if (params->summaries.count == 0) return iree_ok_status();
+  if (IREE_UNLIKELY(!params->summaries.first || !params->storage.dispatches ||
+                    !params->storage.completion_signals ||
+                    !params->storage.records)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "dispatch timestamp list requires summaries and target storage");
+  }
+  if (IREE_UNLIKELY(params->metadata.first_record_ordinal >
+                    UINT32_MAX - (params->summaries.count - 1u))) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "dispatch timestamp record ordinal range overflows uint32_t");
+  }
+
+  const iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t* summary =
+      params->summaries.first;
+  for (uint32_t summary_ordinal = 0; summary_ordinal < params->summaries.count;
+       ++summary_ordinal) {
+    if (IREE_UNLIKELY(!summary)) {
+      return iree_make_status(
+          IREE_STATUS_INTERNAL,
+          "retained dispatch summary list ended after %" PRIu32 " of %" PRIu32
+          " entries",
+          summary_ordinal, params->summaries.count);
+    }
+
+    iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_t* dispatch =
+        &params->storage.dispatches[summary_ordinal];
+    memset(dispatch, 0, sizeof(*dispatch));
+    dispatch->ordinals.packet_ordinal = summary->packets.dispatch_ordinal;
+    dispatch->ordinals.record_ordinal =
+        params->metadata.first_record_ordinal + summary_ordinal;
+    dispatch->metadata.command_buffer_id = params->metadata.command_buffer_id;
+    dispatch->metadata.executable_id = summary->metadata.executable_id;
+    dispatch->metadata.block_ordinal = params->metadata.block_ordinal;
+    dispatch->metadata.command_index = summary->metadata.command_index;
+    dispatch->metadata.export_ordinal = summary->metadata.export_ordinal;
+    dispatch->metadata.flags =
+        iree_hal_amdgpu_aql_block_processor_timestamp_dispatch_flags(summary);
+    dispatch->target.completion_signal =
+        &params->storage.completion_signals[summary_ordinal];
+    dispatch->target.record = &params->storage.records[summary_ordinal];
+    summary = summary->next;
+  }
+
+  out_dispatches->values = params->storage.dispatches;
+  out_dispatches->count = params->summaries.count;
+  return iree_ok_status();
 }
 
 iree_status_t iree_hal_amdgpu_aql_block_processor_timestamp_invoke(
