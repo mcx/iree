@@ -59,14 +59,17 @@ set(_BITCODE_SRCS
   "../blit.c"
   "../dispatch.c"
   "../profiling.c"
+  "../timestamp.c"
 )
 
 set(_ABI_HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/command_buffer.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/common.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/kernel_args.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/profile.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/queue.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/signal.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../abi/timestamp.h"
 )
 
 set(_BITCODE_HDRS
@@ -79,6 +82,7 @@ set(_BITCODE_HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/kernel.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/queue.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/../support/signal.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../timestamp.h"
   ${_ABI_HDRS}
 )
 

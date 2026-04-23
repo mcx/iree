@@ -16,6 +16,7 @@ DEVICE_SRCS = [
     "blit.c",
     "dispatch.c",
     "profiling.c",
+    "timestamp.c",
 ]
 
 DEVICE_HDRS = [
@@ -28,6 +29,7 @@ DEVICE_HDRS = [
     "support/kernel.h",
     "support/queue.h",
     "support/signal.h",
+    "timestamp.h",
 ]
 
 filegroup(
@@ -87,6 +89,17 @@ iree_runtime_cc_library(
     ],
 )
 
+iree_runtime_cc_library(
+    name = "timestamp",
+    srcs = [
+        "timestamp.c",
+    ],
+    deps = [
+        ":dispatch",
+        ":headers",
+    ],
+)
+
 iree_runtime_cc_test(
     name = "blit_test",
     srcs = ["blit_test.cc"],
@@ -114,6 +127,22 @@ iree_runtime_cc_test(
     deps = [
         ":dispatch",
         ":headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "timestamp_test",
+    srcs = ["timestamp_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":headers",
+        ":timestamp",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

@@ -21,6 +21,7 @@ iree_runtime_cc_library(
         "profile.h",
         "queue.h",
         "signal.h",
+        "timestamp.h",
     ],
     deps = [
         "@hsa_runtime_headers",

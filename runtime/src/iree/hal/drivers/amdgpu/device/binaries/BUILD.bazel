@@ -23,6 +23,7 @@ ABI_HDRS = [
     "//runtime/src/iree/hal/drivers/amdgpu/abi:profile.h",
     "//runtime/src/iree/hal/drivers/amdgpu/abi:queue.h",
     "//runtime/src/iree/hal/drivers/amdgpu/abi:signal.h",
+    "//runtime/src/iree/hal/drivers/amdgpu/abi:timestamp.h",
 ]
 
 BITCODE_HDRS = [
