@@ -184,8 +184,8 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_packet_metadata(
     IREE_TRACE_ZONE_END(z0);
   }
 
-  memset(packet_headers, 0, packet_count * sizeof(*packet_headers));
-  memset(packet_setups, 0, packet_count * sizeof(*packet_setups));
+  // The block processors overwrite every reserved metadata slot before
+  // reporting success; avoid pre-zeroing this hot submission span.
   *out_packet_headers = packet_headers;
   *out_packet_setups = packet_setups;
   return iree_ok_status();
@@ -721,15 +721,15 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
   status = iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
       queue, command_buffer, binding_table, block, &scratch_arena,
       &binding_ptrs);
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) && profile_counter_packet_count != 0) {
     status = iree_hal_amdgpu_host_queue_prepare_profile_counter_samples(
         queue, profile_events);
   }
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) && profile_trace_packet_count != 0) {
     status = iree_hal_amdgpu_host_queue_prepare_profile_traces(queue,
                                                                profile_events);
   }
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) && profile_trace_packet_count != 0) {
     status =
         iree_hal_amdgpu_host_queue_prepare_command_buffer_profile_trace_code_objects(
             queue, profile_dispatches, profile_events);

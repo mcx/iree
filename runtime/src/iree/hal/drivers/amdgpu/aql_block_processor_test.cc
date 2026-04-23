@@ -610,8 +610,8 @@ TEST(AqlBlockProcessorTest, DirectDispatchPopulatesPacketAndKernarg) {
   iree_hal_amdgpu_aql_ring_t ring = {};
   ring.base = packets;
   ring.mask = 7;
-  uint16_t packet_headers[1] = {};
-  uint16_t packet_setups[1] = {};
+  uint16_t packet_headers[1] = {0xCDCD};
+  uint16_t packet_setups[1] = {0xCDCD};
   iree_hal_amdgpu_kernarg_block_t kernarg_blocks[1] = {};
   iree_hal_amdgpu_aql_block_processor_t processor = MakeProcessor(
       &ring, /*packet_count=*/1, packet_headers, packet_setups, kernarg_blocks,
