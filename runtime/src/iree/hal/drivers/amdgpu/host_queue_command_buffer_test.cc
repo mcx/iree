@@ -1469,6 +1469,10 @@ TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
       command_buffer, executable, /*entry_point=*/0,
       iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
       IREE_HAL_DISPATCH_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
+      command_buffer, executable, /*entry_point=*/0,
+      iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
+      IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
 
   const iree_hal_amdgpu_aql_program_t* program =
@@ -1484,10 +1488,29 @@ TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
             IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PREPUBLISHED);
   const uint32_t kernarg_length =
       (uint32_t)dispatch_command->kernarg_length_qwords * 8u;
+  EXPECT_EQ(dispatch_command->payload_reference, 0u);
   EXPECT_NE(
       iree_hal_amdgpu_aql_command_buffer_prepublished_kernarg(
           command_buffer, dispatch_command->payload_reference, kernarg_length),
       nullptr);
+  const iree_hal_amdgpu_command_buffer_command_header_t* second_command =
+      (const iree_hal_amdgpu_command_buffer_command_header_t*)((const uint8_t*)
+                                                                   command +
+                                                               command->length_qwords *
+                                                                   8u);
+  ASSERT_EQ(second_command->opcode,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
+  const iree_hal_amdgpu_command_buffer_dispatch_command_t*
+      second_dispatch_command =
+          (const iree_hal_amdgpu_command_buffer_dispatch_command_t*)
+              second_command;
+  EXPECT_EQ(second_dispatch_command->kernarg_strategy,
+            IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PREPUBLISHED);
+  EXPECT_GT(second_dispatch_command->payload_reference, 1u);
+  EXPECT_NE(iree_hal_amdgpu_aql_command_buffer_prepublished_kernarg(
+                command_buffer, second_dispatch_command->payload_reference,
+                (uint32_t)second_dispatch_command->kernarg_length_qwords * 8u),
+            nullptr);
 
   Ref<iree_hal_semaphore_t> command_buffer_signal;
   IREE_ASSERT_OK(

@@ -251,8 +251,8 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   // Strategy-specific payload reference.
   // HAL/CUSTOM_DIRECT/INDIRECT: byte offset from this command record to
   // constants/implicit tail bytes.
-  // PREPUBLISHED: command-buffer rodata segment ordinal containing the final
-  // kernargs.
+  // PREPUBLISHED: byte offset from the command-buffer prepublished kernarg
+  // storage to the final kernargs.
   uint32_t payload_reference;
   // Number of HAL ABI binding pointer slots emitted before the tail payload.
   uint16_t binding_count;
