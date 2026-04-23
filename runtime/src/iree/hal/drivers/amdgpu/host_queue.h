@@ -287,6 +287,8 @@ typedef struct iree_hal_amdgpu_host_queue_t {
     uint32_t queue_events_enabled : 1;
     // True when device-timestamped queue operation events should be recorded.
     uint32_t queue_device_events_enabled : 1;
+    // True when selected dispatches may receive profile packet augmentation.
+    uint32_t dispatch_profiling_enabled : 1;
     // Serializes dispatch event batch mutation and flush.
     iree_slim_mutex_t event_mutex;
     // Borrowed fine-grained GPU-agent block pool backing raw signal storage.

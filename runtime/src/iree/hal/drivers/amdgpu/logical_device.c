@@ -778,16 +778,37 @@ static iree_status_t iree_hal_amdgpu_logical_device_write_profile_events(
   return status;
 }
 
+static iree_hal_amdgpu_host_queue_profile_flags_t
+iree_hal_amdgpu_logical_device_queue_profile_flags(
+    const iree_hal_device_profiling_options_t* options) {
+  iree_hal_amdgpu_host_queue_profile_flags_t flags =
+      IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_NONE;
+  if (iree_hal_device_profiling_options_requests_data(
+          options, IREE_HAL_DEVICE_PROFILING_DATA_QUEUE_EVENTS)) {
+    flags |= IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_QUEUE_EVENTS;
+  }
+  if (iree_hal_device_profiling_options_requests_data(
+          options, IREE_HAL_DEVICE_PROFILING_DATA_DEVICE_QUEUE_EVENTS)) {
+    flags |= IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_QUEUE_DEVICE_EVENTS;
+  }
+  if (iree_any_bit_set(options->data_families,
+                       IREE_HAL_DEVICE_PROFILING_DATA_DISPATCH_EVENTS |
+                           IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES |
+                           IREE_HAL_DEVICE_PROFILING_DATA_EXECUTABLE_TRACES)) {
+    flags |= IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_DISPATCHES;
+  }
+  return flags;
+}
+
 static void iree_hal_amdgpu_logical_device_set_queue_profiling_enabled(
-    iree_hal_amdgpu_logical_device_t* logical_device, bool queue_events_enabled,
-    bool queue_device_events_enabled) {
+    iree_hal_amdgpu_logical_device_t* logical_device,
+    iree_hal_amdgpu_host_queue_profile_flags_t flags) {
   for (iree_host_size_t i = 0; i < logical_device->physical_device_count; ++i) {
     iree_hal_amdgpu_physical_device_t* physical_device =
         logical_device->physical_devices[i];
     for (iree_host_size_t j = 0; j < physical_device->host_queue_count; ++j) {
-      iree_hal_amdgpu_host_queue_set_profile_events_enabled(
-          &physical_device->host_queues[j], queue_events_enabled,
-          queue_device_events_enabled);
+      iree_hal_amdgpu_host_queue_set_profile_flags(
+          &physical_device->host_queues[j], flags);
     }
   }
 }
@@ -2570,11 +2591,7 @@ static iree_status_t iree_hal_amdgpu_logical_device_profiling_begin(
     logical_device->profiling.device_metrics_session = device_metrics_session;
     iree_hal_amdgpu_logical_device_set_queue_profiling_enabled(
         logical_device,
-        iree_hal_device_profiling_options_requests_data(
-            &session_options, IREE_HAL_DEVICE_PROFILING_DATA_QUEUE_EVENTS),
-        iree_hal_device_profiling_options_requests_data(
-            &session_options,
-            IREE_HAL_DEVICE_PROFILING_DATA_DEVICE_QUEUE_EVENTS));
+        iree_hal_amdgpu_logical_device_queue_profile_flags(&session_options));
   } else {
     if (trace_profiling_enabled) {
       status = iree_status_join(
@@ -2703,8 +2720,8 @@ static iree_status_t iree_hal_amdgpu_logical_device_profiling_end(
   logical_device->profiling.counter_session = NULL;
   logical_device->profiling.trace_session = NULL;
   logical_device->profiling.device_metrics_session = NULL;
-  iree_hal_amdgpu_logical_device_set_queue_profiling_enabled(logical_device,
-                                                             false, false);
+  iree_hal_amdgpu_logical_device_set_queue_profiling_enabled(
+      logical_device, IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_NONE);
   iree_hal_amdgpu_profile_counter_session_free(counter_session);
   iree_hal_amdgpu_profile_trace_session_free(trace_session);
   iree_hal_amdgpu_profile_device_metrics_session_free(device_metrics_session);

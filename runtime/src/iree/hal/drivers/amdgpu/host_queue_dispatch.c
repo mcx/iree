@@ -423,6 +423,7 @@ static void iree_hal_amdgpu_host_queue_initialize_dispatch_event(
 static bool iree_hal_amdgpu_host_queue_should_profile_dispatch(
     iree_hal_amdgpu_host_queue_t* queue, uint64_t executable_id,
     iree_hal_executable_export_ordinal_t export_ordinal) {
+  if (!queue->profiling.dispatch_profiling_enabled) return false;
   if (!queue->profiling.hsa_queue_timestamps_enabled) return false;
   iree_hal_amdgpu_logical_device_t* logical_device =
       (iree_hal_amdgpu_logical_device_t*)queue->logical_device;

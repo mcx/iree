@@ -13,12 +13,7 @@
 
 static bool iree_hal_amdgpu_host_queue_profiles_command_buffer_dispatches(
     const iree_hal_amdgpu_host_queue_t* queue) {
-  iree_hal_amdgpu_logical_device_t* logical_device =
-      (iree_hal_amdgpu_logical_device_t*)queue->logical_device;
-  return iree_any_bit_set(logical_device->profiling.options.data_families,
-                          IREE_HAL_DEVICE_PROFILING_DATA_DISPATCH_EVENTS |
-                              IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES |
-                              IREE_HAL_DEVICE_PROFILING_DATA_EXECUTABLE_TRACES);
+  return queue->profiling.dispatch_profiling_enabled;
 }
 
 static bool

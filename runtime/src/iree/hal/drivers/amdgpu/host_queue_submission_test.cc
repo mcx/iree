@@ -158,9 +158,10 @@ static void ExpectDispatchSubmissionPlan(
       .type = IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_DISPATCH,
       .operation_count = 1,
   };
-  iree_hal_amdgpu_host_queue_set_profile_events_enabled(
-      queue, /*queue_events_enabled=*/false,
-      plan_case.reserve_queue_device_event);
+  iree_hal_amdgpu_host_queue_set_profile_flags(
+      queue, plan_case.reserve_queue_device_event
+                 ? IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_QUEUE_DEVICE_EVENTS
+                 : IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_NONE);
 
   bool is_ready = false;
   iree_hal_amdgpu_host_queue_dispatch_submission_t submission = {};
@@ -238,9 +239,10 @@ static void ExpectPm4IbSubmissionPlan(
       .type = IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_UPDATE,
       .operation_count = 1,
   };
-  iree_hal_amdgpu_host_queue_set_profile_events_enabled(
-      queue, /*queue_events_enabled=*/false,
-      plan_case.reserve_queue_device_event);
+  iree_hal_amdgpu_host_queue_set_profile_flags(
+      queue, plan_case.reserve_queue_device_event
+                 ? IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_QUEUE_DEVICE_EVENTS
+                 : IREE_HAL_AMDGPU_HOST_QUEUE_PROFILE_FLAG_NONE);
 
   bool is_ready = false;
   iree_hal_amdgpu_host_queue_pm4_ib_submission_t submission = {};

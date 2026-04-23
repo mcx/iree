@@ -603,7 +603,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
   iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t
       profile_dispatches = {0};
   iree_status_t status = iree_ok_status();
-  if (command_buffer_id != 0 && queue->profiling.hsa_queue_timestamps_enabled) {
+  if (command_buffer_id != 0 && queue->profiling.dispatch_profiling_enabled) {
     status =
         iree_hal_amdgpu_host_queue_select_command_buffer_profile_dispatches(
             queue, command_buffer, block, &scratch_arena, &profile_dispatches);
