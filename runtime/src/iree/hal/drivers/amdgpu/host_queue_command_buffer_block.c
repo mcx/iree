@@ -602,20 +602,25 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
   iree_arena_initialize(queue->block_pool, &scratch_arena);
   iree_hal_amdgpu_aql_block_processor_profile_dispatch_list_t
       profile_dispatches = {0};
-  iree_status_t status =
-      iree_hal_amdgpu_host_queue_select_command_buffer_profile_dispatches(
-          queue, command_buffer, block, &scratch_arena, &profile_dispatches);
-  if (!iree_status_is_ok(status)) {
-    iree_arena_deinitialize(&scratch_arena);
-    return status;
+  iree_status_t status = iree_ok_status();
+  if (command_buffer_id != 0 && queue->profiling.hsa_queue_timestamps_enabled) {
+    status =
+        iree_hal_amdgpu_host_queue_select_command_buffer_profile_dispatches(
+            queue, command_buffer, block, &scratch_arena, &profile_dispatches);
+    if (!iree_status_is_ok(status)) {
+      iree_arena_deinitialize(&scratch_arena);
+      return status;
+    }
   }
   const uint32_t profile_dispatch_event_count = profile_dispatches.count;
   iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events = {0};
-  status = iree_hal_amdgpu_host_queue_reserve_profile_dispatch_events(
-      queue, profile_dispatch_event_count, &profile_events);
-  if (!iree_status_is_ok(status)) {
-    iree_arena_deinitialize(&scratch_arena);
-    return status;
+  if (profile_dispatch_event_count != 0) {
+    status = iree_hal_amdgpu_host_queue_reserve_profile_dispatch_events(
+        queue, profile_dispatch_event_count, &profile_events);
+    if (!iree_status_is_ok(status)) {
+      iree_arena_deinitialize(&scratch_arena);
+      return status;
+    }
   }
   const uint32_t profile_counter_set_count =
       profile_events.event_count != 0
