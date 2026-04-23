@@ -7,7 +7,9 @@
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer.h"
 
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
-#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_internal.h"
+#include "iree/hal/drivers/amdgpu/aql_program_validation.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_block.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_replay.h"
 #include "iree/hal/utils/resource_set.h"
 
 iree_status_t iree_hal_amdgpu_host_queue_validate_execute_flags(
@@ -126,7 +128,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer(
       program->max_block_aql_packet_count == 0 || program->block_count != 1;
   if (requires_replay && program->max_block_aql_packet_count == 0) {
     IREE_RETURN_IF_ERROR(
-        iree_hal_amdgpu_host_queue_validate_metadata_commands(program));
+        iree_hal_amdgpu_aql_program_validate_metadata_only(program));
   }
   if (requires_replay) {
     iree_status_t status =

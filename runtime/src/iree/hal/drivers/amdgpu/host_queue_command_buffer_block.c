@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_block.h"
+
 #include <string.h>
 
 #include "iree/hal/drivers/amdgpu/aql_block_processor.h"
@@ -11,7 +13,7 @@
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/device/profiling.h"
-#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_internal.h"
+#include "iree/hal/drivers/amdgpu/host_queue_command_buffer_packet.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_profile.h"
 #include "iree/hal/drivers/amdgpu/host_queue_command_buffer_scratch.h"
 #include "iree/hal/drivers/amdgpu/host_queue_policy.h"
@@ -239,81 +241,6 @@ static iree_hsa_packet_type_t iree_hal_amdgpu_host_queue_aql_packet_header_type(
       iree_hal_amdgpu_host_queue_aql_packet_header_field(
           header, IREE_HSA_PACKET_HEADER_TYPE,
           IREE_HSA_PACKET_HEADER_WIDTH_TYPE);
-}
-
-iree_status_t iree_hal_amdgpu_host_queue_validate_metadata_commands(
-    const iree_hal_amdgpu_aql_program_t* program) {
-  const iree_hal_amdgpu_command_buffer_block_header_t* block =
-      program->first_block;
-  bool reached_return = false;
-  iree_status_t status = iree_ok_status();
-  while (iree_status_is_ok(status) && !reached_return && block) {
-    const iree_hal_amdgpu_command_buffer_command_header_t* command =
-        iree_hal_amdgpu_command_buffer_block_commands_const(block);
-    bool advanced_block = false;
-    for (uint16_t i = 0;
-         i < block->command_count && iree_status_is_ok(status) &&
-         !reached_return && !advanced_block;
-         ++i) {
-      switch (command->opcode) {
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER:
-          break;
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BRANCH: {
-          const iree_hal_amdgpu_command_buffer_branch_command_t*
-              branch_command =
-                  (const iree_hal_amdgpu_command_buffer_branch_command_t*)
-                      command;
-          iree_hal_amdgpu_command_buffer_block_header_t* next_block =
-              iree_hal_amdgpu_aql_program_block_next(program->block_pool,
-                                                     block);
-          if (IREE_UNLIKELY(!next_block ||
-                            branch_command->target_block_ordinal !=
-                                next_block->block_ordinal)) {
-            status = iree_make_status(
-                IREE_STATUS_UNIMPLEMENTED,
-                "non-linear AQL command-buffer branch replay not yet wired");
-          } else {
-            block = next_block;
-            advanced_block = true;
-          }
-          break;
-        }
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN:
-          reached_return = true;
-          break;
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH:
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_FILL:
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COPY:
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_UPDATE:
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_PROFILE_MARKER:
-        case IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_COND_BRANCH:
-          status = iree_make_status(
-              IREE_STATUS_UNIMPLEMENTED,
-              "AQL command-buffer opcode %u replay not yet wired",
-              command->opcode);
-          break;
-        default:
-          status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                    "malformed AQL command-buffer opcode %u",
-                                    command->opcode);
-          break;
-      }
-      if (iree_status_is_ok(status) && !reached_return && !advanced_block) {
-        command = iree_hal_amdgpu_command_buffer_command_next_const(command);
-      }
-    }
-    if (iree_status_is_ok(status) && !reached_return && !advanced_block) {
-      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "AQL command-buffer block %" PRIu32
-                                " has no terminator",
-                                block->block_ordinal);
-    }
-  }
-  if (iree_status_is_ok(status) && !reached_return) {
-    status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "AQL command-buffer program has no return");
-  }
-  return status;
 }
 
 static iree_status_t iree_hal_amdgpu_host_queue_write_command_buffer_block(

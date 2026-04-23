@@ -10,6 +10,7 @@
 #include <cstdint>
 
 #include "iree/hal/drivers/amdgpu/abi/queue.h"
+#include "iree/hal/drivers/amdgpu/aql_program_validation.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -45,6 +46,20 @@ static const iree_hal_amdgpu_command_buffer_command_header_t* LastCommand(
     command = iree_hal_amdgpu_command_buffer_command_next_const(command);
   }
   return command;
+}
+
+static iree_status_t AppendBarriers(
+    iree_hal_amdgpu_aql_program_builder_t* builder, int count) {
+  for (int i = 0; i < count; ++i) {
+    iree_hal_amdgpu_command_buffer_command_header_t* barrier = nullptr;
+    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_aql_program_builder_append_command(
+        builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER,
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE,
+        sizeof(iree_hal_amdgpu_command_buffer_barrier_command_t),
+        /*binding_source_count=*/0, /*aql_packet_count=*/0,
+        /*kernarg_length=*/0, &barrier, /*out_binding_sources=*/nullptr));
+  }
+  return iree_ok_status();
 }
 
 TEST(CommandBufferAbiTest, CoreRecordSizes) {
@@ -119,6 +134,8 @@ TEST_F(AqlProgramBuilderTest, EmptyProgramRecordsReturnBlock) {
   EXPECT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
   EXPECT_EQ(iree_hal_amdgpu_command_buffer_command_length(command),
             sizeof(iree_hal_amdgpu_command_buffer_return_command_t));
+
+  IREE_EXPECT_OK(iree_hal_amdgpu_aql_program_validate_metadata_only(&program));
 
   iree_hal_amdgpu_aql_program_release(&program);
 }
@@ -335,6 +352,94 @@ TEST_F(AqlProgramBuilderTest, SplitsBlocksWithBranchTerminator) {
   EXPECT_EQ(second_block->terminator_opcode,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
   EXPECT_EQ(second_block->terminator_target_block_ordinal, 0u);
+
+  iree_hal_amdgpu_aql_program_release(&program);
+}
+
+TEST_F(AqlProgramBuilderTest, ValidatesSplitMetadataOnlyProgram) {
+  iree_hal_amdgpu_aql_program_builder_t builder;
+  iree_hal_amdgpu_aql_program_builder_initialize(block_pool(), &builder);
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_begin(&builder));
+
+  IREE_ASSERT_OK(AppendBarriers(&builder, 12));
+
+  iree_hal_amdgpu_aql_program_t program = {};
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_end(&builder, &program));
+  iree_hal_amdgpu_aql_program_builder_deinitialize(&builder);
+
+  ASSERT_GE(program.block_count, 2u);
+  ASSERT_EQ(program.max_block_aql_packet_count, 0u);
+  IREE_EXPECT_OK(iree_hal_amdgpu_aql_program_validate_metadata_only(&program));
+
+  iree_hal_amdgpu_aql_program_release(&program);
+}
+
+TEST_F(AqlProgramBuilderTest, MetadataOnlyValidationRejectsPayloadBlocks) {
+  iree_hal_amdgpu_aql_program_builder_t builder;
+  iree_hal_amdgpu_aql_program_builder_initialize(block_pool(), &builder);
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_begin(&builder));
+
+  iree_hal_amdgpu_command_buffer_command_header_t* dispatch = nullptr;
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_append_command(
+      &builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH,
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE,
+      sizeof(iree_hal_amdgpu_command_buffer_dispatch_command_t),
+      /*binding_source_count=*/0, /*aql_packet_count=*/1,
+      /*kernarg_length=*/0, &dispatch, /*out_binding_sources=*/nullptr));
+
+  iree_hal_amdgpu_aql_program_t program = {};
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_end(&builder, &program));
+  iree_hal_amdgpu_aql_program_builder_deinitialize(&builder);
+
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_amdgpu_aql_program_validate_metadata_only(&program));
+
+  iree_hal_amdgpu_aql_program_release(&program);
+}
+
+TEST_F(AqlProgramBuilderTest, MetadataOnlyValidationRejectsProfileMarkers) {
+  iree_hal_amdgpu_aql_program_builder_t builder;
+  iree_hal_amdgpu_aql_program_builder_initialize(block_pool(), &builder);
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_begin(&builder));
+
+  iree_hal_amdgpu_command_buffer_command_header_t* profile_marker = nullptr;
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_append_command(
+      &builder, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_PROFILE_MARKER,
+      IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_NONE,
+      sizeof(iree_hal_amdgpu_command_buffer_command_header_t),
+      /*binding_source_count=*/0, /*aql_packet_count=*/0,
+      /*kernarg_length=*/0, &profile_marker,
+      /*out_binding_sources=*/nullptr));
+
+  iree_hal_amdgpu_aql_program_t program = {};
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_end(&builder, &program));
+  iree_hal_amdgpu_aql_program_builder_deinitialize(&builder);
+
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_UNIMPLEMENTED,
+      iree_hal_amdgpu_aql_program_validate_metadata_only(&program));
+
+  iree_hal_amdgpu_aql_program_release(&program);
+}
+
+TEST_F(AqlProgramBuilderTest,
+       MetadataOnlyValidationRejectsTerminatorMetadataMismatch) {
+  iree_hal_amdgpu_aql_program_builder_t builder;
+  iree_hal_amdgpu_aql_program_builder_initialize(block_pool(), &builder);
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_begin(&builder));
+
+  IREE_ASSERT_OK(AppendBarriers(&builder, 12));
+
+  iree_hal_amdgpu_aql_program_t program = {};
+  IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_builder_end(&builder, &program));
+  iree_hal_amdgpu_aql_program_builder_deinitialize(&builder);
+
+  ASSERT_GE(program.block_count, 2u);
+  program.first_block->terminator_target_block_ordinal = 2;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_amdgpu_aql_program_validate_metadata_only(&program));
 
   iree_hal_amdgpu_aql_program_release(&program);
 }
