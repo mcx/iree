@@ -1706,7 +1706,9 @@ TEST_F(HostQueueCommandBufferTest,
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(iree_hal_command_buffer_create(
-      test_device.base_device(), IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      test_device.base_device(),
+      IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT |
+          IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
       /*binding_capacity=*/1, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
@@ -1737,6 +1739,28 @@ TEST_F(HostQueueCommandBufferTest,
   EXPECT_EQ(dispatch_command->kernarg_strategy,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PATCHED_TEMPLATE);
   EXPECT_EQ(dispatch_command->payload.patch_source_count, 1u);
+  const iree_hal_amdgpu_profile_metadata_registry_t& profile_metadata =
+      test_device.logical_device()->profile_metadata;
+  ASSERT_EQ(profile_metadata.command_operation_record_count, 2u);
+  const iree_hal_profile_command_operation_record_t* dispatch_operation =
+      nullptr;
+  for (iree_host_size_t i = 0;
+       i < profile_metadata.command_operation_record_count; ++i) {
+    const iree_hal_profile_command_operation_record_t& operation =
+        profile_metadata.command_operation_records[i];
+    if (operation.type == IREE_HAL_PROFILE_COMMAND_OPERATION_TYPE_DISPATCH) {
+      dispatch_operation = &operation;
+      break;
+    }
+  }
+  ASSERT_NE(dispatch_operation, nullptr);
+  EXPECT_EQ(dispatch_operation->binding_count, 2u);
+  EXPECT_NE(dispatch_operation->flags &
+                IREE_HAL_PROFILE_COMMAND_OPERATION_FLAG_STATIC_BINDINGS,
+            0u);
+  EXPECT_NE(dispatch_operation->flags &
+                IREE_HAL_PROFILE_COMMAND_OPERATION_FLAG_DYNAMIC_BINDINGS,
+            0u);
   const uint32_t kernarg_length =
       (uint32_t)dispatch_command->kernarg_length_qwords * 8u;
   EXPECT_NE(
