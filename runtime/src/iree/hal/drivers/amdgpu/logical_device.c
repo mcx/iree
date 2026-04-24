@@ -866,6 +866,26 @@ static iree_status_t iree_hal_amdgpu_logical_device_set_hsa_profiling_enabled(
   return status;
 }
 
+// Returns true when |queue_ordinal| is the physical device's counter range
+// sampling queue.
+//
+// Queue affinity ANY resolves to queue 0 for ordinary submissions, so using
+// the final queue gives the sampler the best chance to run independently while
+// the default queue is saturated. When only one queue exists we fall back to
+// that queue and sampling is necessarily ordered behind user work.
+static bool iree_hal_amdgpu_logical_device_is_profile_counter_range_queue(
+    const iree_hal_amdgpu_physical_device_t* physical_device,
+    iree_host_size_t queue_ordinal) {
+  return queue_ordinal + 1 == physical_device->host_queue_count;
+}
+
+static iree_hal_amdgpu_host_queue_t*
+iree_hal_amdgpu_logical_device_select_profile_counter_range_queue(
+    iree_hal_amdgpu_physical_device_t* physical_device) {
+  if (physical_device->host_queue_count == 0) return NULL;
+  return &physical_device->host_queues[physical_device->host_queue_count - 1];
+}
+
 static iree_status_t
 iree_hal_amdgpu_logical_device_set_counter_profiling_enabled(
     iree_hal_amdgpu_logical_device_t* logical_device,
@@ -898,7 +918,9 @@ iree_hal_amdgpu_logical_device_set_counter_profiling_enabled(
         if (capture_dispatch_samples) {
           flags |= IREE_HAL_AMDGPU_PROFILE_COUNTER_ENABLE_FLAG_DISPATCH_SAMPLES;
         }
-        if (j == 0 && capture_queue_ranges) {
+        if (capture_queue_ranges &&
+            iree_hal_amdgpu_logical_device_is_profile_counter_range_queue(
+                physical_device, j)) {
           flags |= IREE_HAL_AMDGPU_PROFILE_COUNTER_ENABLE_FLAG_QUEUE_RANGES;
         }
         status = iree_hal_amdgpu_host_queue_enable_profile_counters(
@@ -947,8 +969,10 @@ iree_hal_amdgpu_logical_device_start_profile_counter_ranges(
                                 "logical device physical device has no host "
                                 "queues (initialization incomplete)");
     } else {
-      status = iree_hal_amdgpu_host_queue_start_profile_counter_ranges(
-          &physical_device->host_queues[0]);
+      iree_hal_amdgpu_host_queue_t* queue =
+          iree_hal_amdgpu_logical_device_select_profile_counter_range_queue(
+              physical_device);
+      status = iree_hal_amdgpu_host_queue_start_profile_counter_ranges(queue);
       if (iree_status_is_ok(status)) {
         ++started_device_count;
       }
@@ -959,10 +983,12 @@ iree_hal_amdgpu_logical_device_start_profile_counter_ranges(
     for (iree_host_size_t i = 0; i < started_device_count; ++i) {
       iree_hal_amdgpu_physical_device_t* physical_device =
           logical_device->physical_devices[i];
+      iree_hal_amdgpu_host_queue_t* queue =
+          iree_hal_amdgpu_logical_device_select_profile_counter_range_queue(
+              physical_device);
       status = iree_status_join(
           status, iree_hal_amdgpu_host_queue_flush_profile_counter_ranges(
-                      &physical_device->host_queues[0], /*sink=*/NULL,
-                      /*session_id=*/0,
+                      queue, /*sink=*/NULL, /*session_id=*/0,
                       IREE_HAL_AMDGPU_PROFILE_COUNTER_RANGE_FLUSH_FLAG_NONE));
     }
   }
@@ -994,8 +1020,11 @@ iree_hal_amdgpu_logical_device_flush_profile_counter_ranges(
                                 "logical device physical device has no host "
                                 "queues (initialization incomplete)");
     } else {
+      iree_hal_amdgpu_host_queue_t* queue =
+          iree_hal_amdgpu_logical_device_select_profile_counter_range_queue(
+              physical_device);
       status = iree_hal_amdgpu_host_queue_flush_profile_counter_ranges(
-          &physical_device->host_queues[0], sink, session_id, flags);
+          queue, sink, session_id, flags);
     }
   }
 
