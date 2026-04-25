@@ -94,6 +94,16 @@ enum iree_hal_amdgpu_command_buffer_binding_kind_e {
 // Compact binding reference kind storage.
 typedef uint8_t iree_hal_amdgpu_command_buffer_binding_kind_t;
 
+// Block flags used to select optional command-buffer sidecars.
+typedef enum iree_hal_amdgpu_command_buffer_block_flag_bits_e {
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_FLAG_NONE = 0u,
+  // The block uses dynamic queue_execute binding slots for dispatch kernarg
+  // pointer formation.
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_FLAG_HAS_DYNAMIC_BINDING_SLOTS = 1u << 0,
+} iree_hal_amdgpu_command_buffer_block_flag_bits_t;
+// Compact block flag storage.
+typedef uint8_t iree_hal_amdgpu_command_buffer_block_flags_t;
+
 // Header stored at byte 0 of every command-buffer block.
 typedef struct IREE_AMDGPU_ALIGNAS(8)
     iree_hal_amdgpu_command_buffer_block_header_t {
@@ -139,12 +149,21 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint16_t profile_marker_count;
   // Terminator opcode from iree_hal_amdgpu_command_buffer_opcode_t.
   uint8_t terminator_opcode;
-  // Reserved byte that must be zero in version 0.
-  uint8_t reserved0;
+  // Block flags from iree_hal_amdgpu_command_buffer_block_flag_bits_t.
+  iree_hal_amdgpu_command_buffer_block_flags_t flags;
 } iree_hal_amdgpu_command_buffer_block_header_t;
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_block_header_t) == 64,
     "command-buffer block header must stay cache-line sized");
+
+// Returns true when |block| has precomputed dynamic binding slot metadata.
+static inline bool
+iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
+    const iree_hal_amdgpu_command_buffer_block_header_t* block) {
+  return (block->flags &
+          IREE_HAL_AMDGPU_COMMAND_BUFFER_BLOCK_FLAG_HAS_DYNAMIC_BINDING_SLOTS) !=
+         0;
+}
 
 // Header common to every command record.
 typedef struct IREE_AMDGPU_ALIGNAS(8)

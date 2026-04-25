@@ -1576,6 +1576,8 @@ TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
       iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
   ASSERT_NE(program->first_block, nullptr);
   EXPECT_EQ(program->max_block_kernarg_length, 0u);
+  EXPECT_FALSE(iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
+      program->first_block));
   const iree_hal_amdgpu_command_buffer_command_header_t* command =
       iree_hal_amdgpu_command_buffer_block_commands_const(program->first_block);
   ASSERT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
@@ -1755,6 +1757,14 @@ TEST_F(HostQueueCommandBufferTest,
       iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
   ASSERT_NE(program->first_block, nullptr);
   EXPECT_GT(program->max_block_kernarg_length, 0u);
+  EXPECT_TRUE(iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
+      program->first_block));
+  const iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t
+      dynamic_binding_slots =
+          iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
+              command_buffer, program->first_block);
+  ASSERT_EQ(dynamic_binding_slots.count, 1u);
+  EXPECT_EQ(dynamic_binding_slots.values[0], 0u);
   ASSERT_EQ(program->first_block->binding_source_count, 1u);
   const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
       iree_hal_amdgpu_command_buffer_block_binding_sources_const(

@@ -90,8 +90,25 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     iree_arena_allocator_t* overflow_arena, const uint64_t** out_binding_ptrs) {
   *out_binding_ptrs = NULL;
-  if (command_buffer->binding_count == 0 || block->binding_source_count == 0) {
+  if (command_buffer->binding_count == 0 ||
+      !iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(block)) {
     return iree_ok_status();
+  }
+  const iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t
+      dynamic_binding_slots =
+          iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
+              command_buffer, block);
+  if (IREE_UNLIKELY(dynamic_binding_slots.count == 0)) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "AQL command-buffer block %" PRIu32
+        " declares dynamic binding slots without retained slot metadata",
+        block->block_ordinal);
+  }
+  if (IREE_UNLIKELY(binding_table.count > 0 && !binding_table.bindings)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "queue_execute binding table is NULL with non-zero count");
   }
 
   uint64_t* binding_ptrs = NULL;
@@ -114,36 +131,28 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
   }
 
   iree_status_t status = iree_ok_status();
-  const iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
-      iree_hal_amdgpu_command_buffer_block_binding_sources_const(block);
   for (uint16_t i = 0;
-       i < block->binding_source_count && iree_status_is_ok(status); ++i) {
-    const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
-        &binding_sources[i];
-    if (iree_any_bit_set(
-            binding_source->flags,
-            IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_INDIRECT_PARAMETERS)) {
-      continue;
+       i < dynamic_binding_slots.count && iree_status_is_ok(status); ++i) {
+    const uint32_t slot = dynamic_binding_slots.values[i];
+    if (IREE_UNLIKELY(slot >= command_buffer->binding_count)) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "command-buffer binding slot %" PRIu32
+                                " exceeds binding count %u",
+                                slot, command_buffer->binding_count);
+      break;
     }
-    if (!iree_all_bits_set(
-            binding_source->flags,
-            IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC)) {
-      continue;
-    }
-    if (IREE_UNLIKELY(binding_source->slot >= command_buffer->binding_count)) {
-      status =
-          iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                           "command-buffer binding source slot %" PRIu32
-                           " exceeds binding count %u",
-                           binding_source->slot, command_buffer->binding_count);
+    if (IREE_UNLIKELY(slot >= binding_table.count)) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "queue_execute binding table slot %" PRIu32
+                                " exceeds binding table count %" PRIhsz,
+                                slot, binding_table.count);
       break;
     }
     status = iree_hal_amdgpu_host_queue_resolve_dispatch_binding_ptr(
-        &binding_table.bindings[binding_source->slot],
-        &binding_ptrs[binding_source->slot]);
+        &binding_table.bindings[slot], &binding_ptrs[slot]);
     if (!iree_status_is_ok(status)) {
-      status = iree_status_annotate_f(status, "binding_table[%" PRIu32 "]",
-                                      binding_source->slot);
+      status =
+          iree_status_annotate_f(status, "binding_table[%" PRIu32 "]", slot);
     }
   }
   if (iree_status_is_ok(status)) {
