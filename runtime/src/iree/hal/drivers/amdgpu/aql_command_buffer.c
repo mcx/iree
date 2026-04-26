@@ -1829,7 +1829,8 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_write_dispatch_tail(
     iree_hal_amdgpu_command_buffer_kernarg_strategy_t kernarg_strategy,
     uint8_t* tail_payload) {
   switch (kernarg_strategy) {
-    case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_HAL: {
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_HAL:
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_DYNAMIC_BINDINGS: {
       const iree_host_size_t binding_bytes =
           (iree_host_size_t)kernel_args->binding_count * sizeof(uint64_t);
       if (constants.data_length > 0) {
@@ -2219,6 +2220,12 @@ static iree_status_t iree_hal_amdgpu_aql_command_buffer_prepare_dispatch_plan(
   if (out_plan->bindings.dynamic_count != 0) {
     out_plan->flags |= IREE_HAL_AMDGPU_AQL_DISPATCH_PLAN_FLAG_DYNAMIC_BINDINGS;
   }
+  if (out_plan->bindings.dynamic_count != 0 &&
+      !iree_hal_amdgpu_aql_dispatch_plan_uses_indirect_parameters(out_plan) &&
+      out_plan->bindings.dynamic_count == inputs->bindings.count) {
+    out_plan->kernarg_strategy =
+        IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_DYNAMIC_BINDINGS;
+  }
   IREE_RETURN_IF_ERROR(
       iree_hal_amdgpu_aql_command_buffer_prepare_dispatch_binding_sources(
           command_buffer, inputs->bindings));
@@ -2296,9 +2303,9 @@ iree_hal_amdgpu_aql_command_buffer_calculate_dispatch_layout(
   }
   // Mixed static/dynamic reusable dispatches keep an immutable host template
   // and patch only the dynamic binding qwords at replay time. All-dynamic
-  // dispatches stay on the existing compact inline form until the block ABI has
-  // a compressed binding-range source; recording a zero-filled pointer prefix
-  // for those would add bytes without removing the binding-table resolution.
+  // dispatches stay on the compact inline form but use a dynamic-only replay
+  // strategy so packet processing does not branch over impossible static
+  // binding source cases.
   if (!iree_all_bits_set(command_buffer->base.mode,
                          IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT) &&
       !uses_indirect_parameters && !uses_custom_direct_arguments &&

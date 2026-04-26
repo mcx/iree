@@ -381,6 +381,18 @@ static void iree_hal_amdgpu_aql_block_processor_write_dispatch_packet_body(
   *out_setup = packet->dispatch.setup;
 }
 
+static inline void iree_hal_amdgpu_aql_block_processor_copy_dispatch_tail(
+    const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command,
+    uint8_t* kernarg_data, iree_host_size_t tail_offset) {
+  const iree_host_size_t tail_length =
+      (iree_host_size_t)dispatch_command->payload.tail_length_qwords * 8u;
+  if (tail_length > 0) {
+    const uint8_t* tail_payload =
+        (const uint8_t*)dispatch_command + dispatch_command->payload_reference;
+    memcpy(kernarg_data + tail_offset, tail_payload, tail_length);
+  }
+}
+
 static iree_status_t
 iree_hal_amdgpu_aql_block_processor_replay_dispatch_kernargs(
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
@@ -388,6 +400,30 @@ iree_hal_amdgpu_aql_block_processor_replay_dispatch_kernargs(
     const iree_hal_amdgpu_command_buffer_dispatch_command_t* dispatch_command,
     uint8_t* kernarg_data) {
   switch (dispatch_command->kernarg_strategy) {
+    case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_DYNAMIC_BINDINGS: {
+      if (IREE_UNLIKELY(!binding_ptrs)) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "AQL command-buffer dispatch has dynamic bindings but no binding "
+            "table was provided");
+      }
+      uint64_t* binding_dst = (uint64_t*)kernarg_data;
+      const iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
+          (const iree_hal_amdgpu_command_buffer_binding_source_t*)((const uint8_t*)
+                                                                       block +
+                                                                   dispatch_command
+                                                                       ->binding_source_offset);
+      for (uint16_t i = 0; i < dispatch_command->binding_count; ++i) {
+        const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
+            &binding_sources[i];
+        binding_dst[i] = binding_ptrs[binding_source->slot] +
+                         binding_source->offset_or_pointer;
+      }
+      iree_hal_amdgpu_aql_block_processor_copy_dispatch_tail(
+          dispatch_command, kernarg_data,
+          (iree_host_size_t)dispatch_command->binding_count * sizeof(uint64_t));
+      return iree_ok_status();
+    }
     case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_HAL: {
       uint64_t* binding_dst = (uint64_t*)kernarg_data;
       const iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
@@ -426,26 +462,14 @@ iree_hal_amdgpu_aql_block_processor_replay_dispatch_kernargs(
               binding_source->flags);
         }
       }
-      const iree_host_size_t tail_length =
-          (iree_host_size_t)dispatch_command->payload.tail_length_qwords * 8u;
-      if (tail_length > 0) {
-        const uint8_t* tail_payload = (const uint8_t*)dispatch_command +
-                                      dispatch_command->payload_reference;
-        memcpy(
-            kernarg_data + (iree_host_size_t)dispatch_command->binding_count *
-                               sizeof(uint64_t),
-            tail_payload, tail_length);
-      }
+      iree_hal_amdgpu_aql_block_processor_copy_dispatch_tail(
+          dispatch_command, kernarg_data,
+          (iree_host_size_t)dispatch_command->binding_count * sizeof(uint64_t));
       return iree_ok_status();
     }
     case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_CUSTOM_DIRECT: {
-      const iree_host_size_t tail_length =
-          (iree_host_size_t)dispatch_command->payload.tail_length_qwords * 8u;
-      if (tail_length > 0) {
-        const uint8_t* tail_payload = (const uint8_t*)dispatch_command +
-                                      dispatch_command->payload_reference;
-        memcpy(kernarg_data, tail_payload, tail_length);
-      }
+      iree_hal_amdgpu_aql_block_processor_copy_dispatch_tail(
+          dispatch_command, kernarg_data, /*tail_offset=*/0);
       return iree_ok_status();
     }
     case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_INDIRECT:

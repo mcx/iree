@@ -83,6 +83,7 @@ typedef enum iree_hal_amdgpu_command_buffer_kernarg_strategy_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_INDIRECT = 2,
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PREPUBLISHED = 3,
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PATCHED_TEMPLATE = 4,
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_DYNAMIC_BINDINGS = 5,
 } iree_hal_amdgpu_command_buffer_kernarg_strategy_t;
 
 // Binding reference kind constants embedded in command records.
