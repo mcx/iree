@@ -112,7 +112,7 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
   }
 
   uint64_t* binding_ptrs = NULL;
-  if (command_buffer->binding_count <=
+  if (dynamic_binding_slots.count <=
       IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_BINDING_SCRATCH_CAPACITY) {
     IREE_RETURN_IF_ERROR(
         iree_hal_amdgpu_host_queue_ensure_command_buffer_scratch(queue));
@@ -121,9 +121,9 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
     iree_host_size_t binding_ptr_bytes = 0;
     IREE_RETURN_IF_ERROR(IREE_STRUCT_LAYOUT(
         0, &binding_ptr_bytes,
-        IREE_STRUCT_FIELD(command_buffer->binding_count, uint64_t, NULL)));
+        IREE_STRUCT_FIELD(dynamic_binding_slots.count, uint64_t, NULL)));
     IREE_TRACE_ZONE_BEGIN(z0);
-    IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, command_buffer->binding_count);
+    IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, dynamic_binding_slots.count);
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_arena_allocate(overflow_arena, binding_ptr_bytes,
                                 (void**)&binding_ptrs));
@@ -134,13 +134,6 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
   for (uint16_t i = 0;
        i < dynamic_binding_slots.count && iree_status_is_ok(status); ++i) {
     const uint32_t slot = dynamic_binding_slots.values[i];
-    if (IREE_UNLIKELY(slot >= command_buffer->binding_count)) {
-      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "command-buffer binding slot %" PRIu32
-                                " exceeds binding count %u",
-                                slot, command_buffer->binding_count);
-      break;
-    }
     if (IREE_UNLIKELY(slot >= binding_table.count)) {
       status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                 "queue_execute binding table slot %" PRIu32
@@ -149,7 +142,7 @@ iree_hal_amdgpu_host_queue_prepare_command_buffer_binding_ptrs(
       break;
     }
     status = iree_hal_amdgpu_host_queue_resolve_dispatch_binding_ptr(
-        &binding_table.bindings[slot], &binding_ptrs[slot]);
+        &binding_table.bindings[slot], &binding_ptrs[i]);
     if (!iree_status_is_ok(status)) {
       status =
           iree_status_annotate_f(status, "binding_table[%" PRIu32 "]", slot);

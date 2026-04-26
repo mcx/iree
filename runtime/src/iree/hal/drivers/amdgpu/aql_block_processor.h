@@ -42,7 +42,7 @@ typedef struct iree_hal_amdgpu_aql_block_processor_t {
   struct {
     // Binding table supplied to queue_execute.
     iree_hal_buffer_binding_table_t table;
-    // Pre-resolved dynamic binding pointers indexed by binding slot.
+    // Pre-resolved dynamic binding pointers indexed by block sidecar ordinal.
     const uint64_t* ptrs;
   } bindings;
   // Reserved packet span populated by the processor.

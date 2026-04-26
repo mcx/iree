@@ -767,13 +767,17 @@ iree_hal_amdgpu_aql_command_buffer_binding_source_uses_dynamic_binding_slot(
              0;
 }
 
-static bool
-iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slot_list_contains(
-    const uint32_t* values, uint16_t count, uint32_t slot) {
+static uint16_t
+iree_hal_amdgpu_aql_command_buffer_find_or_append_dynamic_binding_slot(
+    uint32_t* values, uint16_t* inout_count, uint16_t capacity, uint32_t slot) {
+  const uint16_t count = *inout_count;
   for (uint16_t i = 0; i < count; ++i) {
-    if (values[i] == slot) return true;
+    if (values[i] == slot) return i;
   }
-  return false;
+  IREE_ASSERT(count < capacity);
+  values[count] = slot;
+  *inout_count = count + 1;
+  return count;
 }
 
 static iree_status_t
@@ -798,10 +802,10 @@ iree_hal_amdgpu_aql_command_buffer_append_dynamic_binding_slot_block(
       (const uint32_t*)((uint8_t*)slot_block + values_offset);
   uint32_t* slot_values = (uint32_t*)((uint8_t*)slot_block + values_offset);
 
-  const iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
-      iree_hal_amdgpu_command_buffer_block_binding_sources_const(block);
+  iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
+      iree_hal_amdgpu_command_buffer_block_binding_sources(block);
   for (uint16_t i = 0; i < block->binding_source_count; ++i) {
-    const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
+    iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
         &binding_sources[i];
     if (!iree_hal_amdgpu_aql_command_buffer_binding_source_uses_dynamic_binding_slot(
             binding_source)) {
@@ -816,11 +820,10 @@ iree_hal_amdgpu_aql_command_buffer_append_dynamic_binding_slot_block(
                               block->block_ordinal, binding_source->slot,
                               command_buffer->base.binding_count);
     }
-    if (iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slot_list_contains(
-            slot_values, slot_block->slots.count, binding_source->slot)) {
-      continue;
-    }
-    slot_values[slot_block->slots.count++] = binding_source->slot;
+    binding_source->slot =
+        iree_hal_amdgpu_aql_command_buffer_find_or_append_dynamic_binding_slot(
+            slot_values, &slot_block->slots.count, dynamic_source_count,
+            binding_source->slot);
   }
   if (slot_block->slots.count == 0) return iree_ok_status();
   if (IREE_UNLIKELY(command_buffer->dynamic_binding_slots.count >

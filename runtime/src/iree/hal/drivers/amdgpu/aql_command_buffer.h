@@ -78,7 +78,9 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t {
 
 // Dynamic queue_execute binding slots used by one finalized block.
 typedef struct iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t {
-  // Binding table slots resolved into raw device pointers before block replay.
+  // Queue_execute binding table slots resolved into the dense raw pointer table
+  // before block replay. Dynamic binding-source records index this array by
+  // dense ordinal, not by original queue_execute binding slot.
   const uint32_t* values;
   // Number of entries in |values|.
   uint16_t count;

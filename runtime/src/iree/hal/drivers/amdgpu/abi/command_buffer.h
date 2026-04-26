@@ -224,11 +224,18 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
     iree_hal_amdgpu_command_buffer_binding_source_t {
   // Static raw source: final raw device pointer.
   //
-  // Dynamic or static-buffer source: byte offset added to the queue_execute
-  // binding table slot or command-buffer static buffer ordinal in |slot|.
+  // Dynamic source: byte offset added to the resolved pointer table entry in
+  // |slot|. The block dynamic-binding-slot sidecar maps that dense table entry
+  // back to the original queue_execute binding table slot.
+  //
+  // Static-buffer source: byte offset added to the command-buffer static buffer
+  // ordinal in |slot|.
   uint64_t offset_or_pointer;
-  // Dynamic source binding table slot or static buffer ordinal. Must be zero
-  // for raw static sources.
+  // Dynamic source dense resolved pointer table ordinal or static buffer
+  // ordinal. Dynamic indirect-parameter sources keep the original queue_execute
+  // binding table slot because they are resolved directly from the binding
+  // table instead of the dispatch kernarg pointer cache. Must be zero for raw
+  // static sources.
   uint32_t slot;
   // Destination HAL ABI binding pointer ordinal for compact patch lists.
   uint16_t target_binding_ordinal;

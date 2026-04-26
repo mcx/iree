@@ -1728,7 +1728,7 @@ TEST_F(HostQueueCommandBufferTest,
       iree_hal_make_buffer_ref(input_buffer, /*offset=*/0,
                                iree_hal_buffer_byte_length(input_buffer)),
       iree_hal_make_indirect_buffer_ref(
-          /*buffer_slot=*/0, /*offset=*/0,
+          /*buffer_slot=*/3, /*offset=*/0,
           iree_hal_buffer_byte_length(output_buffer)),
   };
   const iree_hal_buffer_ref_list_t dispatch_bindings = {
@@ -1745,7 +1745,7 @@ TEST_F(HostQueueCommandBufferTest,
       IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT |
           IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA,
       IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
-      /*binding_capacity=*/1, command_buffer.out()));
+      /*binding_capacity=*/4, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, executable, /*entry_point=*/0,
@@ -1764,13 +1764,15 @@ TEST_F(HostQueueCommandBufferTest,
           iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
               command_buffer, program->first_block);
   ASSERT_EQ(dynamic_binding_slots.count, 1u);
-  EXPECT_EQ(dynamic_binding_slots.values[0], 0u);
+  EXPECT_EQ(dynamic_binding_slots.values[0], 3u);
   ASSERT_EQ(program->first_block->binding_source_count, 1u);
   const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
       iree_hal_amdgpu_command_buffer_block_binding_sources_const(
           program->first_block);
   EXPECT_EQ(binding_source->flags,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC);
+  // Dynamic binding-source records index the dense resolved pointer table. The
+  // sidecar above maps ordinal 0 back to queue_execute binding table slot 3.
   EXPECT_EQ(binding_source->slot, 0u);
   EXPECT_EQ(binding_source->target_binding_ordinal, 1u);
 
@@ -1821,14 +1823,31 @@ TEST_F(HostQueueCommandBufferTest,
       /*semaphores=*/&command_buffer_signal_ptr,
       /*payload_values=*/&command_buffer_signal_value,
   };
-  iree_hal_buffer_binding_t binding = {
-      /*buffer=*/output_buffer.get(),
-      /*offset=*/0,
-      /*length=*/IREE_HAL_WHOLE_BUFFER,
+  iree_hal_buffer_binding_t bindings[4] = {
+      {
+          /*buffer=*/input_buffer.get(),
+          /*offset=*/0,
+          /*length=*/IREE_HAL_WHOLE_BUFFER,
+      },
+      {
+          /*buffer=*/input_buffer.get(),
+          /*offset=*/0,
+          /*length=*/IREE_HAL_WHOLE_BUFFER,
+      },
+      {
+          /*buffer=*/input_buffer.get(),
+          /*offset=*/0,
+          /*length=*/IREE_HAL_WHOLE_BUFFER,
+      },
+      {
+          /*buffer=*/output_buffer.get(),
+          /*offset=*/0,
+          /*length=*/IREE_HAL_WHOLE_BUFFER,
+      },
   };
   const iree_hal_buffer_binding_table_t binding_table = {
-      /*count=*/1,
-      /*bindings=*/&binding,
+      /*count=*/IREE_ARRAYSIZE(bindings),
+      /*bindings=*/bindings,
   };
   IREE_ASSERT_OK(iree_hal_device_queue_execute(
       test_device.base_device(), IREE_HAL_QUEUE_AFFINITY_ANY,
