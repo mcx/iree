@@ -1576,8 +1576,6 @@ TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
       iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
   ASSERT_NE(program->first_block, nullptr);
   EXPECT_EQ(program->max_block_kernarg_length, 0u);
-  EXPECT_FALSE(iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
-      program->first_block));
   const iree_hal_amdgpu_command_buffer_command_header_t* command =
       iree_hal_amdgpu_command_buffer_block_commands_const(program->first_block);
   ASSERT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
@@ -1757,23 +1755,13 @@ TEST_F(HostQueueCommandBufferTest,
       iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
   ASSERT_NE(program->first_block, nullptr);
   EXPECT_GT(program->max_block_kernarg_length, 0u);
-  EXPECT_TRUE(iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
-      program->first_block));
-  const iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t
-      dynamic_binding_slots =
-          iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
-              command_buffer, program->first_block);
-  ASSERT_EQ(dynamic_binding_slots.count, 1u);
-  EXPECT_EQ(dynamic_binding_slots.values[0], 3u);
   ASSERT_EQ(program->first_block->binding_source_count, 1u);
   const iree_hal_amdgpu_command_buffer_binding_source_t* binding_source =
       iree_hal_amdgpu_command_buffer_block_binding_sources_const(
           program->first_block);
   EXPECT_EQ(binding_source->flags,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC);
-  // Dynamic binding-source records index the dense resolved pointer table. The
-  // sidecar above maps ordinal 0 back to queue_execute binding table slot 3.
-  EXPECT_EQ(binding_source->slot, 0u);
+  EXPECT_EQ(binding_source->slot, 3u);
   EXPECT_EQ(binding_source->target_binding_ordinal, 1u);
 
   const iree_hal_amdgpu_command_buffer_command_header_t* command =
@@ -1867,8 +1855,7 @@ TEST_F(HostQueueCommandBufferTest,
   iree_hal_executable_cache_release(executable_cache);
 }
 
-TEST_F(HostQueueCommandBufferTest,
-       DynamicDispatchUsesDenseBindingPointerTable) {
+TEST_F(HostQueueCommandBufferTest, DynamicDispatchUsesBindingTableSlots) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);
   options.preallocate_pools = 0;
@@ -1931,26 +1918,17 @@ TEST_F(HostQueueCommandBufferTest,
   const iree_hal_amdgpu_aql_program_t* program =
       iree_hal_amdgpu_aql_command_buffer_program(command_buffer);
   ASSERT_NE(program->first_block, nullptr);
-  EXPECT_TRUE(iree_hal_amdgpu_command_buffer_block_has_dynamic_binding_slots(
-      program->first_block));
-  const iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t
-      dynamic_binding_slots =
-          iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
-              command_buffer, program->first_block);
-  ASSERT_EQ(dynamic_binding_slots.count, 2u);
-  EXPECT_EQ(dynamic_binding_slots.values[0], 1u);
-  EXPECT_EQ(dynamic_binding_slots.values[1], 3u);
   ASSERT_EQ(program->first_block->binding_source_count, 2u);
   const iree_hal_amdgpu_command_buffer_binding_source_t* binding_sources =
       iree_hal_amdgpu_command_buffer_block_binding_sources_const(
           program->first_block);
   EXPECT_EQ(binding_sources[0].flags,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC);
-  EXPECT_EQ(binding_sources[0].slot, 0u);
+  EXPECT_EQ(binding_sources[0].slot, 1u);
   EXPECT_EQ(binding_sources[0].target_binding_ordinal, 0u);
   EXPECT_EQ(binding_sources[1].flags,
             IREE_HAL_AMDGPU_COMMAND_BUFFER_BINDING_SOURCE_FLAG_DYNAMIC);
-  EXPECT_EQ(binding_sources[1].slot, 1u);
+  EXPECT_EQ(binding_sources[1].slot, 3u);
   EXPECT_EQ(binding_sources[1].target_binding_ordinal, 1u);
 
   const iree_hal_amdgpu_command_buffer_command_header_t* command =

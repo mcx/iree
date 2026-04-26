@@ -149,7 +149,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer(
   bool ready = false;
   iree_status_t status = iree_hal_amdgpu_host_queue_submit_command_buffer_block(
       queue, resolution, signal_semaphore_list, command_buffer, binding_table,
-      program->first_block, inout_binding_resource_set,
+      /*binding_ptrs=*/NULL, program->first_block, inout_binding_resource_set,
       (iree_hal_amdgpu_reclaim_action_t){0}, &command_buffer_resource,
       /*operation_resource_count=*/1,
       IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_RETAIN_RESOURCES, &ready);

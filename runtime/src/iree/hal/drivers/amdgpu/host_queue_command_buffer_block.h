@@ -20,7 +20,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
     const iree_hal_amdgpu_wait_resolution_t* resolution,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_command_buffer_t* command_buffer,
-    iree_hal_buffer_binding_table_t binding_table,
+    iree_hal_buffer_binding_table_t binding_table, const uint64_t* binding_ptrs,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     iree_hal_resource_set_t** inout_binding_resource_set,
     iree_hal_amdgpu_reclaim_action_t pre_signal_action,
@@ -28,6 +28,12 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
     iree_host_size_t operation_resource_count,
     iree_hal_amdgpu_host_queue_submission_flags_t submission_flags,
     bool* out_ready);
+
+// Resolves queue_execute binding table entries into raw device base pointers
+// indexed by their original binding table slot.
+iree_status_t iree_hal_amdgpu_host_queue_resolve_command_buffer_binding_ptrs(
+    iree_hal_command_buffer_t* command_buffer,
+    iree_hal_buffer_binding_table_t binding_table, uint64_t* out_binding_ptrs);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -76,16 +76,6 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t {
   } workgroup;
 } iree_hal_amdgpu_aql_command_buffer_dispatch_summary_t;
 
-// Dynamic queue_execute binding slots used by one finalized block.
-typedef struct iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t {
-  // Queue_execute binding table slots resolved into the dense raw pointer table
-  // before block replay. Dynamic binding-source records index this array by
-  // dense ordinal, not by original queue_execute binding slot.
-  const uint32_t* values;
-  // Number of entries in |values|.
-  uint16_t count;
-} iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t;
-
 // Returns the immutable program produced by end().
 const iree_hal_amdgpu_aql_program_t* iree_hal_amdgpu_aql_command_buffer_program(
     iree_hal_command_buffer_t* command_buffer);
@@ -106,13 +96,6 @@ iree_hal_amdgpu_aql_command_buffer_dispatch_summaries(
     iree_hal_command_buffer_t* command_buffer,
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     uint32_t* out_count);
-
-// Returns dynamic queue_execute binding slots used by dispatch kernarg
-// formation in |block|. Empty when |block| has no dynamic binding slot sidecar.
-iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots_t
-iree_hal_amdgpu_aql_command_buffer_dynamic_binding_slots(
-    iree_hal_command_buffer_t* command_buffer,
-    const iree_hal_amdgpu_command_buffer_block_header_t* block);
 
 // Returns a direct buffer recorded in the command-buffer static binding table.
 iree_hal_buffer_t* iree_hal_amdgpu_aql_command_buffer_static_buffer(

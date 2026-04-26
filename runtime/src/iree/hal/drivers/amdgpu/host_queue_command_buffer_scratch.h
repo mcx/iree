@@ -9,8 +9,8 @@
 
 #include "iree/base/api.h"
 
-// Dense command-buffer dynamic binding slots cached as raw device pointers
-// under submission_mutex while replaying an AQL command buffer. Larger blocks
+// Queue_execute binding table entries cached as raw device pointers under
+// submission_mutex while replaying an AQL command buffer. Larger binding tables
 // use temporary arena storage for the current submission.
 #define IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_BINDING_SCRATCH_CAPACITY 4096u
 
@@ -23,7 +23,7 @@
 typedef struct iree_hal_amdgpu_host_queue_command_buffer_scratch_t {
   // Resolved queue_execute binding-table device pointers.
   struct {
-    // Raw device pointers indexed by dynamic binding sidecar ordinal.
+    // Raw device pointers indexed by queue_execute binding table slot.
     uint64_t ptrs
         [IREE_HAL_AMDGPU_HOST_QUEUE_COMMAND_BUFFER_BINDING_SCRATCH_CAPACITY];
   } bindings;

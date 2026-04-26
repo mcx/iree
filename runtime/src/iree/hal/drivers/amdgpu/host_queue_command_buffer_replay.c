@@ -31,8 +31,10 @@ typedef struct iree_hal_amdgpu_command_buffer_replay_t {
   iree_hal_command_buffer_t* command_buffer;
   // Final user-visible signal semaphore list retained for the replay lifetime.
   iree_hal_semaphore_list_t signal_semaphore_list;
-  // Dynamic binding table snapshot used after queue_execute returns.
+  // Binding table snapshot used after queue_execute returns.
   iree_hal_buffer_binding_table_t binding_table;
+  // Resolved binding table base pointers indexed by original binding slot.
+  const uint64_t* binding_ptrs;
   // Resource set retaining binding-table buffers for the replay lifetime.
   iree_hal_resource_set_t* binding_resource_set;
   // Immutable recorded AQL program borrowed from |command_buffer|.
@@ -91,6 +93,7 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_create(
   iree_host_size_t semaphore_offset = 0;
   iree_host_size_t payload_offset = 0;
   iree_host_size_t binding_offset = 0;
+  iree_host_size_t binding_ptr_offset = 0;
   iree_host_size_t total_size = 0;
   IREE_RETURN_IF_ERROR(IREE_STRUCT_LAYOUT(
       sizeof(iree_hal_amdgpu_command_buffer_replay_t), &total_size,
@@ -98,7 +101,9 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_create(
                                 &semaphore_offset),
       IREE_STRUCT_FIELD_ALIGNED(signal_count, uint64_t, 1, &payload_offset),
       IREE_STRUCT_FIELD_ALIGNED(binding_count, iree_hal_buffer_binding_t, 1,
-                                &binding_offset)));
+                                &binding_offset),
+      IREE_STRUCT_FIELD_ALIGNED(binding_count, uint64_t, 1,
+                                &binding_ptr_offset)));
 
   iree_hal_amdgpu_command_buffer_replay_t* replay = NULL;
   IREE_RETURN_IF_ERROR(iree_allocator_malloc(queue->host_allocator, total_size,
@@ -138,6 +143,15 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_create(
     replay->binding_table.bindings = binding_storage;
     memcpy(binding_storage, binding_table.bindings,
            binding_count * sizeof(*binding_table.bindings));
+    uint64_t* binding_ptrs = (uint64_t*)(storage + binding_ptr_offset);
+    iree_status_t status =
+        iree_hal_amdgpu_host_queue_resolve_command_buffer_binding_ptrs(
+            command_buffer, replay->binding_table, binding_ptrs);
+    if (!iree_status_is_ok(status)) {
+      iree_hal_resource_release(&replay->resource);
+      return status;
+    }
+    replay->binding_ptrs = binding_ptrs;
   }
 
   *out_replay = replay;
@@ -311,8 +325,8 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
       bool ready = false;
       status = iree_hal_amdgpu_host_queue_submit_command_buffer_block(
           replay->queue, current_resolution, replay->signal_semaphore_list,
-          replay->command_buffer, replay->binding_table, replay->current_block,
-          /*inout_binding_resource_set=*/NULL,
+          replay->command_buffer, replay->binding_table, replay->binding_ptrs,
+          replay->current_block, /*inout_binding_resource_set=*/NULL,
           (iree_hal_amdgpu_reclaim_action_t){0}, &replay_resource,
           /*operation_resource_count=*/1,
           IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_RETAIN_RESOURCES, &ready);
@@ -336,8 +350,8 @@ static iree_status_t iree_hal_amdgpu_command_buffer_replay_resume_under_lock(
     bool ready = false;
     status = iree_hal_amdgpu_host_queue_submit_command_buffer_block(
         replay->queue, current_resolution, iree_hal_semaphore_list_empty(),
-        replay->command_buffer, replay->binding_table, replay->current_block,
-        /*inout_binding_resource_set=*/NULL,
+        replay->command_buffer, replay->binding_table, replay->binding_ptrs,
+        replay->current_block, /*inout_binding_resource_set=*/NULL,
         (iree_hal_amdgpu_reclaim_action_t){0}, &replay_resource,
         /*operation_resource_count=*/1,
         IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_RETAIN_RESOURCES, &ready);
