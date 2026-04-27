@@ -126,6 +126,7 @@ iree_cc_test(
     "graph_command_buffer_test.cc"
   DEPS
     ::hip
+    iree::async
     iree::async::util::proactor_pool
     iree::base
     iree::base::threading
