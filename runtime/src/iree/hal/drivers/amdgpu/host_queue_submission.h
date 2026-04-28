@@ -68,6 +68,8 @@ typedef struct iree_hal_amdgpu_host_queue_kernel_submission_t {
   uint64_t first_packet_id;
   // Kernarg ring write position to reclaim after this submission completes.
   uint64_t kernarg_write_position;
+  // Queue upload ring write position to reclaim after completion.
+  uint64_t queue_upload_write_position;
   // Number of AQL packets reserved starting at |first_packet_id|.
   uint32_t packet_count;
   // Number of valid entries in |reclaim_resources|.

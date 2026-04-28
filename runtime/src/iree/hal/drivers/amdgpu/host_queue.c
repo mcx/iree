@@ -89,6 +89,23 @@ static void iree_hal_amdgpu_host_queue_reclaim_retired(
       queue, queue_device_reservation);
 }
 
+static void iree_hal_amdgpu_host_queue_reclaim_queue_owned_positions(
+    iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_amdgpu_reclaim_positions_t reclaim_positions) {
+  if (reclaim_positions.kernarg_write_position > 0) {
+    iree_hal_amdgpu_kernarg_ring_reclaim(
+        &queue->kernarg_ring, reclaim_positions.kernarg_write_position);
+  }
+  if (reclaim_positions.queue_upload_write_position > 0) {
+    IREE_ASSERT(queue->queue_upload_ring.base,
+                "queue upload bytes retired without an initialized upload "
+                "ring");
+    iree_hal_amdgpu_queue_upload_ring_reclaim(
+        &queue->queue_upload_ring,
+        reclaim_positions.queue_upload_write_position);
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Initialization / deinitialization
 //===----------------------------------------------------------------------===//
@@ -141,20 +158,20 @@ static iree_host_size_t iree_hal_amdgpu_host_queue_drain_completions(
       &queue->error_status, iree_memory_order_acquire);
   const uint64_t previous_epoch = (uint64_t)iree_atomic_load(
       &queue->notification_ring.epoch.last_drained, iree_memory_order_relaxed);
-  uint64_t kernarg_reclaim_position = 0;
+  iree_hal_amdgpu_reclaim_positions_t reclaim_positions = {0};
   iree_host_size_t count = 0;
   if (IREE_UNLIKELY(error)) {
-    count = iree_hal_amdgpu_notification_ring_fail_all(
-        &queue->notification_ring, error, &kernarg_reclaim_position);
+    count = iree_hal_amdgpu_notification_ring_fail_all_reclaim_positions(
+        &queue->notification_ring, error, &reclaim_positions);
     iree_hal_amdgpu_host_queue_clear_profile_events(queue);
     iree_async_frontier_tracker_fail_axis(
         queue->frontier_tracker, queue->axis,
         iree_status_from_code(iree_status_code(error)));
   } else {
-    count = iree_hal_amdgpu_notification_ring_drain(
+    count = iree_hal_amdgpu_notification_ring_drain_reclaim_positions(
         &queue->notification_ring,
         /*fallback_frontier=*/NULL, iree_hal_amdgpu_host_queue_reclaim_retired,
-        queue, &kernarg_reclaim_position);
+        queue, &reclaim_positions);
     const uint64_t current_epoch =
         (uint64_t)iree_atomic_load(&queue->notification_ring.epoch.last_drained,
                                    iree_memory_order_acquire);
@@ -163,10 +180,8 @@ static iree_host_size_t iree_hal_amdgpu_host_queue_drain_completions(
                                           current_epoch);
     }
   }
-  if (kernarg_reclaim_position > 0) {
-    iree_hal_amdgpu_kernarg_ring_reclaim(&queue->kernarg_ring,
-                                         kernarg_reclaim_position);
-  }
+  iree_hal_amdgpu_host_queue_reclaim_queue_owned_positions(queue,
+                                                           reclaim_positions);
   iree_hal_amdgpu_host_queue_run_post_drain_actions(queue);
   return count;
 }
@@ -539,22 +554,20 @@ void iree_hal_amdgpu_host_queue_deinitialize(
   // error. Otherwise drain normally (entries completed but not yet processed).
   iree_status_t error = (iree_status_t)iree_atomic_load(
       &queue->error_status, iree_memory_order_acquire);
-  uint64_t kernarg_reclaim_position = 0;
+  iree_hal_amdgpu_reclaim_positions_t reclaim_positions = {0};
   if (!iree_status_is_ok(error)) {
-    iree_hal_amdgpu_notification_ring_fail_all(&queue->notification_ring, error,
-                                               &kernarg_reclaim_position);
+    iree_hal_amdgpu_notification_ring_fail_all_reclaim_positions(
+        &queue->notification_ring, error, &reclaim_positions);
     iree_hal_amdgpu_host_queue_clear_profile_events(queue);
     iree_status_free(error);
   } else {
-    iree_hal_amdgpu_notification_ring_drain(
+    iree_hal_amdgpu_notification_ring_drain_reclaim_positions(
         &queue->notification_ring,
         /*fallback_frontier=*/NULL, iree_hal_amdgpu_host_queue_reclaim_retired,
-        queue, &kernarg_reclaim_position);
+        queue, &reclaim_positions);
   }
-  if (kernarg_reclaim_position > 0) {
-    iree_hal_amdgpu_kernarg_ring_reclaim(&queue->kernarg_ring,
-                                         kernarg_reclaim_position);
-  }
+  iree_hal_amdgpu_host_queue_reclaim_queue_owned_positions(queue,
+                                                           reclaim_positions);
   iree_hal_amdgpu_host_queue_run_post_drain_actions(queue);
 
   // Deregister from the epoch signal table before destroying the notification
@@ -576,6 +589,11 @@ void iree_hal_amdgpu_host_queue_deinitialize(
   }
 
   iree_hal_amdgpu_notification_ring_deinitialize(&queue->notification_ring);
+
+  if (queue->queue_upload_ring.base) {
+    iree_hal_amdgpu_queue_upload_ring_deinitialize(queue->libhsa,
+                                                   &queue->queue_upload_ring);
+  }
 
   iree_hal_amdgpu_kernarg_ring_deinitialize(queue->libhsa,
                                             &queue->kernarg_ring);

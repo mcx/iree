@@ -151,8 +151,10 @@ static void iree_hal_amdgpu_host_queue_emit_noop_packets(
 static void iree_hal_amdgpu_host_queue_emit_reclaim_noop_packets(
     iree_hal_amdgpu_host_queue_t* queue,
     iree_hal_amdgpu_reclaim_entry_t* reclaim_entry, uint64_t first_packet_id,
-    uint32_t packet_count, uint64_t kernarg_write_position) {
+    uint32_t packet_count, uint64_t kernarg_write_position,
+    uint64_t queue_upload_write_position) {
   reclaim_entry->kernarg_write_position = kernarg_write_position;
+  reclaim_entry->queue_upload_write_position = queue_upload_write_position;
   reclaim_entry->count = 0;
   iree_hal_amdgpu_notification_ring_advance_epoch(&queue->notification_ring);
   for (uint32_t i = 0; i < packet_count; ++i) {
@@ -547,7 +549,8 @@ void iree_hal_amdgpu_host_queue_fail_kernel_submission(
     iree_hal_amdgpu_host_queue_kernel_submission_t* submission) {
   iree_hal_amdgpu_host_queue_emit_reclaim_noop_packets(
       queue, submission->reclaim_entry, submission->first_packet_id,
-      submission->packet_count, submission->kernarg_write_position);
+      submission->packet_count, submission->kernarg_write_position,
+      submission->queue_upload_write_position);
   memset(submission, 0, sizeof(*submission));
 }
 
@@ -855,6 +858,8 @@ uint64_t iree_hal_amdgpu_host_queue_finish_kernel_submission(
   }
   submission->reclaim_entry->kernarg_write_position =
       submission->kernarg_write_position;
+  submission->reclaim_entry->queue_upload_write_position =
+      submission->queue_upload_write_position;
   submission->reclaim_entry->count = submission->reclaim_resource_count;
   submission->reclaim_entry->pre_signal_action = submission->pre_signal_action;
   iree_hal_amdgpu_host_queue_merge_barrier_axes(queue, resolution);

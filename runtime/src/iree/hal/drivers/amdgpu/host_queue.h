@@ -24,6 +24,7 @@
 #include "iree/hal/drivers/amdgpu/util/libhsa.h"
 #include "iree/hal/drivers/amdgpu/util/notification_ring.h"
 #include "iree/hal/drivers/amdgpu/util/pm4_capabilities.h"
+#include "iree/hal/drivers/amdgpu/util/queue_upload_ring.h"
 #include "iree/hal/drivers/amdgpu/virtual_queue.h"
 #include "iree/hal/pool.h"
 #include "iree/hal/profile_schema.h"
@@ -171,6 +172,10 @@ typedef struct iree_hal_amdgpu_host_queue_t {
 
   // Per-queue kernarg bump allocator backed by HSA kernarg-init memory.
   iree_hal_amdgpu_kernarg_ring_t kernarg_ring;
+
+  // Optional per-queue upload ring for device-visible control records.
+  // Initialized when a submission path first needs device-side fixup inputs.
+  iree_hal_amdgpu_queue_upload_ring_t queue_upload_ring;
 
   // Optional per-AQL-slot PM4 IB buffer used by PM4-backed wait, transfer, and
   // profiling snippets. This is not an independent scheduling ring: each slot
