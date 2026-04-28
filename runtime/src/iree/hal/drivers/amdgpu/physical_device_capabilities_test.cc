@@ -44,6 +44,16 @@ static iree_hal_amdgpu_gfxip_version_t GfxIp(uint16_t major, uint16_t minor,
   return version;
 }
 
+static hsa_amd_memory_pool_link_info_t LinkInfo(
+    hsa_amd_link_info_type_t link_type) {
+  hsa_amd_memory_pool_link_info_t link_info = {};
+  link_info.link_type = link_type;
+  link_info.atomic_support_32bit = true;
+  link_info.atomic_support_64bit = true;
+  link_info.coherent_support = true;
+  return link_info;
+}
+
 class PhysicalDeviceCapabilitiesTest : public ::testing::Test {
  protected:
   iree_hal_amdgpu_cpu_visible_device_coarse_memory_selection_t
@@ -70,6 +80,19 @@ class PhysicalDeviceCapabilitiesTest : public ::testing::Test {
     selection.svm.direct_host_access = 0;
     selection.device_local.fine_memory_pool = MemoryPool(30);
     selection.device_local.coarse_cpu_visible_memory = nullptr;
+    return selection;
+  }
+
+  iree_hal_amdgpu_physical_topology_edge_selection_t MakeTopologyEdgeSelection(
+      const hsa_amd_memory_pool_link_info_t* link_hops,
+      iree_host_size_t link_hop_count) {
+    iree_hal_amdgpu_physical_topology_edge_selection_t selection = {};
+    selection.memory_access.coarse =
+        HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT;
+    selection.memory_access.fine =
+        HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT;
+    selection.link.hops = link_hops;
+    selection.link.count = link_hop_count;
     return selection;
   }
 
@@ -223,6 +246,174 @@ TEST_F(PhysicalDeviceCapabilitiesTest,
 
   EXPECT_FALSE(iree_hal_amdgpu_memory_pool_access_is_valid(
       (hsa_amd_memory_pool_access_t)99));
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest, SelectsXgmiPhysicalTopologyEdge) {
+  std::array<hsa_amd_memory_pool_link_info_t, 1> link_hops = {
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_XGMI)};
+  link_hops[0].numa_distance = 16;
+
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(link_hops.data(), link_hops.size());
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  EXPECT_EQ(edge.memory_access.coarse,
+            HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT);
+  EXPECT_EQ(edge.memory_access.fine,
+            HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT);
+  EXPECT_TRUE(edge.memory_access.coarse_accessible);
+  EXPECT_TRUE(edge.memory_access.fine_accessible);
+  EXPECT_TRUE(edge.coherency.all_hops_coherent);
+  EXPECT_TRUE(edge.atomics.all_hops_32bit);
+  EXPECT_TRUE(edge.atomics.all_hops_64bit);
+  EXPECT_TRUE(iree_any_bit_set(
+      edge.link.flags, IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_XGMI));
+  EXPECT_EQ(edge.link.link_class, IREE_HAL_TOPOLOGY_LINK_CLASS_NVLINK_IF);
+  EXPECT_EQ(edge.link.copy_cost, 3);
+  EXPECT_EQ(edge.link.latency_class, 3);
+  EXPECT_EQ(edge.link.numa_distance, 3);
+  EXPECT_TRUE(
+      iree_all_bits_set(edge.capabilities.guaranteed,
+                        IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY |
+                            IREE_HAL_TOPOLOGY_CAPABILITY_PEER_COHERENT |
+                            IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_DEVICE |
+                            IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM));
+  EXPECT_EQ(edge.capabilities.required, IREE_HAL_TOPOLOGY_CAPABILITY_NONE);
+  EXPECT_EQ(edge.modes.noncoherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE);
+  EXPECT_EQ(edge.modes.coherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE);
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       SelectsWorstMultiHopPhysicalTopologyEdge) {
+  std::array<hsa_amd_memory_pool_link_info_t, 2> link_hops = {
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_XGMI),
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT)};
+  link_hops[0].numa_distance = 12;
+  link_hops[1].numa_distance = 28;
+  link_hops[1].atomic_support_32bit = false;
+  link_hops[1].coherent_support = false;
+
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(link_hops.data(), link_hops.size());
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  EXPECT_FALSE(edge.coherency.all_hops_coherent);
+  EXPECT_FALSE(edge.atomics.all_hops_32bit);
+  EXPECT_TRUE(edge.atomics.all_hops_64bit);
+  EXPECT_TRUE(iree_all_bits_set(
+      edge.link.flags,
+      IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_XGMI |
+          IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_HYPERTRANSPORT));
+  EXPECT_EQ(edge.link.link_class, IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_CROSS_ROOT);
+  EXPECT_EQ(edge.link.copy_cost, 9);
+  EXPECT_EQ(edge.link.latency_class, 9);
+  EXPECT_EQ(edge.link.numa_distance, 9);
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       SelectsPciePhysicalTopologyEdgeWithoutSystemAtomics) {
+  std::array<hsa_amd_memory_pool_link_info_t, 1> link_hops = {
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_PCIE)};
+  link_hops[0].atomic_support_64bit = false;
+  link_hops[0].coherent_support = false;
+
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(link_hops.data(), link_hops.size());
+  selection.memory_access.fine = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  EXPECT_TRUE(edge.memory_access.coarse_accessible);
+  EXPECT_FALSE(edge.memory_access.fine_accessible);
+  EXPECT_FALSE(edge.coherency.all_hops_coherent);
+  EXPECT_TRUE(edge.atomics.all_hops_32bit);
+  EXPECT_FALSE(edge.atomics.all_hops_64bit);
+  EXPECT_TRUE(iree_any_bit_set(
+      edge.link.flags, IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_PCIE));
+  EXPECT_EQ(edge.link.link_class, IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_SAME_ROOT);
+  EXPECT_EQ(edge.link.copy_cost, 7);
+  EXPECT_EQ(edge.link.latency_class, 7);
+  EXPECT_TRUE(iree_any_bit_set(edge.capabilities.guaranteed,
+                               IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY));
+  EXPECT_FALSE(iree_any_bit_set(edge.capabilities.guaranteed,
+                                IREE_HAL_TOPOLOGY_CAPABILITY_PEER_COHERENT));
+  EXPECT_TRUE(iree_any_bit_set(edge.capabilities.guaranteed,
+                               IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_DEVICE));
+  EXPECT_FALSE(iree_any_bit_set(edge.capabilities.guaranteed,
+                                IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM));
+  EXPECT_EQ(edge.modes.noncoherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE);
+  EXPECT_EQ(edge.modes.coherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY);
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       GrantablePhysicalTopologyEdgeRequiresGrant) {
+  std::array<hsa_amd_memory_pool_link_info_t, 1> link_hops = {
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_PCIE)};
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(link_hops.data(), link_hops.size());
+  selection.memory_access.coarse =
+      HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT;
+  selection.memory_access.fine =
+      HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT;
+
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  EXPECT_TRUE(edge.memory_access.coarse_accessible);
+  EXPECT_TRUE(edge.memory_access.fine_accessible);
+  EXPECT_TRUE(iree_any_bit_set(edge.capabilities.guaranteed,
+                               IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY));
+  EXPECT_TRUE(iree_any_bit_set(
+      edge.capabilities.required,
+      IREE_HAL_TOPOLOGY_CAPABILITY_PEER_ACCESS_REQUIRES_GRANT));
+  EXPECT_EQ(edge.modes.noncoherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY);
+  EXPECT_EQ(edge.modes.coherent_read, IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY);
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       NeverAllowedPhysicalTopologyEdgeIsHostStaged) {
+  std::array<hsa_amd_memory_pool_link_info_t, 1> link_hops = {
+      LinkInfo(HSA_AMD_LINK_INFO_TYPE_XGMI)};
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(link_hops.data(), link_hops.size());
+  selection.memory_access.coarse = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  selection.memory_access.fine = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_ASSERT_OK(
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  EXPECT_FALSE(edge.memory_access.coarse_accessible);
+  EXPECT_FALSE(edge.memory_access.fine_accessible);
+  EXPECT_FALSE(edge.coherency.all_hops_coherent);
+  EXPECT_FALSE(edge.atomics.all_hops_32bit);
+  EXPECT_FALSE(edge.atomics.all_hops_64bit);
+  EXPECT_EQ(edge.link.link_class, IREE_HAL_TOPOLOGY_LINK_CLASS_HOST_STAGED);
+  EXPECT_EQ(edge.link.copy_cost, 13);
+  EXPECT_EQ(edge.link.latency_class, 11);
+  EXPECT_EQ(edge.capabilities.guaranteed, IREE_HAL_TOPOLOGY_CAPABILITY_NONE);
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       InvalidPhysicalTopologyEdgeInputsFailLoud) {
+  iree_hal_amdgpu_physical_topology_edge_selection_t selection =
+      MakeTopologyEdgeSelection(nullptr, 1);
+  iree_hal_amdgpu_physical_topology_edge_t edge;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
+
+  selection = MakeTopologyEdgeSelection(nullptr, 0);
+  selection.memory_access.coarse = (hsa_amd_memory_pool_access_t)99;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_OUT_OF_RANGE,
+      iree_hal_amdgpu_select_physical_topology_edge(&selection, &edge));
 }
 
 TEST_F(PhysicalDeviceCapabilitiesTest, CpuAccessInputsAreRequiredWhenNeeded) {

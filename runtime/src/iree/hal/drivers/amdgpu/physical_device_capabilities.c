@@ -112,6 +112,229 @@ iree_hal_amdgpu_memory_pool_access_topology_capabilities(
   return IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
 }
 
+// Maps an HSA link type to a HAL topology link class.
+//
+// For multi-hop links, callers should take the worst/highest class.
+static iree_hal_topology_link_class_t iree_hal_amdgpu_link_type_to_link_class(
+    hsa_amd_link_info_type_t link_type) {
+  switch (link_type) {
+    case HSA_AMD_LINK_INFO_TYPE_XGMI:
+      return IREE_HAL_TOPOLOGY_LINK_CLASS_NVLINK_IF;
+    case HSA_AMD_LINK_INFO_TYPE_PCIE:
+      return IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_SAME_ROOT;
+    case HSA_AMD_LINK_INFO_TYPE_QPI:
+    case HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT:
+      // Cross-socket interconnects: treat as cross-root PCIe.
+      return IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_CROSS_ROOT;
+    case HSA_AMD_LINK_INFO_TYPE_INFINBAND:
+      return IREE_HAL_TOPOLOGY_LINK_CLASS_FABRIC;
+    default:
+      return IREE_HAL_TOPOLOGY_LINK_CLASS_OTHER;
+  }
+}
+
+static iree_hal_amdgpu_physical_topology_link_flags_t
+iree_hal_amdgpu_link_type_to_physical_topology_link_flags(
+    hsa_amd_link_info_type_t link_type) {
+  switch (link_type) {
+    case HSA_AMD_LINK_INFO_TYPE_PCIE:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_PCIE;
+    case HSA_AMD_LINK_INFO_TYPE_XGMI:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_XGMI;
+    case HSA_AMD_LINK_INFO_TYPE_HYPERTRANSPORT:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_HYPERTRANSPORT;
+    case HSA_AMD_LINK_INFO_TYPE_QPI:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_QPI;
+    case HSA_AMD_LINK_INFO_TYPE_INFINBAND:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_INFINIBAND;
+    default:
+      return IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_OTHER;
+  }
+}
+
+static void iree_hal_amdgpu_topology_costs_from_link_class(
+    iree_hal_topology_link_class_t link_class, uint8_t* out_copy_cost,
+    uint8_t* out_latency_class) {
+  switch (link_class) {
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_SAME_DIE:
+      *out_copy_cost = 0;
+      *out_latency_class = 0;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_NVLINK_IF:
+      *out_copy_cost = 3;
+      *out_latency_class = 3;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_SAME_ROOT:
+      *out_copy_cost = 7;
+      *out_latency_class = 7;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_PCIE_CROSS_ROOT:
+      *out_copy_cost = 9;
+      *out_latency_class = 9;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_HOST_STAGED:
+      *out_copy_cost = 13;
+      *out_latency_class = 11;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_FABRIC:
+      *out_copy_cost = 15;
+      *out_latency_class = 14;
+      break;
+    case IREE_HAL_TOPOLOGY_LINK_CLASS_ISOLATED:
+      *out_copy_cost = 15;
+      *out_latency_class = 15;
+      break;
+    default:
+      *out_copy_cost = 11;
+      *out_latency_class = 10;
+      break;
+  }
+}
+
+static uint8_t iree_hal_amdgpu_topology_scale_hsa_numa_distance(
+    uint32_t hsa_numa_distance) {
+  if (hsa_numa_distance == 0) return 0;
+  uint32_t scaled = hsa_numa_distance > 10 ? (hsa_numa_distance - 10) / 2 : 0;
+  return (uint8_t)iree_min(scaled, 15u);
+}
+
+static iree_status_t iree_hal_amdgpu_validate_physical_topology_edge_access(
+    hsa_amd_memory_pool_access_t access, const char* pool_kind) {
+  if (IREE_LIKELY(iree_hal_amdgpu_memory_pool_access_is_valid(access))) {
+    return iree_ok_status();
+  }
+  return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                          "HSA reported unknown %s memory pool access mode %u",
+                          pool_kind, (uint32_t)access);
+}
+
+static void iree_hal_amdgpu_physical_topology_edge_initialize(
+    iree_hal_amdgpu_physical_topology_edge_t* out_edge) {
+  memset(out_edge, 0, sizeof(*out_edge));
+  out_edge->memory_access.coarse = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  out_edge->memory_access.fine = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  out_edge->coherency.all_hops_coherent = 1;
+  out_edge->atomics.all_hops_32bit = 1;
+  out_edge->atomics.all_hops_64bit = 1;
+  out_edge->link.link_class = IREE_HAL_TOPOLOGY_LINK_CLASS_SAME_DIE;
+  out_edge->modes.noncoherent_read = IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+  out_edge->modes.noncoherent_write = IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+  out_edge->modes.coherent_read = IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+  out_edge->modes.coherent_write = IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+}
+
+static iree_hal_topology_capability_t
+iree_hal_amdgpu_physical_topology_guaranteed_capabilities(
+    const iree_hal_amdgpu_physical_topology_edge_t* edge) {
+  iree_hal_topology_capability_t capabilities =
+      IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
+  if (!edge->memory_access.coarse_accessible &&
+      !edge->memory_access.fine_accessible) {
+    return capabilities;
+  }
+  capabilities |= IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY;
+  if (edge->coherency.all_hops_coherent) {
+    capabilities |= IREE_HAL_TOPOLOGY_CAPABILITY_PEER_COHERENT;
+  }
+  if (edge->atomics.all_hops_32bit) {
+    capabilities |= IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_DEVICE;
+  }
+  if (edge->atomics.all_hops_64bit) {
+    capabilities |= IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM;
+  }
+  return capabilities;
+}
+
+static iree_hal_topology_capability_t
+iree_hal_amdgpu_physical_topology_required_capabilities(
+    const iree_hal_amdgpu_physical_topology_edge_t* edge) {
+  iree_hal_topology_capability_t capabilities =
+      IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
+  capabilities |= iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+      edge->memory_access.coarse);
+  capabilities |= iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+      edge->memory_access.fine);
+  return capabilities;
+}
+
+iree_status_t iree_hal_amdgpu_select_physical_topology_edge(
+    const iree_hal_amdgpu_physical_topology_edge_selection_t* selection,
+    iree_hal_amdgpu_physical_topology_edge_t* out_edge) {
+  IREE_ASSERT_ARGUMENT(selection);
+  IREE_ASSERT_ARGUMENT(out_edge);
+  iree_hal_amdgpu_physical_topology_edge_initialize(out_edge);
+
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_validate_physical_topology_edge_access(
+      selection->memory_access.coarse, "coarse"));
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_validate_physical_topology_edge_access(
+      selection->memory_access.fine, "fine"));
+  if (IREE_UNLIKELY(selection->link.count && !selection->link.hops)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "AMDGPU physical topology edge selection requires link hops when "
+        "link count is nonzero");
+  }
+
+  out_edge->memory_access.coarse = selection->memory_access.coarse;
+  out_edge->memory_access.fine = selection->memory_access.fine;
+  out_edge->memory_access.coarse_accessible =
+      selection->memory_access.coarse !=
+      HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+  out_edge->memory_access.fine_accessible =
+      selection->memory_access.fine != HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
+
+  for (iree_host_size_t i = 0; i < selection->link.count; ++i) {
+    const hsa_amd_memory_pool_link_info_t* link_hop = &selection->link.hops[i];
+    iree_hal_topology_link_class_t link_class =
+        iree_hal_amdgpu_link_type_to_link_class(link_hop->link_type);
+    if (link_class > out_edge->link.link_class) {
+      out_edge->link.link_class = link_class;
+    }
+    out_edge->link.flags |=
+        iree_hal_amdgpu_link_type_to_physical_topology_link_flags(
+            link_hop->link_type);
+    uint8_t numa_distance = iree_hal_amdgpu_topology_scale_hsa_numa_distance(
+        link_hop->numa_distance);
+    if (numa_distance > out_edge->link.numa_distance) {
+      out_edge->link.numa_distance = numa_distance;
+    }
+    if (!link_hop->coherent_support) {
+      out_edge->coherency.all_hops_coherent = 0;
+    }
+    if (!link_hop->atomic_support_32bit) {
+      out_edge->atomics.all_hops_32bit = 0;
+    }
+    if (!link_hop->atomic_support_64bit) {
+      out_edge->atomics.all_hops_64bit = 0;
+    }
+  }
+
+  if (!out_edge->memory_access.coarse_accessible &&
+      !out_edge->memory_access.fine_accessible) {
+    out_edge->link.link_class = IREE_HAL_TOPOLOGY_LINK_CLASS_HOST_STAGED;
+    out_edge->coherency.all_hops_coherent = 0;
+    out_edge->atomics.all_hops_32bit = 0;
+    out_edge->atomics.all_hops_64bit = 0;
+  }
+
+  iree_hal_amdgpu_topology_costs_from_link_class(out_edge->link.link_class,
+                                                 &out_edge->link.copy_cost,
+                                                 &out_edge->link.latency_class);
+  out_edge->capabilities.guaranteed =
+      iree_hal_amdgpu_physical_topology_guaranteed_capabilities(out_edge);
+  out_edge->capabilities.required =
+      iree_hal_amdgpu_physical_topology_required_capabilities(out_edge);
+  out_edge->modes.noncoherent_read =
+      iree_hal_amdgpu_memory_pool_access_topology_mode(
+          out_edge->memory_access.coarse);
+  out_edge->modes.noncoherent_write = out_edge->modes.noncoherent_read;
+  out_edge->modes.coherent_read =
+      iree_hal_amdgpu_memory_pool_access_topology_mode(
+          out_edge->memory_access.fine);
+  out_edge->modes.coherent_write = out_edge->modes.coherent_read;
+  return iree_ok_status();
+}
+
 static bool iree_hal_amdgpu_gfxip_is_pre_gfx908(
     iree_hal_amdgpu_gfxip_version_t version) {
   return version.major < 9 ||

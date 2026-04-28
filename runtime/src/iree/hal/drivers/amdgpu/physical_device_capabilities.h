@@ -101,6 +101,112 @@ iree_hal_topology_capability_t
 iree_hal_amdgpu_memory_pool_access_topology_capabilities(
     hsa_amd_memory_pool_access_t access);
 
+typedef enum iree_hal_amdgpu_physical_topology_link_flag_bits_e {
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_NONE = 0u,
+  // At least one HSA-reported hop uses PCIe.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_PCIE = 1u << 0,
+  // At least one HSA-reported hop uses xGMI.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_XGMI = 1u << 1,
+  // At least one HSA-reported hop uses HyperTransport.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_HYPERTRANSPORT = 1u << 2,
+  // At least one HSA-reported hop uses QPI.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_QPI = 1u << 3,
+  // At least one HSA-reported hop uses InfiniBand.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_INFINIBAND = 1u << 4,
+  // At least one HSA-reported hop uses an unknown link type.
+  IREE_HAL_AMDGPU_PHYSICAL_TOPOLOGY_LINK_FLAG_OTHER = 1u << 5,
+} iree_hal_amdgpu_physical_topology_link_flag_bits_t;
+
+typedef uint32_t iree_hal_amdgpu_physical_topology_link_flags_t;
+
+// Physical source->destination topology edge selected from already-queried HSA
+// memory-pool access and link-hop facts.
+typedef struct iree_hal_amdgpu_physical_topology_edge_t {
+  // Source-agent access to the destination memory pools.
+  struct {
+    // Source-agent access to the destination coarse-grained memory pool.
+    hsa_amd_memory_pool_access_t coarse;
+    // Source-agent access to the destination fine-grained memory pool.
+    hsa_amd_memory_pool_access_t fine;
+    // True when |coarse| permits some direct device access.
+    uint32_t coarse_accessible : 1;
+    // True when |fine| permits some direct device access.
+    uint32_t fine_accessible : 1;
+  } memory_access;
+
+  // HSA link-hop facts collapsed into strategy-friendly topology values.
+  struct {
+    // Worst physical link class across HSA-reported link hops.
+    iree_hal_topology_link_class_t link_class;
+    // Conservative copy-cost class derived from |link_class|.
+    uint8_t copy_cost;
+    // Conservative latency class derived from |link_class|.
+    uint8_t latency_class;
+    // Worst normalized NUMA distance reported by HSA link hops.
+    uint8_t numa_distance;
+    // Link flags from iree_hal_amdgpu_physical_topology_link_flag_bits_t.
+    iree_hal_amdgpu_physical_topology_link_flags_t flags;
+  } link;
+
+  // Link coherency facts.
+  struct {
+    // True when every HSA-reported link hop supports coherent transactions.
+    uint32_t all_hops_coherent : 1;
+  } coherency;
+
+  // Link atomic-transaction facts.
+  struct {
+    // True when every HSA-reported link hop supports 32-bit atomics.
+    uint32_t all_hops_32bit : 1;
+    // True when every HSA-reported link hop supports 64-bit atomics.
+    uint32_t all_hops_64bit : 1;
+  } atomics;
+
+  // Generic HAL topology capabilities implied by the physical edge.
+  struct {
+    // Positive capabilities guaranteed by this physical pair.
+    iree_hal_topology_capability_t guaranteed;
+    // Requirement bits imposed by this physical pair.
+    iree_hal_topology_capability_t required;
+  } capabilities;
+
+  // Generic HAL buffer interop modes implied by memory-pool access.
+  struct {
+    // Noncoherent read mode derived from coarse-grained pool access.
+    iree_hal_topology_interop_mode_t noncoherent_read;
+    // Noncoherent write mode derived from coarse-grained pool access.
+    iree_hal_topology_interop_mode_t noncoherent_write;
+    // Coherent read mode derived from fine-grained pool access.
+    iree_hal_topology_interop_mode_t coherent_read;
+    // Coherent write mode derived from fine-grained pool access.
+    iree_hal_topology_interop_mode_t coherent_write;
+  } modes;
+} iree_hal_amdgpu_physical_topology_edge_t;
+
+// Already-queried HSA facts used to select a physical topology edge.
+typedef struct iree_hal_amdgpu_physical_topology_edge_selection_t {
+  // Source-agent access to the destination memory pools.
+  struct {
+    // Source-agent access to the destination coarse-grained memory pool.
+    hsa_amd_memory_pool_access_t coarse;
+    // Source-agent access to the destination fine-grained memory pool.
+    hsa_amd_memory_pool_access_t fine;
+  } memory_access;
+
+  // HSA link-hop facts for the source->destination memory path.
+  struct {
+    // HSA-reported link-hop records.
+    const hsa_amd_memory_pool_link_info_t* hops;
+    // Number of entries in |hops|.
+    iree_host_size_t count;
+  } link;
+} iree_hal_amdgpu_physical_topology_edge_selection_t;
+
+// Selects a physical topology edge from already-queried HSA facts.
+iree_status_t iree_hal_amdgpu_select_physical_topology_edge(
+    const iree_hal_amdgpu_physical_topology_edge_selection_t* selection,
+    iree_hal_amdgpu_physical_topology_edge_t* out_edge);
+
 // Returns true if the gfx IP family permits HDP kernarg publication.
 bool iree_hal_amdgpu_gfxip_allows_hdp_kernarg_publication(
     iree_hal_amdgpu_gfxip_version_t version);
