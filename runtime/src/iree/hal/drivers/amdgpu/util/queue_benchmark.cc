@@ -1871,11 +1871,16 @@ class QueueBenchmark : public benchmark::Fixture {
     uint64_t total_aql_packet_count = 0;
     uint64_t total_block_bytes = 0;
     uint64_t total_used_bytes = 0;
-    uint64_t prepublished_dispatch_count = 0;
-    uint64_t prepublished_kernarg_bytes = 0;
-    uint64_t prepublished_storage_bytes = 0;
-    uint64_t queue_kernarg_dispatch_count = 0;
-    uint64_t queue_kernarg_bytes = 0;
+    struct {
+      uint64_t dispatch_count = 0;
+      uint64_t payload_bytes = 0;
+      uint64_t storage_span_bytes = 0;
+    } prepublished_kernarg;
+    struct {
+      uint64_t dispatch_count = 0;
+      uint64_t payload_bytes = 0;
+      uint64_t reserved_bytes = 0;
+    } queue_kernarg;
     for (const iree_hal_amdgpu_command_buffer_block_header_t* block =
              program->first_block;
          block; block = iree_hal_amdgpu_aql_program_block_next(
@@ -1908,15 +1913,25 @@ class QueueBenchmark : public benchmark::Fixture {
             (uint64_t)dispatch_command->kernarg_length_qwords * 8u;
         if (dispatch_command->kernarg_strategy ==
             IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PREPUBLISHED) {
-          ++prepublished_dispatch_count;
-          prepublished_kernarg_bytes += kernarg_bytes;
+          ++prepublished_kernarg.dispatch_count;
+          prepublished_kernarg.payload_bytes += kernarg_bytes;
           const uint64_t storage_end =
               (uint64_t)dispatch_command->payload_reference + kernarg_bytes;
-          prepublished_storage_bytes =
-              std::max(prepublished_storage_bytes, storage_end);
+          prepublished_kernarg.storage_span_bytes =
+              std::max(prepublished_kernarg.storage_span_bytes, storage_end);
         } else {
-          ++queue_kernarg_dispatch_count;
-          queue_kernarg_bytes += kernarg_bytes;
+          ++queue_kernarg.dispatch_count;
+          queue_kernarg.payload_bytes += kernarg_bytes;
+          uint64_t kernarg_block_count = std::max<uint64_t>(
+              1, (kernarg_bytes + sizeof(iree_hal_amdgpu_kernarg_block_t) - 1) /
+                     sizeof(iree_hal_amdgpu_kernarg_block_t));
+          if (iree_any_bit_set(
+                  dispatch_command->dispatch_flags,
+                  IREE_HAL_AMDGPU_COMMAND_BUFFER_DISPATCH_FLAG_INDIRECT_PARAMETERS)) {
+            ++kernarg_block_count;
+          }
+          queue_kernarg.reserved_bytes +=
+              kernarg_block_count * sizeof(iree_hal_amdgpu_kernarg_block_t);
         }
       }
     }
@@ -1940,15 +1955,17 @@ class QueueBenchmark : public benchmark::Fixture {
     state.counters["max_block_kernarg_bytes"] =
         static_cast<double>(program->max_block_kernarg_length);
     state.counters["prepublished_dispatches_per_sync"] =
-        static_cast<double>(prepublished_dispatch_count);
-    state.counters["prepublished_kernarg_bytes_per_sync"] =
-        static_cast<double>(prepublished_kernarg_bytes);
-    state.counters["prepublished_storage_bytes"] =
-        static_cast<double>(prepublished_storage_bytes);
+        static_cast<double>(prepublished_kernarg.dispatch_count);
+    state.counters["prepublished_kernarg_payload_bytes_per_sync"] =
+        static_cast<double>(prepublished_kernarg.payload_bytes);
+    state.counters["prepublished_storage_span_bytes"] =
+        static_cast<double>(prepublished_kernarg.storage_span_bytes);
     state.counters["queue_kernarg_dispatches_per_sync"] =
-        static_cast<double>(queue_kernarg_dispatch_count);
-    state.counters["queue_kernarg_bytes_per_sync"] =
-        static_cast<double>(queue_kernarg_bytes);
+        static_cast<double>(queue_kernarg.dispatch_count);
+    state.counters["queue_kernarg_payload_bytes_per_sync"] =
+        static_cast<double>(queue_kernarg.payload_bytes);
+    state.counters["queue_kernarg_reserved_bytes_per_sync"] =
+        static_cast<double>(queue_kernarg.reserved_bytes);
     state.counters["queue_submissions_per_sync"] = 1.0;
     iree_hal_amdgpu_benchmark_set_completion_wait_counters(state);
     state.SetItemsProcessed(state.iterations() * operation_count);
