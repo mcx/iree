@@ -87,6 +87,20 @@ typedef struct iree_hal_amdgpu_cpu_visible_device_coarse_memory_selection_t {
 bool iree_hal_amdgpu_cpu_visible_device_coarse_memory_is_available(
     const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t* memory);
 
+// Returns true if |access| is a known HSA memory-pool access mode.
+bool iree_hal_amdgpu_memory_pool_access_is_valid(
+    hsa_amd_memory_pool_access_t access);
+
+// Maps an HSA memory-pool access mode to the safe default topology buffer mode.
+iree_hal_topology_interop_mode_t
+iree_hal_amdgpu_memory_pool_access_topology_mode(
+    hsa_amd_memory_pool_access_t access);
+
+// Maps an HSA memory-pool access mode to additional topology capabilities.
+iree_hal_topology_capability_t
+iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+    hsa_amd_memory_pool_access_t access);
+
 // Returns true if the gfx IP family permits HDP kernarg publication.
 bool iree_hal_amdgpu_gfxip_allows_hdp_kernarg_publication(
     iree_hal_amdgpu_gfxip_version_t version);

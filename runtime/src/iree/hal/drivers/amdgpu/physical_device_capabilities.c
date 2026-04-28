@@ -73,7 +73,7 @@ bool iree_hal_amdgpu_cpu_visible_device_coarse_memory_is_available(
       IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE);
 }
 
-static bool iree_hal_amdgpu_memory_pool_access_is_valid(
+bool iree_hal_amdgpu_memory_pool_access_is_valid(
     hsa_amd_memory_pool_access_t access) {
   switch (access) {
     case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
@@ -83,6 +83,33 @@ static bool iree_hal_amdgpu_memory_pool_access_is_valid(
     default:
       return false;
   }
+}
+
+iree_hal_topology_interop_mode_t
+iree_hal_amdgpu_memory_pool_access_topology_mode(
+    hsa_amd_memory_pool_access_t access) {
+  IREE_ASSERT(iree_hal_amdgpu_memory_pool_access_is_valid(access),
+              "invalid HSA memory-pool access mode");
+  switch (access) {
+    case HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT:
+      return IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE;
+    case HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT:
+      return IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+    case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
+    default:
+      return IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
+  }
+}
+
+iree_hal_topology_capability_t
+iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+    hsa_amd_memory_pool_access_t access) {
+  IREE_ASSERT(iree_hal_amdgpu_memory_pool_access_is_valid(access),
+              "invalid HSA memory-pool access mode");
+  if (access == HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT) {
+    return IREE_HAL_TOPOLOGY_CAPABILITY_PEER_ACCESS_REQUIRES_GRANT;
+  }
+  return IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
 }
 
 static bool iree_hal_amdgpu_gfxip_is_pre_gfx908(

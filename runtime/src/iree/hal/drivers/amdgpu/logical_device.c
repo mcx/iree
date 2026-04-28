@@ -1663,8 +1663,13 @@ typedef struct iree_hal_amdgpu_physical_topology_edge_t {
 } iree_hal_amdgpu_physical_topology_edge_t;
 
 typedef struct iree_hal_amdgpu_topology_edge_aggregate_t {
-  // Conservatively intersected capabilities valid for every physical pair.
-  iree_hal_topology_capability_t physical_capabilities;
+  // Physical capability facts produced by cross-pair aggregation.
+  struct {
+    // Positive capabilities conservatively intersected across every pair.
+    iree_hal_topology_capability_t guaranteed;
+    // Requirement bits unioned across pairs because any pair can constrain use.
+    iree_hal_topology_capability_t required;
+  } physical_capabilities;
   // Worst non-coherent read mode across all physical pairs.
   iree_hal_topology_interop_mode_t noncoherent_read_mode;
   // Worst non-coherent write mode across all physical pairs.
@@ -1749,18 +1754,6 @@ static uint8_t iree_hal_amdgpu_topology_scale_hsa_numa_distance(
   return (uint8_t)iree_min(scaled, 15u);
 }
 
-static bool iree_hal_amdgpu_memory_pool_access_is_valid(
-    hsa_amd_memory_pool_access_t access) {
-  switch (access) {
-    case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
-    case HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT:
-    case HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT:
-      return true;
-    default:
-      return false;
-  }
-}
-
 static iree_status_t iree_hal_amdgpu_validate_memory_pool_access(
     hsa_amd_memory_pool_access_t access, const char* pool_kind) {
   if (IREE_LIKELY(iree_hal_amdgpu_memory_pool_access_is_valid(access))) {
@@ -1771,23 +1764,8 @@ static iree_status_t iree_hal_amdgpu_validate_memory_pool_access(
                           pool_kind, (uint32_t)access);
 }
 
-static iree_hal_topology_interop_mode_t
-iree_hal_amdgpu_topology_mode_from_memory_pool_access(
-    hsa_amd_memory_pool_access_t access,
-    iree_hal_topology_interop_mode_t base_mode) {
-  switch (access) {
-    case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
-      return IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY;
-    case HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT:
-      return IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE;
-    case HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT:
-    default:
-      return base_mode;
-  }
-}
-
 static iree_hal_topology_capability_t
-iree_hal_amdgpu_physical_topology_capabilities(
+iree_hal_amdgpu_physical_topology_guaranteed_capabilities(
     const iree_hal_amdgpu_physical_topology_edge_t* physical_edge) {
   iree_hal_topology_capability_t capabilities =
       IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
@@ -1804,6 +1782,18 @@ iree_hal_amdgpu_physical_topology_capabilities(
   if (physical_edge->all_hops_atomic_64bit) {
     capabilities |= IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM;
   }
+  return capabilities;
+}
+
+static iree_hal_topology_capability_t
+iree_hal_amdgpu_physical_topology_required_capabilities(
+    const iree_hal_amdgpu_physical_topology_edge_t* physical_edge) {
+  iree_hal_topology_capability_t capabilities =
+      IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
+  capabilities |= iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+      physical_edge->coarse_access);
+  capabilities |= iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+      physical_edge->fine_access);
   return capabilities;
 }
 
@@ -1935,13 +1925,15 @@ static void iree_hal_amdgpu_topology_edge_aggregate_initialize(
     iree_hal_amdgpu_topology_edge_aggregate_t* out_aggregate) {
   // Start physical facts at their best value so the aggregate can both upgrade
   // an imprecise base edge and then monotonically worsen with each pair.
-  // Per-pair DISALLOWED_BY_DEFAULT access falls back to the base edge mode in
-  // iree_hal_amdgpu_topology_edge_aggregate_include.
-  out_aggregate->physical_capabilities =
+  // Per-pair DISALLOWED_BY_DEFAULT access remains copy-only until an allocation
+  // policy proves that direct access was explicitly granted.
+  out_aggregate->physical_capabilities.guaranteed =
       IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY |
       IREE_HAL_TOPOLOGY_CAPABILITY_PEER_COHERENT |
       IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_DEVICE |
       IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM;
+  out_aggregate->physical_capabilities.required =
+      IREE_HAL_TOPOLOGY_CAPABILITY_NONE;
   out_aggregate->noncoherent_read_mode = IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE;
   out_aggregate->noncoherent_write_mode = IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE;
   out_aggregate->coherent_read_mode = IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE;
@@ -1953,32 +1945,29 @@ static void iree_hal_amdgpu_topology_edge_aggregate_initialize(
 }
 
 static void iree_hal_amdgpu_topology_edge_aggregate_include(
-    iree_hal_topology_edge_t base_edge,
     const iree_hal_amdgpu_physical_topology_edge_t* physical_edge,
     iree_hal_amdgpu_topology_edge_aggregate_t* aggregate) {
-  aggregate->physical_capabilities &=
-      iree_hal_amdgpu_physical_topology_capabilities(physical_edge);
+  aggregate->physical_capabilities.guaranteed &=
+      iree_hal_amdgpu_physical_topology_guaranteed_capabilities(physical_edge);
+  aggregate->physical_capabilities.required |=
+      iree_hal_amdgpu_physical_topology_required_capabilities(physical_edge);
 
-  aggregate->noncoherent_read_mode = iree_max(
-      aggregate->noncoherent_read_mode,
-      iree_hal_amdgpu_topology_mode_from_memory_pool_access(
-          physical_edge->coarse_access,
-          iree_hal_topology_edge_buffer_read_mode_noncoherent(base_edge.lo)));
-  aggregate->noncoherent_write_mode = iree_max(
-      aggregate->noncoherent_write_mode,
-      iree_hal_amdgpu_topology_mode_from_memory_pool_access(
-          physical_edge->coarse_access,
-          iree_hal_topology_edge_buffer_write_mode_noncoherent(base_edge.lo)));
-  aggregate->coherent_read_mode = iree_max(
-      aggregate->coherent_read_mode,
-      iree_hal_amdgpu_topology_mode_from_memory_pool_access(
-          physical_edge->fine_access,
-          iree_hal_topology_edge_buffer_read_mode_coherent(base_edge.lo)));
-  aggregate->coherent_write_mode = iree_max(
-      aggregate->coherent_write_mode,
-      iree_hal_amdgpu_topology_mode_from_memory_pool_access(
-          physical_edge->fine_access,
-          iree_hal_topology_edge_buffer_write_mode_coherent(base_edge.lo)));
+  aggregate->noncoherent_read_mode =
+      iree_max(aggregate->noncoherent_read_mode,
+               iree_hal_amdgpu_memory_pool_access_topology_mode(
+                   physical_edge->coarse_access));
+  aggregate->noncoherent_write_mode =
+      iree_max(aggregate->noncoherent_write_mode,
+               iree_hal_amdgpu_memory_pool_access_topology_mode(
+                   physical_edge->coarse_access));
+  aggregate->coherent_read_mode =
+      iree_max(aggregate->coherent_read_mode,
+               iree_hal_amdgpu_memory_pool_access_topology_mode(
+                   physical_edge->fine_access));
+  aggregate->coherent_write_mode =
+      iree_max(aggregate->coherent_write_mode,
+               iree_hal_amdgpu_memory_pool_access_topology_mode(
+                   physical_edge->fine_access));
 
   if (physical_edge->link_class > aggregate->link_class) {
     aggregate->link_class = physical_edge->link_class;
@@ -2017,13 +2006,19 @@ static void iree_hal_amdgpu_topology_edge_apply_aggregate(
 
   iree_hal_topology_capability_t capabilities =
       iree_hal_topology_edge_capability_flags(edge->lo);
-  const iree_hal_topology_capability_t physical_capability_mask =
+  const iree_hal_topology_capability_t physical_guaranteed_capability_mask =
       IREE_HAL_TOPOLOGY_CAPABILITY_P2P_COPY |
       IREE_HAL_TOPOLOGY_CAPABILITY_PEER_COHERENT |
       IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_DEVICE |
       IREE_HAL_TOPOLOGY_CAPABILITY_ATOMIC_SYSTEM;
-  capabilities &= ~physical_capability_mask;
-  capabilities |= aggregate->physical_capabilities & physical_capability_mask;
+  const iree_hal_topology_capability_t physical_required_capability_mask =
+      IREE_HAL_TOPOLOGY_CAPABILITY_PEER_ACCESS_REQUIRES_GRANT;
+  capabilities &= ~(physical_guaranteed_capability_mask |
+                    physical_required_capability_mask);
+  capabilities |= aggregate->physical_capabilities.guaranteed &
+                  physical_guaranteed_capability_mask;
+  capabilities |= aggregate->physical_capabilities.required &
+                  physical_required_capability_mask;
   edge->lo =
       iree_hal_topology_edge_set_capability_flags(edge->lo, capabilities);
 }
@@ -2062,7 +2057,7 @@ static iree_status_t iree_hal_amdgpu_logical_device_refine_topology_edge(
       IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_physical_topology_edge(
           libhsa, source_physical_device, destination_physical_device,
           &physical_edge));
-      iree_hal_amdgpu_topology_edge_aggregate_include(*edge, &physical_edge,
+      iree_hal_amdgpu_topology_edge_aggregate_include(&physical_edge,
                                                       &aggregate);
     }
   }

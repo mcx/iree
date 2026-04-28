@@ -192,6 +192,39 @@ TEST_F(PhysicalDeviceCapabilitiesTest, CpuAccessGatesCoarseMemory) {
                             &selection, &capability));
 }
 
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       MemoryPoolAccessMapsToSafeTopologyModes) {
+  EXPECT_TRUE(iree_hal_amdgpu_memory_pool_access_is_valid(
+      HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED));
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_mode(
+                HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED),
+            IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY);
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+                HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED),
+            IREE_HAL_TOPOLOGY_CAPABILITY_NONE);
+
+  EXPECT_TRUE(iree_hal_amdgpu_memory_pool_access_is_valid(
+      HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT));
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_mode(
+                HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT),
+            IREE_HAL_TOPOLOGY_INTEROP_MODE_NATIVE);
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+                HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT),
+            IREE_HAL_TOPOLOGY_CAPABILITY_NONE);
+
+  EXPECT_TRUE(iree_hal_amdgpu_memory_pool_access_is_valid(
+      HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT));
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_mode(
+                HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT),
+            IREE_HAL_TOPOLOGY_INTEROP_MODE_COPY);
+  EXPECT_EQ(iree_hal_amdgpu_memory_pool_access_topology_capabilities(
+                HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT),
+            IREE_HAL_TOPOLOGY_CAPABILITY_PEER_ACCESS_REQUIRES_GRANT);
+
+  EXPECT_FALSE(iree_hal_amdgpu_memory_pool_access_is_valid(
+      (hsa_amd_memory_pool_access_t)99));
+}
+
 TEST_F(PhysicalDeviceCapabilitiesTest, CpuAccessInputsAreRequiredWhenNeeded) {
   iree_hal_amdgpu_cpu_visible_device_coarse_memory_selection_t selection =
       MakeCoarseMemorySelection();
