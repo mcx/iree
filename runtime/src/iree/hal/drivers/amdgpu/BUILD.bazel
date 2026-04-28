@@ -119,6 +119,8 @@ iree_runtime_cc_library(
         "logical_device.h",
         "physical_device.c",
         "physical_device.h",
+        "physical_device_capabilities.c",
+        "physical_device_capabilities.h",
         "profile_aqlprofile.c",
         "profile_aqlprofile.h",
         "profile_counters.c",
@@ -225,6 +227,7 @@ iree_runtime_cc_library(
         "host_queue_waits.h",
         "logical_device.h",
         "physical_device.h",
+        "physical_device_capabilities.h",
         "profile_aqlprofile.h",
         "profile_counters.h",
         "profile_device_metrics.h",
@@ -490,6 +493,20 @@ iree_runtime_cc_test(
         "//runtime/src/iree/hal/cts/util:test_base",
         "//runtime/src/iree/hal/drivers/amdgpu/util:packet",
         "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "physical_device_capabilities_test",
+    srcs = ["physical_device_capabilities_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    deps = [
+        ":amdgpu",
+        ":headers",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

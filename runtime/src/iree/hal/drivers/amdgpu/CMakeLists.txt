@@ -129,6 +129,8 @@ iree_cc_library(
     "logical_device.h"
     "physical_device.c"
     "physical_device.h"
+    "physical_device_capabilities.c"
+    "physical_device_capabilities.h"
     "profile_aqlprofile.c"
     "profile_aqlprofile.h"
     "profile_counters.c"
@@ -230,6 +232,7 @@ iree_cc_library(
     "host_queue_waits.h"
     "logical_device.h"
     "physical_device.h"
+    "physical_device_capabilities.h"
     "profile_aqlprofile.h"
     "profile_counters.h"
     "profile_device_metrics.h"
@@ -508,6 +511,22 @@ iree_cc_test(
   LABELS
     "driver=amdgpu"
     "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    physical_device_capabilities_test
+  SRCS
+    "physical_device_capabilities_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
+    iree::hal
+    iree::testing::gtest
+    iree::testing::gtest_main
   GROUP
     "iree-hal-drivers-amdgpu-tests"
 )

@@ -512,15 +512,6 @@ static iree_status_t iree_hal_amdgpu_physical_device_query_global_memory_pools(
   return status;
 }
 
-static iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
-iree_hal_amdgpu_physical_device_select_prepublished_kernarg_storage(
-    hsa_amd_memory_pool_t fine_block_memory_pool) {
-  if (!fine_block_memory_pool.handle) {
-    return iree_hal_amdgpu_aql_prepublished_kernarg_storage_disabled();
-  }
-  return iree_hal_amdgpu_aql_prepublished_kernarg_storage_device_fine_host_coherent();
-}
-
 typedef struct iree_hal_amdgpu_physical_device_kernarg_ring_memory_t {
   // Descriptor consumed by host queue initialization.
   iree_hal_amdgpu_kernarg_ring_memory_t descriptor;
@@ -528,40 +519,14 @@ typedef struct iree_hal_amdgpu_physical_device_kernarg_ring_memory_t {
   hsa_agent_t host_access_agents[1];
 } iree_hal_amdgpu_physical_device_kernarg_ring_memory_t;
 
-static bool iree_hal_amdgpu_cpu_visible_device_coarse_memory_is_available(
-    const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t* memory) {
-  return iree_any_bit_set(
-      memory->flags,
-      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE);
-}
-
-static bool iree_hal_amdgpu_physical_device_memory_pool_access_is_valid(
-    hsa_amd_memory_pool_access_t access) {
-  switch (access) {
-    case HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED:
-    case HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT:
-    case HSA_AMD_MEMORY_POOL_ACCESS_DISALLOWED_BY_DEFAULT:
-      return true;
-    default:
-      return false;
-  }
-}
-
 static iree_status_t iree_hal_amdgpu_physical_device_query_memory_pool_access(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t agent,
     hsa_amd_memory_pool_t memory_pool,
     hsa_amd_memory_pool_access_t* out_access) {
   *out_access = HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
-  IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
+  return iree_hsa_amd_agent_memory_pool_get_info(
       IREE_LIBHSA(libhsa), agent, memory_pool,
-      HSA_AMD_AGENT_MEMORY_POOL_INFO_ACCESS, out_access));
-  if (IREE_LIKELY(iree_hal_amdgpu_physical_device_memory_pool_access_is_valid(
-          *out_access))) {
-    return iree_ok_status();
-  }
-  return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                          "HSA reported unknown memory pool access mode %u",
-                          (uint32_t)*out_access);
+      HSA_AMD_AGENT_MEMORY_POOL_INFO_ACCESS, out_access);
 }
 
 static void iree_hal_amdgpu_physical_device_use_host_kernarg_memory(
@@ -602,26 +567,6 @@ iree_hal_amdgpu_physical_device_query_hdp_flush_registers(
   return hdp_flush;
 }
 
-static bool iree_hal_amdgpu_gfxip_is_pre_gfx908(
-    iree_hal_amdgpu_gfxip_version_t version) {
-  return version.major < 9 ||
-         (version.major == 9 && version.minor == 0 && version.stepping < 8);
-}
-
-static bool iree_hal_amdgpu_gfxip_is_gfx101x(
-    iree_hal_amdgpu_gfxip_version_t version) {
-  return version.major == 10 && (version.minor == 0 || version.minor == 1);
-}
-
-static bool iree_hal_amdgpu_gfxip_allows_hdp_kernarg_publication(
-    iree_hal_amdgpu_gfxip_version_t version) {
-  // Matches the HDP workaround eligibility in CLR's setKernelArgImpl. Devices
-  // outside this set stay on host kernarg memory unless we add a first-class
-  // readback publication mode.
-  return !iree_hal_amdgpu_gfxip_is_pre_gfx908(version) &&
-         !iree_hal_amdgpu_gfxip_is_gfx101x(version);
-}
-
 static iree_status_t
 iree_hal_amdgpu_physical_device_initialize_cpu_visible_device_coarse_memory(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t device_agent,
@@ -655,34 +600,33 @@ iree_hal_amdgpu_physical_device_initialize_cpu_visible_device_coarse_memory(
     return iree_ok_status();
   }
 
+  hsa_amd_memory_pool_access_t cpu_access[IREE_HAL_AMDGPU_MAX_CPU_AGENT] = {0};
   for (iree_host_size_t i = 0; i < topology->cpu_agent_count; ++i) {
-    hsa_amd_memory_pool_access_t access =
-        HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED;
     IREE_RETURN_IF_ERROR(
         iree_hal_amdgpu_physical_device_query_memory_pool_access(
             libhsa, topology->cpu_agents[i], device_coarse_memory_pool,
-            &access));
-    if (access == HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED) {
-      return iree_ok_status();
-    }
+            &cpu_access[i]));
   }
 
-  iree_host_size_t access_agent_count = 0;
-  for (iree_host_size_t i = 0; i < topology->cpu_agent_count; ++i) {
-    out_memory->access_agents[access_agent_count++] = topology->cpu_agents[i];
-  }
-  out_memory->access_agents[access_agent_count++] = device_agent;
-  out_memory->memory_pool = device_coarse_memory_pool;
-  out_memory->access_agent_count = access_agent_count;
-  out_memory->host_write_publication =
-      (iree_hal_amdgpu_kernarg_ring_publication_t){
-          .mode = IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_HDP_FLUSH,
-          .hdp_mem_flush_control = hdp_flush.HDP_MEM_FLUSH_CNTL,
-      };
-  out_memory->flags =
-      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE |
-      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_HDP_FLUSH;
-  return iree_ok_status();
+  const iree_hal_amdgpu_cpu_visible_device_coarse_memory_selection_t selection = {
+      .device_agent = device_agent,
+      .memory_pool = device_coarse_memory_pool,
+      .gfxip_version = gfxip_version,
+      .cpu =
+          {
+              .agents = topology->cpu_agents,
+              .access = cpu_access,
+              .count = topology->cpu_agent_count,
+          },
+      .hdp =
+          {
+              .registers = hdp_flush,
+          },
+      .flags =
+          IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_SELECTION_FLAG_HOST_WRITE_PUBLICATION_SUPPORTED,
+  };
+  return iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(&selection,
+                                                                 out_memory);
 }
 
 static void iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
@@ -988,7 +932,7 @@ iree_status_t iree_hal_amdgpu_physical_device_initialize(
   }
   if (iree_status_is_ok(status)) {
     out_physical_device->prepublished_kernarg_storage =
-        iree_hal_amdgpu_physical_device_select_prepublished_kernarg_storage(
+        iree_hal_amdgpu_select_prepublished_kernarg_storage(
             fine_block_memory_pool);
   }
   if (iree_status_is_ok(status)) {

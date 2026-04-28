@@ -9,10 +9,10 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
-#include "iree/hal/drivers/amdgpu/aql_prepublished_kernarg_storage.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
 #include "iree/hal/drivers/amdgpu/host_queue_staging.h"
+#include "iree/hal/drivers/amdgpu/physical_device_capabilities.h"
 #include "iree/hal/drivers/amdgpu/system.h"
 #include "iree/hal/drivers/amdgpu/transient_buffer.h"
 #include "iree/hal/drivers/amdgpu/util/block_pool.h"
@@ -164,32 +164,6 @@ iree_status_t iree_hal_amdgpu_physical_device_options_verify(
 //===----------------------------------------------------------------------===//
 // iree_hal_amdgpu_physical_device_t
 //===----------------------------------------------------------------------===//
-
-typedef enum iree_hal_amdgpu_cpu_visible_device_coarse_memory_flag_bits_e {
-  IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_NONE = 0u,
-  // All CPU agents can access the GPU coarse-grained memory pool and the
-  // driver knows how to publish CPU writes before GPU consumption.
-  IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE = 1u << 0,
-  // CPU writes require an HDP flush before the GPU consumes the memory.
-  IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_HDP_FLUSH = 1u << 1,
-} iree_hal_amdgpu_cpu_visible_device_coarse_memory_flag_bits_t;
-
-typedef uint32_t iree_hal_amdgpu_cpu_visible_device_coarse_memory_flags_t;
-
-// Physical-device capability for CPU-visible GPU coarse-grained memory.
-typedef struct iree_hal_amdgpu_cpu_visible_device_coarse_memory_t {
-  // GPU coarse-grained HSA memory pool CPU agents can access.
-  hsa_amd_memory_pool_t memory_pool;
-  // Agents granted access for allocations that use |memory_pool|.
-  hsa_agent_t access_agents[IREE_HAL_AMDGPU_MAX_CPU_AGENT + 1];
-  // Number of valid entries in |access_agents|.
-  iree_host_size_t access_agent_count;
-  // Publication required after CPU writes and before GPU consumption.
-  iree_hal_amdgpu_kernarg_ring_publication_t host_write_publication;
-  // Capability flags from
-  // iree_hal_amdgpu_cpu_visible_device_coarse_memory_flag_bits_t.
-  iree_hal_amdgpu_cpu_visible_device_coarse_memory_flags_t flags;
-} iree_hal_amdgpu_cpu_visible_device_coarse_memory_t;
 
 // A physical device representing an HSA GPU agent.
 // May contain one or more HAL queues that map to HSA queues on the agent.
