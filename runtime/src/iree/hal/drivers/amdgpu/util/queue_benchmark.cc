@@ -27,6 +27,7 @@
 #include "iree/hal/drivers/amdgpu/registration/driver_module.h"
 #include "iree/hal/drivers/amdgpu/semaphore.h"
 #include "iree/hal/drivers/amdgpu/util/benchmark_flags.h"
+#include "iree/hal/memory/tlsf_pool.h"
 #include "iree/io/file_contents.h"
 #include "runtime/src/iree/hal/drivers/amdgpu/cts/testdata_amdgpu.h"
 #include "runtime/src/iree/hal/drivers/amdgpu/util/testdata_amdgpu_queue_benchmark.h"
@@ -72,6 +73,20 @@ enum class ProfileGuardrailMode : int64_t {
   kQueueDeviceEvents = 1,
   kDispatchEvents = 2,
   kQueueDeviceAndDispatchEvents = 3,
+};
+
+enum class QueueAllocaTlsfGrowthMode : int64_t {
+  kWarm = 0,
+  kForcedGrowth = 1,
+};
+
+constexpr iree_hal_buffer_params_t kQueueAllocaBufferParams = {
+    /*usage=*/IREE_HAL_BUFFER_USAGE_TRANSFER |
+        IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE,
+    /*access=*/IREE_HAL_MEMORY_ACCESS_ALL,
+    /*type=*/IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE,
+    /*queue_affinity=*/0,
+    /*min_alignment=*/0,
 };
 
 iree_hal_device_profiling_data_families_t ProfileGuardrailDataFamilies(
@@ -693,6 +708,83 @@ class QueueBenchmark : public benchmark::Fixture {
         iree_hal_amdgpu_benchmark_completion_wait_flags());
   }
 
+  iree_status_t CreateQueueAllocaTlsfPool(iree_device_size_t allocation_size,
+                                          iree_hal_pool_t** out_pool) {
+    *out_pool = nullptr;
+    iree_hal_queue_pool_backend_t backend = {0};
+    IREE_RETURN_IF_ERROR(
+        iree_hal_device_query_queue_pool_backend(device_, kQueue0, &backend));
+    if (!backend.slab_provider || !backend.notification) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "queue pool backend query returned an incomplete backend bundle");
+    }
+
+    iree_hal_tlsf_pool_options_t options = {};
+    options.tlsf_options.range_length = allocation_size;
+    options.tlsf_options.alignment = kPayloadBufferAlignment;
+    options.tlsf_options.initial_block_capacity = 16;
+    options.tlsf_options.frontier_capacity = 2;
+    return iree_hal_tlsf_pool_create(
+        options, backend.slab_provider, backend.notification,
+        iree_hal_pool_epoch_query_null(), host_allocator_, out_pool);
+  }
+
+  iree_status_t QueueAllocaSubmit(iree_hal_pool_t* pool,
+                                  iree_device_size_t allocation_size,
+                                  iree_hal_buffer_t** out_buffer,
+                                  SubmittedCompletion* out_completion) {
+    *out_buffer = nullptr;
+    uint64_t signal_payload_value = ++completion_payload_value_;
+    iree_hal_semaphore_t* signal_semaphore = completion_semaphore_;
+    iree_hal_semaphore_list_t signal_semaphore_list = {
+        /*count=*/1,
+        /*semaphores=*/&signal_semaphore,
+        /*payload_values=*/&signal_payload_value,
+    };
+    IREE_RETURN_IF_ERROR(iree_hal_device_queue_alloca(
+        device_, kQueue0, iree_hal_semaphore_list_empty(),
+        signal_semaphore_list, pool, kQueueAllocaBufferParams, allocation_size,
+        IREE_HAL_ALLOCA_FLAG_NONE, out_buffer));
+    *out_completion = {completion_semaphore_, signal_payload_value};
+    return iree_ok_status();
+  }
+
+  iree_status_t QueueAllocaCleanup(iree_hal_buffer_t* buffer,
+                                   SubmittedCompletion alloca_completion) {
+    IREE_RETURN_IF_ERROR(
+        Wait(alloca_completion.semaphore, alloca_completion.payload_value));
+
+    uint64_t signal_payload_value = ++completion_payload_value_;
+    iree_hal_semaphore_t* wait_semaphore = alloca_completion.semaphore;
+    iree_hal_semaphore_t* signal_semaphore = completion_semaphore_;
+    iree_hal_semaphore_list_t wait_semaphore_list = {
+        /*count=*/1,
+        /*semaphores=*/&wait_semaphore,
+        /*payload_values=*/&alloca_completion.payload_value,
+    };
+    iree_hal_semaphore_list_t signal_semaphore_list = {
+        /*count=*/1,
+        /*semaphores=*/&signal_semaphore,
+        /*payload_values=*/&signal_payload_value,
+    };
+    IREE_RETURN_IF_ERROR(iree_hal_device_queue_dealloca(
+        device_, kQueue0, wait_semaphore_list, signal_semaphore_list, buffer,
+        IREE_HAL_DEALLOCA_FLAG_NONE));
+    IREE_RETURN_IF_ERROR(Wait(completion_semaphore_, signal_payload_value));
+    iree_hal_buffer_release(buffer);
+    return iree_ok_status();
+  }
+
+  iree_status_t QueueAllocaSubmitAndCleanup(
+      iree_hal_pool_t* pool, iree_device_size_t allocation_size) {
+    iree_hal_buffer_t* buffer = nullptr;
+    SubmittedCompletion completion;
+    IREE_RETURN_IF_ERROR(
+        QueueAllocaSubmit(pool, allocation_size, &buffer, &completion));
+    return QueueAllocaCleanup(buffer, completion);
+  }
+
   iree_status_t FillBufferAndWait(iree_hal_buffer_t* target_buffer,
                                   const void* pattern,
                                   iree_host_size_t pattern_length) {
@@ -1222,6 +1314,17 @@ class QueueBenchmark : public benchmark::Fixture {
         static_cast<double>(operation_count);
     state.counters["public_completion_signals_per_sync"] = 1.0;
     SetQueueSubmissionsProcessed(state, operation_count);
+  }
+
+  void SetQueueAllocaCounters(benchmark::State& state,
+                              iree_device_size_t allocation_size,
+                              QueueAllocaTlsfGrowthMode growth_mode) {
+    state.counters["queue_allocas_per_sync"] = 1.0;
+    state.counters["allocation_bytes_per_sync"] =
+        static_cast<double>(allocation_size);
+    state.counters["forced_tlsf_growth"] =
+        growth_mode == QueueAllocaTlsfGrowthMode::kForcedGrowth ? 1.0 : 0.0;
+    SetQueueSubmissionsProcessed(state, /*queue_submissions_per_sync=*/1);
   }
 
   void SetProfileGuardrailCounters(benchmark::State& state,
@@ -2023,6 +2126,97 @@ BENCHMARK_DEFINE_F(QueueBenchmark,
     }
   }
   SetQueueSubmissionsProcessed(state, /*queue_submissions_per_sync=*/1);
+}
+
+BENCHMARK_DEFINE_F(QueueBenchmark,
+                   QueueAllocaWarmTlsfSubmitOnly)(benchmark::State& state) {
+  const iree_device_size_t allocation_size =
+      static_cast<iree_device_size_t>(state.range(0));
+  iree_hal_pool_t* pool = nullptr;
+  if (!HandleStatus(state, CreateQueueAllocaTlsfPool(allocation_size, &pool),
+                    "failed to create queue_alloca TLSF pool")) {
+    return;
+  }
+  if (!HandleStatus(state, QueueAllocaSubmitAndCleanup(pool, allocation_size),
+                    "failed to prewarm queue_alloca TLSF pool")) {
+    iree_hal_pool_release(pool);
+    return;
+  }
+
+  for (auto _ : state) {
+    iree_hal_buffer_t* buffer = nullptr;
+    SubmittedCompletion completion;
+    if (!HandleStatus(
+            state,
+            QueueAllocaSubmit(pool, allocation_size, &buffer, &completion),
+            "warm queue_alloca submit failed")) {
+      break;
+    }
+    state.PauseTiming();
+    const bool cleanup_ok =
+        HandleStatus(state, QueueAllocaCleanup(buffer, completion),
+                     "warm queue_alloca cleanup failed");
+    state.ResumeTiming();
+    if (!cleanup_ok) break;
+  }
+
+  iree_hal_pool_release(pool);
+  SetQueueAllocaCounters(state, allocation_size,
+                         QueueAllocaTlsfGrowthMode::kWarm);
+}
+
+BENCHMARK_DEFINE_F(QueueBenchmark, QueueAllocaForcedTlsfGrowthSubmitOnly)(
+    benchmark::State& state) {
+  const iree_device_size_t allocation_size =
+      static_cast<iree_device_size_t>(state.range(0));
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    iree_hal_pool_t* pool = nullptr;
+    iree_hal_buffer_t* held_buffer = nullptr;
+    SubmittedCompletion held_completion = {};
+    iree_status_t status = CreateQueueAllocaTlsfPool(allocation_size, &pool);
+    if (iree_status_is_ok(status)) {
+      status = QueueAllocaSubmit(pool, allocation_size, &held_buffer,
+                                 &held_completion);
+    }
+    if (iree_status_is_ok(status)) {
+      status = Wait(held_completion.semaphore, held_completion.payload_value);
+    }
+    if (!HandleStatus(state, status,
+                      "failed to seed forced-growth queue_alloca pool")) {
+      iree_hal_buffer_release(held_buffer);
+      iree_hal_pool_release(pool);
+      state.ResumeTiming();
+      break;
+    }
+
+    state.ResumeTiming();
+    iree_hal_buffer_t* grown_buffer = nullptr;
+    SubmittedCompletion grown_completion;
+    status = QueueAllocaSubmit(pool, allocation_size, &grown_buffer,
+                               &grown_completion);
+    state.PauseTiming();
+
+    bool ok =
+        HandleStatus(state, status, "forced-growth queue_alloca submit failed");
+    if (ok) {
+      ok = HandleStatus(state,
+                        QueueAllocaCleanup(grown_buffer, grown_completion),
+                        "forced-growth queue_alloca cleanup failed");
+    } else {
+      iree_hal_buffer_release(grown_buffer);
+    }
+    ok = HandleStatus(state, QueueAllocaCleanup(held_buffer, held_completion),
+                      "forced-growth held alloca cleanup failed") &&
+         ok;
+    iree_hal_pool_release(pool);
+    state.ResumeTiming();
+    if (!ok) break;
+  }
+
+  SetQueueAllocaCounters(state, allocation_size,
+                         QueueAllocaTlsfGrowthMode::kForcedGrowth);
 }
 
 BENCHMARK_DEFINE_F(QueueBenchmark,
@@ -3273,6 +3467,19 @@ void ApplyProfileGuardrailModes(benchmark::Benchmark* benchmark) {
 }
 
 BENCHMARK_REGISTER_F(QueueBenchmark, SameQueueBarrierWait)
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK_REGISTER_F(QueueBenchmark, QueueAllocaWarmTlsfSubmitOnly)
+    ->Arg(4096)
+    ->Arg(65536)
+    ->ArgName("allocation_size")
+    ->UseRealTime()
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK_REGISTER_F(QueueBenchmark, QueueAllocaForcedTlsfGrowthSubmitOnly)
+    ->Arg(4096)
+    ->Arg(65536)
+    ->ArgName("allocation_size")
+    ->Iterations(100)
     ->UseRealTime()
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK_REGISTER_F(QueueBenchmark, HostCallBlockingWait)

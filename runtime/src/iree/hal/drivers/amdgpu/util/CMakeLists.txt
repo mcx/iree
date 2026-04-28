@@ -623,6 +623,7 @@ iree_cc_binary_benchmark(
     iree::hal::drivers::amdgpu::headers
     iree::hal::drivers::amdgpu::queue_affinity
     iree::hal::drivers::amdgpu::registration
+    iree::hal::memory::tlsf_pool
     iree::io::file_handle
   TESTONLY
   LABELS
