@@ -11,6 +11,7 @@
 #include "iree/hal/drivers/amdgpu/aql_prepublished_kernarg_storage.h"
 #include "iree/hal/drivers/amdgpu/util/kernarg_ring.h"
 #include "iree/hal/drivers/amdgpu/util/libhsa.h"
+#include "iree/hal/drivers/amdgpu/util/pm4_capabilities.h"
 #include "iree/hal/drivers/amdgpu/util/target_id.h"
 #include "iree/hal/drivers/amdgpu/util/topology.h"
 
@@ -100,6 +101,19 @@ iree_status_t iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(
 iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
 iree_hal_amdgpu_select_prepublished_kernarg_storage(
     hsa_amd_memory_pool_t fine_block_memory_pool);
+
+// Selects AMD vendor AQL packet and PM4 packet-family capabilities from the
+// parsed gfx IP version.
+iree_hal_amdgpu_vendor_packet_capability_flags_t
+iree_hal_amdgpu_select_vendor_packet_capabilities(
+    iree_hal_amdgpu_gfxip_version_t version);
+
+// Selects the cross-queue wait strategy from already-selected vendor packet
+// capabilities.
+iree_hal_amdgpu_wait_barrier_strategy_t
+iree_hal_amdgpu_select_wait_barrier_strategy(
+    iree_hal_amdgpu_vendor_packet_capability_flags_t
+        vendor_packet_capabilities);
 
 #ifdef __cplusplus
 }  // extern "C"

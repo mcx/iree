@@ -190,55 +190,6 @@ static iree_status_t iree_hal_amdgpu_query_agent_pci_identity(
   return iree_ok_status();
 }
 
-static iree_hal_amdgpu_vendor_packet_capability_flags_t
-iree_hal_amdgpu_select_vendor_packet_capabilities(
-    iree_hal_amdgpu_gfxip_version_t version) {
-  iree_hal_amdgpu_vendor_packet_capability_flags_t capabilities = 0;
-  // Matches CLR's barrier_value_packet_ gate:
-  //   gfx9.0.10 or gfx9.[minor >= 4].[stepping 0..2]
-  if (version.major == 9 && ((version.minor == 0 && version.stepping == 10) ||
-                             (version.minor >= 4 && version.stepping <= 2))) {
-    capabilities |= IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_PM4_IB |
-                    IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_BARRIER_VALUE;
-  }
-  // WAIT_REG_MEM64 is present in the gfx10+ PM4 packet tables. Gfx9 has only
-  // the 32-bit WAIT_REG_MEM variant, and non-CDNA gfx9 therefore defers. The
-  // gfx10+ memory WRITE_DATA/COPY_DATA and profiling families here have local
-  // gfx1100 evidence; CDNA/gfx9 stays on the narrower AQL_PM4_IB-only path
-  // until each packet family has hardware validation.
-  if (version.major >= 10) {
-    capabilities |=
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_PM4_IB |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_WAIT_REG_MEM64 |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_WRITE_DATA_MEMORY |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_COPY_DATA_MEMORY |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_COPY_TIMESTAMP |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_RELEASE_MEM_TIMESTAMP |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_EVENT_WRITE |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_SET_SH_REG |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_SET_UCONFIG_REG |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_REGISTER_READBACK |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_PERFCOUNTER_READBACK |
-        IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_IMMEDIATE_WRITE;
-  }
-  return capabilities;
-}
-
-static iree_hal_amdgpu_wait_barrier_strategy_t
-iree_hal_amdgpu_select_wait_barrier_strategy(
-    iree_hal_amdgpu_vendor_packet_capability_flags_t
-        vendor_packet_capabilities) {
-  if (vendor_packet_capabilities &
-      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_BARRIER_VALUE) {
-    return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE;
-  }
-  if (vendor_packet_capabilities &
-      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_WAIT_REG_MEM64) {
-    return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_PM4_WAIT_REG_MEM64;
-  }
-  return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER;
-}
-
 static bool iree_hal_amdgpu_physical_device_query_pool_epoch(
     void* user_data, iree_async_axis_t axis, uint64_t epoch) {
   iree_hal_amdgpu_epoch_signal_table_t* epoch_signal_table =

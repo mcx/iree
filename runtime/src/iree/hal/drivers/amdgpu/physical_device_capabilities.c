@@ -6,7 +6,65 @@
 
 #include "iree/hal/drivers/amdgpu/physical_device_capabilities.h"
 
+#include <stdint.h>
 #include <string.h>
+
+// Inclusive unsigned 16-bit range used for gfx IP table matching.
+typedef struct iree_hal_amdgpu_uint16_range_t {
+  // Inclusive lower bound.
+  uint16_t min;
+  // Inclusive upper bound.
+  uint16_t max;
+} iree_hal_amdgpu_uint16_range_t;
+
+// Gfx IP version range matched by a capability table row.
+typedef struct iree_hal_amdgpu_gfxip_version_range_t {
+  // Accepted major version range.
+  iree_hal_amdgpu_uint16_range_t major;
+  // Accepted minor version range.
+  iree_hal_amdgpu_uint16_range_t minor;
+  // Accepted stepping range.
+  iree_hal_amdgpu_uint16_range_t stepping;
+} iree_hal_amdgpu_gfxip_version_range_t;
+
+// AMD vendor-packet capability table row.
+typedef struct iree_hal_amdgpu_vendor_packet_capability_row_t {
+  // Gfx IP version range matched by this row.
+  iree_hal_amdgpu_gfxip_version_range_t version;
+  // Vendor-packet and PM4 packet-family capabilities enabled by this row.
+  iree_hal_amdgpu_vendor_packet_capability_flags_t capabilities;
+} iree_hal_amdgpu_vendor_packet_capability_row_t;
+
+enum {
+  // Packet families validated on the local gfx1100 bring-up system.
+  IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_GFX1100_VALIDATED =
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_PM4_IB |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_WAIT_REG_MEM64 |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_WRITE_DATA_MEMORY |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_COPY_DATA_MEMORY |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_COPY_TIMESTAMP |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_RELEASE_MEM_TIMESTAMP |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_EVENT_WRITE |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_SET_SH_REG |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_SET_UCONFIG_REG |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_REGISTER_READBACK |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_PERFCOUNTER_READBACK |
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_PM4_IMMEDIATE_WRITE,
+};
+
+static bool iree_hal_amdgpu_uint16_range_contains(
+    iree_hal_amdgpu_uint16_range_t range, uint16_t value) {
+  return value >= range.min && value <= range.max;
+}
+
+static bool iree_hal_amdgpu_gfxip_version_range_contains(
+    iree_hal_amdgpu_gfxip_version_range_t range,
+    iree_hal_amdgpu_gfxip_version_t version) {
+  return iree_hal_amdgpu_uint16_range_contains(range.major, version.major) &&
+         iree_hal_amdgpu_uint16_range_contains(range.minor, version.minor) &&
+         iree_hal_amdgpu_uint16_range_contains(range.stepping,
+                                               version.stepping);
+}
 
 bool iree_hal_amdgpu_cpu_visible_device_coarse_memory_is_available(
     const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t* memory) {
@@ -122,4 +180,73 @@ iree_hal_amdgpu_select_prepublished_kernarg_storage(
     return iree_hal_amdgpu_aql_prepublished_kernarg_storage_disabled();
   }
   return iree_hal_amdgpu_aql_prepublished_kernarg_storage_device_fine_host_coherent();
+}
+
+iree_hal_amdgpu_vendor_packet_capability_flags_t
+iree_hal_amdgpu_select_vendor_packet_capabilities(
+    iree_hal_amdgpu_gfxip_version_t version) {
+  // The CDNA BARRIER_VALUE rows match CLR's barrier_value_packet_ gate:
+  // gfx9.0.10 or gfx9.[minor >= 4].[stepping 0..2].
+  //
+  // The gfx1100 row is the currently validated RDNA3 PM4 path. Nearby gfx10,
+  // gfx11, and gfx12 parts stay on the base AQL path until each packet-family
+  // contract has hardware evidence or an explicit probe.
+  static const iree_hal_amdgpu_vendor_packet_capability_row_t kRows[] = {
+      {
+          .version =
+              {
+                  .major = {9, 9},
+                  .minor = {0, 0},
+                  .stepping = {10, 10},
+              },
+          .capabilities =
+              IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_PM4_IB |
+              IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_BARRIER_VALUE,
+      },
+      {
+          .version =
+              {
+                  .major = {9, 9},
+                  .minor = {4, UINT16_MAX},
+                  .stepping = {0, 2},
+              },
+          .capabilities =
+              IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_PM4_IB |
+              IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_BARRIER_VALUE,
+      },
+      {
+          .version =
+              {
+                  .major = {11, 11},
+                  .minor = {0, 0},
+                  .stepping = {0, 0},
+              },
+          .capabilities =
+              IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_GFX1100_VALIDATED,
+      },
+  };
+
+  iree_hal_amdgpu_vendor_packet_capability_flags_t capabilities = 0;
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(kRows); ++i) {
+    if (iree_hal_amdgpu_gfxip_version_range_contains(kRows[i].version,
+                                                     version)) {
+      capabilities |= kRows[i].capabilities;
+    }
+  }
+  return capabilities;
+}
+
+iree_hal_amdgpu_wait_barrier_strategy_t
+iree_hal_amdgpu_select_wait_barrier_strategy(
+    iree_hal_amdgpu_vendor_packet_capability_flags_t
+        vendor_packet_capabilities) {
+  if (vendor_packet_capabilities &
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_AQL_BARRIER_VALUE) {
+    return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE;
+  }
+  if (vendor_packet_capabilities &
+      IREE_HAL_AMDGPU_VENDOR_PACKET_CAPABILITY_WAIT_REG_MEM64) {
+    return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_PM4_WAIT_REG_MEM64;
+  }
+  return IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER;
 }
