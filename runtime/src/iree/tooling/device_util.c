@@ -830,7 +830,8 @@ static iree_status_t iree_hal_profiling_from_flags_stop_periodic_flush(
   iree_atomic_store(&profiling->flush_stop_requested, 1,
                     iree_memory_order_release);
   iree_notification_post(&profiling->flush_notification, IREE_ALL_WAITERS);
-  iree_thread_join(profiling->flush_thread);
+  // Final release joins the thread. Calling iree_thread_join before release
+  // would double-join pthread-backed threads, which is undefined behavior.
   iree_thread_release(profiling->flush_thread);
   profiling->flush_thread = NULL;
 
