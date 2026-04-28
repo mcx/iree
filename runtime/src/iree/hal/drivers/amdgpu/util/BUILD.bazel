@@ -268,6 +268,7 @@ iree_runtime_cc_library(
     srcs = [
         "kernarg_ring.c",
         "notification_ring.c",
+        "queue_upload_ring.c",
         "signal_pool.c",
     ],
     hdrs = [
@@ -276,6 +277,7 @@ iree_runtime_cc_library(
         "error_callback.h",
         "kernarg_ring.h",
         "notification_ring.h",
+        "queue_upload_ring.h",
         "signal_pool.h",
     ],
     deps = [
@@ -475,6 +477,22 @@ iree_runtime_cc_test(
 iree_runtime_cc_test(
     name = "kernarg_ring_test",
     srcs = ["kernarg_ring_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    tags = [
+        "driver=amdgpu",
+        "nodocker",
+    ],
+    deps = [
+        ":queue_primitives",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "queue_upload_ring_test",
+    srcs = ["queue_upload_ring_test.cc"],
     group = "iree-hal-drivers-amdgpu-tests",
     tags = [
         "driver=amdgpu",

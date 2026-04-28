@@ -285,10 +285,12 @@ iree_cc_library(
     "error_callback.h"
     "kernarg_ring.h"
     "notification_ring.h"
+    "queue_upload_ring.h"
     "signal_pool.h"
   SRCS
     "kernarg_ring.c"
     "notification_ring.c"
+    "queue_upload_ring.c"
     "signal_pool.c"
   DEPS
     ::libhsa
@@ -511,6 +513,23 @@ iree_cc_test(
     kernarg_ring_test
   SRCS
     "kernarg_ring_test.cc"
+  DEPS
+    ::queue_primitives
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "driver=amdgpu"
+    "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    queue_upload_ring_test
+  SRCS
+    "queue_upload_ring_test.cc"
   DEPS
     ::queue_primitives
     iree::base
