@@ -160,12 +160,24 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_t {
   struct {
     // Cold-path storage strategy selected during command-buffer creation.
     iree_hal_amdgpu_aql_prepublished_kernarg_storage_t storage;
-    // Retained buffer containing all prepublished kernarg templates.
-    iree_hal_buffer_t* buffer;
-    // Device pointer to the first byte of |buffer|.
-    uint8_t* device_base;
-    // Allocated byte length of |buffer|.
-    iree_device_size_t byte_length;
+    // Recording-time materialization plan for immutable kernarg templates.
+    struct {
+      // Number of prepublished kernarg templates recorded.
+      iree_host_size_t count;
+      // Minimum byte length required before base-alignment slack.
+      iree_host_size_t payload_length;
+      // Maximum device pointer alignment required by any template.
+      uint32_t max_alignment;
+    } templates;
+    // Materialized device-visible kernarg template allocation.
+    struct {
+      // Retained buffer containing all prepublished kernarg templates.
+      iree_hal_buffer_t* buffer;
+      // Device pointer to the first byte of |buffer|.
+      uint8_t* device_base;
+      // Allocated byte length of |buffer|.
+      iree_device_size_t byte_length;
+    } materialized;
   } prepublished_kernargs;
   // Immutable payload ordinal table captured while recording.
   struct {
@@ -256,10 +268,14 @@ static void iree_hal_amdgpu_aql_command_buffer_reset_resources(
   command_buffer->static_buffers.first_page = NULL;
   command_buffer->static_buffers.current_page = NULL;
   command_buffer->static_buffers.count = 0;
-  iree_hal_buffer_release(command_buffer->prepublished_kernargs.buffer);
-  command_buffer->prepublished_kernargs.buffer = NULL;
-  command_buffer->prepublished_kernargs.device_base = NULL;
-  command_buffer->prepublished_kernargs.byte_length = 0;
+  iree_hal_buffer_release(
+      command_buffer->prepublished_kernargs.materialized.buffer);
+  command_buffer->prepublished_kernargs.templates.count = 0;
+  command_buffer->prepublished_kernargs.templates.payload_length = 0;
+  command_buffer->prepublished_kernargs.templates.max_alignment = 1;
+  command_buffer->prepublished_kernargs.materialized.buffer = NULL;
+  command_buffer->prepublished_kernargs.materialized.device_base = NULL;
+  command_buffer->prepublished_kernargs.materialized.byte_length = 0;
   iree_arena_reset(&command_buffer->recording_arena);
   command_buffer->rodata.first_page = NULL;
   command_buffer->rodata.current_page = NULL;
@@ -514,51 +530,31 @@ static bool iree_hal_amdgpu_aql_command_buffer_rodata_is_prepublished_kernarg(
 }
 
 static iree_status_t
-iree_hal_amdgpu_aql_command_buffer_count_prepublished_kernargs(
+iree_hal_amdgpu_aql_command_buffer_append_prepublished_kernarg_template(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
-    iree_host_size_t* out_template_count, iree_host_size_t* out_payload_length,
-    uint32_t* out_max_alignment) {
-  *out_template_count = 0;
-  *out_payload_length = 0;
-  *out_max_alignment = 1;
-
-  iree_host_size_t template_count = 0;
-  iree_host_size_t payload_length = 0;
-  uint32_t max_alignment = 1;
-  for (iree_hal_amdgpu_aql_command_buffer_rodata_segment_page_t* page =
-           command_buffer->rodata.first_page;
-       page; page = page->next) {
-    for (uint32_t i = 0; i < page->count; ++i) {
-      const iree_hal_amdgpu_aql_command_buffer_rodata_segment_t* segment =
-          &page->segments[i];
-      if (!iree_hal_amdgpu_aql_command_buffer_rodata_is_prepublished_kernarg(
-              segment)) {
-        continue;
-      }
-      iree_host_size_t aligned_payload_length = 0;
-      if (IREE_UNLIKELY(!iree_host_size_checked_align(
-              payload_length, segment->alignment, &aligned_payload_length))) {
-        return iree_make_status(
-            IREE_STATUS_OUT_OF_RANGE,
-            "prepublished command-buffer kernarg offset overflow");
-      }
-      payload_length = aligned_payload_length;
-      if (IREE_UNLIKELY(!iree_host_size_checked_add(
-              payload_length,
-              iree_max((iree_host_size_t)1, (iree_host_size_t)segment->length),
-              &payload_length))) {
-        return iree_make_status(
-            IREE_STATUS_OUT_OF_RANGE,
-            "prepublished command-buffer kernarg storage overflow");
-      }
-      max_alignment = iree_max(max_alignment, segment->alignment);
-      ++template_count;
-    }
+    const iree_hal_amdgpu_aql_command_buffer_rodata_segment_t* segment) {
+  iree_host_size_t aligned_payload_length = 0;
+  if (IREE_UNLIKELY(!iree_host_size_checked_align(
+          command_buffer->prepublished_kernargs.templates.payload_length,
+          segment->alignment, &aligned_payload_length))) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "prepublished command-buffer kernarg offset overflow");
   }
-
-  *out_template_count = template_count;
-  *out_payload_length = payload_length;
-  *out_max_alignment = max_alignment;
+  command_buffer->prepublished_kernargs.templates.payload_length =
+      aligned_payload_length;
+  if (IREE_UNLIKELY(!iree_host_size_checked_add(
+          command_buffer->prepublished_kernargs.templates.payload_length,
+          iree_max((iree_host_size_t)1, (iree_host_size_t)segment->length),
+          &command_buffer->prepublished_kernargs.templates.payload_length))) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "prepublished command-buffer kernarg storage overflow");
+  }
+  command_buffer->prepublished_kernargs.templates.max_alignment =
+      iree_max(command_buffer->prepublished_kernargs.templates.max_alignment,
+               segment->alignment);
+  ++command_buffer->prepublished_kernargs.templates.count;
   return iree_ok_status();
 }
 
@@ -641,15 +637,15 @@ iree_hal_amdgpu_aql_command_buffer_verify_prepublished_kernarg_storage(
 static iree_status_t
 iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
-  iree_host_size_t template_count = 0;
-  iree_host_size_t payload_length = 0;
-  uint32_t max_alignment = 1;
-  IREE_RETURN_IF_ERROR(
-      iree_hal_amdgpu_aql_command_buffer_count_prepublished_kernargs(
-          command_buffer, &template_count, &payload_length, &max_alignment));
+  const iree_host_size_t template_count =
+      command_buffer->prepublished_kernargs.templates.count;
   if (template_count == 0) {
     return iree_ok_status();
   }
+  const iree_host_size_t payload_length =
+      command_buffer->prepublished_kernargs.templates.payload_length;
+  const uint32_t max_alignment =
+      command_buffer->prepublished_kernargs.templates.max_alignment;
   if (IREE_UNLIKELY(!iree_hal_amdgpu_aql_command_buffer_prepublish_enabled(
           command_buffer))) {
     return iree_make_status(
@@ -727,9 +723,10 @@ iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
     status = iree_status_join(status, iree_hal_buffer_unmap_range(&mapping));
   }
   if (iree_status_is_ok(status)) {
-    command_buffer->prepublished_kernargs.buffer = template_buffer;
-    command_buffer->prepublished_kernargs.device_base = device_base;
-    command_buffer->prepublished_kernargs.byte_length =
+    command_buffer->prepublished_kernargs.materialized.buffer = template_buffer;
+    command_buffer->prepublished_kernargs.materialized.device_base =
+        device_base;
+    command_buffer->prepublished_kernargs.materialized.byte_length =
         (iree_device_size_t)allocation_length;
   } else {
     iree_hal_buffer_release(template_buffer);
@@ -827,6 +824,7 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
   command_buffer->profile.metadata = profile_metadata;
   command_buffer->device_ordinal = (uint32_t)device_ordinal;
   command_buffer->prepublished_kernargs.storage = prepublished_kernarg_storage;
+  command_buffer->prepublished_kernargs.templates.max_alignment = 1;
   iree_arena_initialize(program_block_pool, &command_buffer->recording_arena);
   iree_hal_amdgpu_aql_program_builder_initialize(program_block_pool,
                                                  &command_buffer->builder);
@@ -939,7 +937,8 @@ void* iree_hal_amdgpu_aql_command_buffer_prepublished_kernarg(
     uint32_t length) {
   iree_hal_amdgpu_aql_command_buffer_t* command_buffer =
       iree_hal_amdgpu_aql_command_buffer_cast(base_command_buffer);
-  if (IREE_UNLIKELY(!command_buffer->prepublished_kernargs.buffer)) {
+  if (IREE_UNLIKELY(
+          !command_buffer->prepublished_kernargs.materialized.buffer)) {
     return NULL;
   }
   const iree_device_size_t required_length =
@@ -948,10 +947,12 @@ void* iree_hal_amdgpu_aql_command_buffer_prepublished_kernarg(
   if (IREE_UNLIKELY(
           !iree_device_size_checked_add((iree_device_size_t)byte_offset,
                                         required_length, &end_offset) ||
-          end_offset > command_buffer->prepublished_kernargs.byte_length)) {
+          end_offset >
+              command_buffer->prepublished_kernargs.materialized.byte_length)) {
     return NULL;
   }
-  return command_buffer->prepublished_kernargs.device_base + byte_offset;
+  return command_buffer->prepublished_kernargs.materialized.device_base +
+         byte_offset;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1708,6 +1709,7 @@ iree_hal_amdgpu_aql_command_buffer_record_prepublished_dispatch_kernargs(
   segment->prepublished.dispatch_command = dispatch_command;
   memset(kernarg_data, 0, iree_max((iree_host_size_t)1, kernarg_padded_length));
 
+  iree_status_t status = iree_ok_status();
   switch (kernarg_strategy) {
     case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_HAL: {
       uint64_t* binding_dst = (uint64_t*)kernarg_data;
@@ -1718,20 +1720,29 @@ iree_hal_amdgpu_aql_command_buffer_record_prepublished_dispatch_kernargs(
       }
       const iree_host_size_t binding_bytes =
           (iree_host_size_t)kernel_args->binding_count * sizeof(uint64_t);
-      return iree_hal_amdgpu_aql_command_buffer_write_dispatch_tail(
+      status = iree_hal_amdgpu_aql_command_buffer_write_dispatch_tail(
           kernel_args, layout, config, constants, kernarg_strategy,
           kernarg_data + binding_bytes);
+      break;
     }
     case IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_CUSTOM_DIRECT:
-      return iree_hal_amdgpu_aql_command_buffer_write_dispatch_tail(
+      status = iree_hal_amdgpu_aql_command_buffer_write_dispatch_tail(
           kernel_args, layout, config, constants, kernarg_strategy,
           kernarg_data);
+      break;
     default:
-      return iree_make_status(
+      status = iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
           "unsupported prepublished command-buffer kernarg strategy %u",
           kernarg_strategy);
+      break;
   }
+  if (iree_status_is_ok(status)) {
+    status =
+        iree_hal_amdgpu_aql_command_buffer_append_prepublished_kernarg_template(
+            command_buffer, segment);
+  }
+  return status;
 }
 
 typedef enum iree_hal_amdgpu_aql_dispatch_plan_flag_bits_e {
