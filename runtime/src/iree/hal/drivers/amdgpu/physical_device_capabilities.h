@@ -8,6 +8,7 @@
 #define IREE_HAL_DRIVERS_AMDGPU_PHYSICAL_DEVICE_CAPABILITIES_H_
 
 #include "iree/base/api.h"
+#include "iree/hal/device.h"
 #include "iree/hal/drivers/amdgpu/aql_prepublished_kernarg_storage.h"
 #include "iree/hal/drivers/amdgpu/util/kernarg_ring.h"
 #include "iree/hal/drivers/amdgpu/util/libhsa.h"
@@ -95,6 +96,68 @@ iree_status_t iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(
     const iree_hal_amdgpu_cpu_visible_device_coarse_memory_selection_t*
         selection,
     iree_hal_amdgpu_cpu_visible_device_coarse_memory_t* out_memory);
+
+// AMDGPU memory-system facts used to derive conservative HAL topology flags.
+typedef struct iree_hal_amdgpu_memory_system_capabilities_t {
+  // HSA SVM/HMM process and agent facts.
+  struct {
+    // HSA SVM attribute and prefetch APIs are available.
+    uint32_t supported : 1;
+    // System allocations are accessible by GPU agents without per-range grants.
+    uint32_t accessible_by_default : 1;
+    // The process is bound to XNACK-enabled execution.
+    uint32_t xnack_enabled : 1;
+    // The host can directly access SVM pages resident in this GPU local memory.
+    uint32_t direct_host_access : 1;
+  } svm;
+
+  // Device-local memory placement facts.
+  struct {
+    // A host-coherent fine-grained device memory pool is available.
+    uint32_t fine_host_visible : 1;
+    // A CPU-visible coarse-grained device memory pool is usable by the driver.
+    uint32_t coarse_cpu_visible : 1;
+  } device_local;
+} iree_hal_amdgpu_memory_system_capabilities_t;
+
+// Already-queried facts used to select memory-system capabilities.
+typedef struct iree_hal_amdgpu_memory_system_capabilities_selection_t {
+  // HSA SVM/HMM process and agent facts.
+  struct {
+    // Whether HSA SVM APIs are available in this process.
+    uint32_t supported : 1;
+    // Whether pageable/system memory is GPU-accessible without SVM attributes.
+    uint32_t accessible_by_default : 1;
+    // Whether the process is bound to XNACK-enabled execution.
+    uint32_t xnack_enabled : 1;
+    // Whether this GPU reports direct host access to resident SVM pages.
+    uint32_t direct_host_access : 1;
+  } svm;
+
+  // Device-local memory placement facts.
+  struct {
+    // Fine-grained global memory pool considered for host-visible device data.
+    hsa_amd_memory_pool_t fine_memory_pool;
+    // Selected CPU-visible coarse-grained device-memory capability.
+    const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t*
+        coarse_cpu_visible_memory;
+  } device_local;
+} iree_hal_amdgpu_memory_system_capabilities_selection_t;
+
+// Selects memory-system capabilities from already-queried facts.
+void iree_hal_amdgpu_select_memory_system_capabilities(
+    const iree_hal_amdgpu_memory_system_capabilities_selection_t* selection,
+    iree_hal_amdgpu_memory_system_capabilities_t* out_capabilities);
+
+// Returns HAL device capability flags implied by AMDGPU memory-system facts.
+iree_hal_device_capability_bits_t
+iree_hal_amdgpu_select_memory_system_device_capability_flags(
+    const iree_hal_amdgpu_memory_system_capabilities_t* capabilities);
+
+// Returns true when SVM ranges require explicit HSA access attributes before a
+// GPU can safely access them.
+bool iree_hal_amdgpu_memory_system_requires_svm_access_attributes(
+    const iree_hal_amdgpu_memory_system_capabilities_t* capabilities);
 
 // Selects command-buffer prepublished kernarg storage from queried memory
 // pools.

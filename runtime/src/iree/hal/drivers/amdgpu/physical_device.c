@@ -519,6 +519,17 @@ iree_hal_amdgpu_physical_device_query_hdp_flush_registers(
 }
 
 static iree_status_t
+iree_hal_amdgpu_physical_device_query_svm_direct_host_access(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t device_agent,
+    bool* out_direct_host_access) {
+  *out_direct_host_access = false;
+  return iree_hsa_agent_get_info(
+      IREE_LIBHSA(libhsa), device_agent,
+      (hsa_agent_info_t)HSA_AMD_AGENT_INFO_SVM_DIRECT_HOST_ACCESS,
+      out_direct_host_access);
+}
+
+static iree_status_t
 iree_hal_amdgpu_physical_device_initialize_cpu_visible_device_coarse_memory(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t device_agent,
     hsa_amd_memory_pool_t device_coarse_memory_pool,
@@ -578,6 +589,38 @@ iree_hal_amdgpu_physical_device_initialize_cpu_visible_device_coarse_memory(
   };
   return iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(&selection,
                                                                  out_memory);
+}
+
+static iree_status_t
+iree_hal_amdgpu_physical_device_initialize_memory_system_capabilities(
+    const iree_hal_amdgpu_libhsa_t* libhsa,
+    const iree_hal_amdgpu_system_info_t* system_info, hsa_agent_t device_agent,
+    hsa_amd_memory_pool_t fine_block_memory_pool,
+    const iree_hal_amdgpu_cpu_visible_device_coarse_memory_t*
+        cpu_visible_device_coarse_memory,
+    iree_hal_amdgpu_memory_system_capabilities_t* out_capabilities) {
+  bool svm_direct_host_access = false;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_physical_device_query_svm_direct_host_access(
+          libhsa, device_agent, &svm_direct_host_access));
+
+  const iree_hal_amdgpu_memory_system_capabilities_selection_t selection = {
+      .svm =
+          {
+              .supported = system_info->svm.supported,
+              .accessible_by_default = system_info->svm.accessible_by_default,
+              .xnack_enabled = system_info->svm.xnack_enabled,
+              .direct_host_access = svm_direct_host_access ? 1u : 0u,
+          },
+      .device_local =
+          {
+              .fine_memory_pool = fine_block_memory_pool,
+              .coarse_cpu_visible_memory = cpu_visible_device_coarse_memory,
+          },
+  };
+  iree_hal_amdgpu_select_memory_system_capabilities(&selection,
+                                                    out_capabilities);
+  return iree_ok_status();
 }
 
 static void iree_hal_amdgpu_physical_device_select_kernarg_ring_memory(
@@ -942,6 +985,13 @@ iree_status_t iree_hal_amdgpu_physical_device_initialize(
             libhsa, device_agent, coarse_block_memory_pool,
             out_physical_device->isa.target_id.version, &system->topology,
             &out_physical_device->cpu_visible_device_coarse_memory);
+  }
+  if (iree_status_is_ok(status)) {
+    status =
+        iree_hal_amdgpu_physical_device_initialize_memory_system_capabilities(
+            libhsa, &system->info, device_agent, fine_block_memory_pool,
+            &out_physical_device->cpu_visible_device_coarse_memory,
+            &out_physical_device->memory_system);
   }
 
   if (!iree_status_is_ok(status)) {

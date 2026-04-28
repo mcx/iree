@@ -173,6 +173,50 @@ iree_status_t iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(
   return iree_ok_status();
 }
 
+void iree_hal_amdgpu_select_memory_system_capabilities(
+    const iree_hal_amdgpu_memory_system_capabilities_selection_t* selection,
+    iree_hal_amdgpu_memory_system_capabilities_t* out_capabilities) {
+  IREE_ASSERT_ARGUMENT(selection);
+  IREE_ASSERT_ARGUMENT(out_capabilities);
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+
+  out_capabilities->svm.supported = selection->svm.supported ? 1u : 0u;
+  out_capabilities->svm.accessible_by_default =
+      selection->svm.accessible_by_default ? 1u : 0u;
+  out_capabilities->svm.xnack_enabled = selection->svm.xnack_enabled ? 1u : 0u;
+  out_capabilities->svm.direct_host_access =
+      selection->svm.direct_host_access ? 1u : 0u;
+  out_capabilities->device_local.fine_host_visible =
+      selection->device_local.fine_memory_pool.handle ? 1u : 0u;
+  out_capabilities->device_local.coarse_cpu_visible =
+      selection->device_local.coarse_cpu_visible_memory &&
+              iree_hal_amdgpu_cpu_visible_device_coarse_memory_is_available(
+                  selection->device_local.coarse_cpu_visible_memory)
+          ? 1u
+          : 0u;
+}
+
+iree_hal_device_capability_bits_t
+iree_hal_amdgpu_select_memory_system_device_capability_flags(
+    const iree_hal_amdgpu_memory_system_capabilities_t* capabilities) {
+  IREE_ASSERT_ARGUMENT(capabilities);
+  iree_hal_device_capability_bits_t flags = IREE_HAL_DEVICE_CAPABILITY_NONE;
+  if (capabilities->svm.supported) {
+    flags |= IREE_HAL_DEVICE_CAPABILITY_SHARED_VIRTUAL_ADDRESS;
+  }
+  if (capabilities->svm.accessible_by_default) {
+    flags |= IREE_HAL_DEVICE_CAPABILITY_UNIFIED_MEMORY;
+  }
+  return flags;
+}
+
+bool iree_hal_amdgpu_memory_system_requires_svm_access_attributes(
+    const iree_hal_amdgpu_memory_system_capabilities_t* capabilities) {
+  IREE_ASSERT_ARGUMENT(capabilities);
+  return capabilities->svm.supported &&
+         !capabilities->svm.accessible_by_default;
+}
+
 iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
 iree_hal_amdgpu_select_prepublished_kernarg_storage(
     hsa_amd_memory_pool_t fine_block_memory_pool) {

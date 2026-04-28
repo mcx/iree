@@ -1583,10 +1583,18 @@ static iree_status_t iree_hal_amdgpu_logical_device_query_capabilities(
         IREE_HAL_TOPOLOGY_HANDLE_TYPE_DMA_BUF;
   }
 
-  // Capability flags.
-  if (logical_device->system->info.svm_accessible_by_default) {
-    out_capabilities->flags |= IREE_HAL_DEVICE_CAPABILITY_UNIFIED_MEMORY;
+  // Memory-system capability flags are the intersection across the physical
+  // devices in this logical device. SVM/pageable-memory facts are distinct
+  // from peer-pool addressability; refine_topology_edge owns the latter.
+  iree_hal_device_capability_bits_t memory_system_flags =
+      iree_hal_amdgpu_select_memory_system_device_capability_flags(
+          &physical_device->memory_system);
+  for (iree_host_size_t i = 1; i < logical_device->physical_device_count; ++i) {
+    memory_system_flags &=
+        iree_hal_amdgpu_select_memory_system_device_capability_flags(
+            &logical_device->physical_devices[i]->memory_system);
   }
+  out_capabilities->flags |= memory_system_flags;
 
   // AMDGPU semaphores are native async timeline semaphores (not binary
   // emulation).
@@ -1607,14 +1615,6 @@ static iree_status_t iree_hal_amdgpu_logical_device_query_capabilities(
   // access mode for a specific GPU pair is determined by
   // refine_topology_edge — here we declare the capability in principle.
   out_capabilities->flags |= IREE_HAL_DEVICE_CAPABILITY_P2P_COPY;
-
-  // Peer addressability depends on whether SVM is enabled (large BAR / XGMI
-  // provides load/store access to peer memory without explicit grants).
-  if (logical_device->system->info.svm_accessible_by_default) {
-    out_capabilities->flags |= IREE_HAL_DEVICE_CAPABILITY_PEER_ADDRESSABLE;
-    // SVM implies peer coherency on fine-grained memory.
-    out_capabilities->flags |= IREE_HAL_DEVICE_CAPABILITY_PEER_COHERENT;
-  }
 
   // Driver handle (HSA agent handle for same-driver refinement). Composite
   // devices intentionally leave this unset: a single HSA agent handle would

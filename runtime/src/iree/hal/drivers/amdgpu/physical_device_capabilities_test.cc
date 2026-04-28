@@ -61,6 +61,18 @@ class PhysicalDeviceCapabilitiesTest : public ::testing::Test {
     return selection;
   }
 
+  iree_hal_amdgpu_memory_system_capabilities_selection_t
+  MakeMemorySystemSelection() {
+    iree_hal_amdgpu_memory_system_capabilities_selection_t selection = {};
+    selection.svm.supported = 1;
+    selection.svm.accessible_by_default = 0;
+    selection.svm.xnack_enabled = 0;
+    selection.svm.direct_host_access = 0;
+    selection.device_local.fine_memory_pool = MemoryPool(30);
+    selection.device_local.coarse_cpu_visible_memory = nullptr;
+    return selection;
+  }
+
   std::array<hsa_agent_t, 2> cpu_agents_ = {Agent(1), Agent(2)};
   std::array<hsa_amd_memory_pool_access_t, 2> cpu_access_ = {
       HSA_AMD_MEMORY_POOL_ACCESS_ALLOWED_BY_DEFAULT,
@@ -204,6 +216,65 @@ TEST_F(PhysicalDeviceCapabilitiesTest, TooManyCpuAgentsFails) {
   IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
                         iree_hal_amdgpu_select_cpu_visible_device_coarse_memory(
                             &selection, &capability));
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest, SvmDefaultAccessDoesNotImplyPeerFlags) {
+  iree_hal_amdgpu_memory_system_capabilities_selection_t selection =
+      MakeMemorySystemSelection();
+  selection.svm.accessible_by_default = 1;
+  selection.svm.xnack_enabled = 1;
+
+  iree_hal_amdgpu_memory_system_capabilities_t capability;
+  iree_hal_amdgpu_select_memory_system_capabilities(&selection, &capability);
+
+  EXPECT_TRUE(capability.svm.supported);
+  EXPECT_TRUE(capability.svm.accessible_by_default);
+  EXPECT_TRUE(capability.svm.xnack_enabled);
+  EXPECT_FALSE(capability.svm.direct_host_access);
+  EXPECT_TRUE(capability.device_local.fine_host_visible);
+  EXPECT_FALSE(capability.device_local.coarse_cpu_visible);
+
+  iree_hal_device_capability_bits_t flags =
+      iree_hal_amdgpu_select_memory_system_device_capability_flags(&capability);
+  EXPECT_TRUE(flags & IREE_HAL_DEVICE_CAPABILITY_SHARED_VIRTUAL_ADDRESS);
+  EXPECT_TRUE(flags & IREE_HAL_DEVICE_CAPABILITY_UNIFIED_MEMORY);
+  EXPECT_FALSE(flags & IREE_HAL_DEVICE_CAPABILITY_PEER_ADDRESSABLE);
+  EXPECT_FALSE(flags & IREE_HAL_DEVICE_CAPABILITY_PEER_COHERENT);
+  EXPECT_FALSE(iree_hal_amdgpu_memory_system_requires_svm_access_attributes(
+      &capability));
+}
+
+TEST_F(PhysicalDeviceCapabilitiesTest,
+       LargeBarDoesNotImplyPageableSvmDefaultAccess) {
+  iree_hal_amdgpu_cpu_visible_device_coarse_memory_t coarse_memory = {};
+  coarse_memory.memory_pool = MemoryPool(40);
+  coarse_memory.flags =
+      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_AVAILABLE |
+      IREE_HAL_AMDGPU_CPU_VISIBLE_DEVICE_COARSE_MEMORY_FLAG_HDP_FLUSH;
+
+  iree_hal_amdgpu_memory_system_capabilities_selection_t selection =
+      MakeMemorySystemSelection();
+  selection.svm.direct_host_access = 1;
+  selection.device_local.coarse_cpu_visible_memory = &coarse_memory;
+
+  iree_hal_amdgpu_memory_system_capabilities_t capability;
+  iree_hal_amdgpu_select_memory_system_capabilities(&selection, &capability);
+
+  EXPECT_TRUE(capability.svm.supported);
+  EXPECT_FALSE(capability.svm.accessible_by_default);
+  EXPECT_FALSE(capability.svm.xnack_enabled);
+  EXPECT_TRUE(capability.svm.direct_host_access);
+  EXPECT_TRUE(capability.device_local.fine_host_visible);
+  EXPECT_TRUE(capability.device_local.coarse_cpu_visible);
+
+  iree_hal_device_capability_bits_t flags =
+      iree_hal_amdgpu_select_memory_system_device_capability_flags(&capability);
+  EXPECT_TRUE(flags & IREE_HAL_DEVICE_CAPABILITY_SHARED_VIRTUAL_ADDRESS);
+  EXPECT_FALSE(flags & IREE_HAL_DEVICE_CAPABILITY_UNIFIED_MEMORY);
+  EXPECT_FALSE(flags & IREE_HAL_DEVICE_CAPABILITY_PEER_ADDRESSABLE);
+  EXPECT_FALSE(flags & IREE_HAL_DEVICE_CAPABILITY_PEER_COHERENT);
+  EXPECT_TRUE(iree_hal_amdgpu_memory_system_requires_svm_access_attributes(
+      &capability));
 }
 
 TEST_F(PhysicalDeviceCapabilitiesTest, SelectsPrepublishedKernargStorage) {
