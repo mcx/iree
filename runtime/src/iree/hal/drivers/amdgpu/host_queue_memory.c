@@ -157,11 +157,6 @@ static iree_status_t iree_hal_amdgpu_host_queue_select_alloca_pool(
     return iree_ok_status();
   }
 
-  iree_hal_pool_capabilities_t default_capabilities;
-  iree_hal_pool_query_capabilities(queue->default_pool, &default_capabilities);
-  iree_hal_amdgpu_host_queue_apply_pool_optimal_memory_type(
-      &default_capabilities, params);
-
   iree_hal_pool_t* selected_pool = iree_hal_pool_set_select(
       queue->default_pool_set, *params, allocation_size);
   if (IREE_UNLIKELY(!selected_pool)) {
@@ -171,6 +166,8 @@ static iree_status_t iree_hal_amdgpu_host_queue_select_alloca_pool(
         allocation_size);
   }
   iree_hal_pool_query_capabilities(selected_pool, out_capabilities);
+  iree_hal_amdgpu_host_queue_apply_pool_optimal_memory_type(out_capabilities,
+                                                            params);
   *out_allocation_pool = selected_pool;
   return iree_ok_status();
 }

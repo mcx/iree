@@ -80,6 +80,10 @@ typedef struct iree_hal_amdgpu_gfxip_version_t {
 #define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_POOL_RANGE_LENGTH_DEFAULT \
   (64 * 1024 * 1024)
 
+// Logical byte length for host-visible default queue-allocation pool slabs.
+#define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_HOST_POOL_RANGE_LENGTH_DEFAULT \
+  (64 * 1024)
+
 // Minimum byte alignment for default-pool suballocations.
 #define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_POOL_ALIGNMENT_DEFAULT 256
 
@@ -227,14 +231,20 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   iree_async_notification_t* default_pool_notification;
   // Slab provider backing default and caller-created pools for this domain.
   iree_hal_slab_provider_t* default_slab_provider;
+  // Host-local slab provider for mappable queue allocation transients.
+  iree_hal_slab_provider_t* default_host_slab_provider;
   // TLSF options derived from device options and HSA memory-pool properties.
   iree_hal_tlsf_pool_options_t default_pool_options;
-  // Routes default queue allocations to the best device-owned pool.
+  // Routes default queue allocations to the best compatible memory pool.
   iree_hal_pool_set_t default_pool_set;
   // Frontier-aware suballocating pool used up to the TLSF slab length.
   iree_hal_pool_t* default_pool;
   // Direct per-allocation pool used for requests larger than one TLSF slab.
   iree_hal_pool_t* default_oversized_pool;
+  // Frontier-aware suballocating pool for host-visible queue allocations.
+  iree_hal_pool_t* default_host_pool;
+  // Direct host-visible pool used for requests larger than one host TLSF slab.
+  iree_hal_pool_t* default_host_oversized_pool;
 
   // Fixed-size staging pool for non-mappable queue_read/queue_write transfers.
   iree_hal_amdgpu_staging_pool_t file_staging_pool;

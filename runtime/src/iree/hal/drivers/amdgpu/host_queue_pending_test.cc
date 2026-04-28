@@ -7,6 +7,7 @@
 #include "iree/hal/drivers/amdgpu/host_queue_pending.h"
 
 #include <cstdint>
+#include <cstring>
 
 #include "iree/async/frontier.h"
 #include "iree/base/internal/atomics.h"
@@ -122,6 +123,18 @@ static iree_hal_buffer_params_t MakeTransientBufferParams() {
   return params;
 }
 
+static iree_hal_buffer_params_t MakeHostLocalMappedTransientBufferParams(
+    iree_hal_memory_type_t extra_memory_type) {
+  iree_hal_buffer_params_t params = {0};
+  params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL |
+                IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE | extra_memory_type;
+  params.access = IREE_HAL_MEMORY_ACCESS_ALL;
+  params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER |
+                 IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
+                 IREE_HAL_BUFFER_USAGE_MAPPING;
+  return params;
+}
+
 static iree_status_t CreateHostVisibleTransferBuffer(
     iree_hal_allocator_t* allocator, iree_device_size_t buffer_size,
     iree_hal_buffer_t** out_buffer) {
@@ -147,6 +160,77 @@ static iree_hal_semaphore_list_t MakeSemaphoreList(
       /*semaphores=*/semaphore,
       /*payload_values=*/payload_value,
   };
+}
+
+static void RunDefaultPoolServesHostLocalMappedAlloca(
+    const iree_hal_amdgpu_libhsa_t* libhsa,
+    const iree_hal_amdgpu_topology_t* topology, iree_allocator_t host_allocator,
+    iree_hal_memory_type_t extra_memory_type) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, libhsa, topology, host_allocator));
+
+  Ref<iree_hal_semaphore_t> alloca_signal;
+  IREE_ASSERT_OK(
+      CreateSemaphore(test_device.base_device(), alloca_signal.out()));
+  uint64_t alloca_signal_value = 1;
+  iree_hal_semaphore_t* alloca_signal_ptr = alloca_signal.get();
+  const iree_hal_semaphore_list_t alloca_signal_list =
+      MakeSemaphoreList(&alloca_signal_ptr, &alloca_signal_value);
+
+  iree_hal_buffer_t* buffer = NULL;
+  IREE_ASSERT_OK(iree_hal_device_queue_alloca(
+      test_device.base_device(), kQueueAffinity0,
+      iree_hal_semaphore_list_empty(), alloca_signal_list, /*pool=*/NULL,
+      MakeHostLocalMappedTransientBufferParams(extra_memory_type),
+      /*allocation_size=*/8, IREE_HAL_ALLOCA_FLAG_NONE, &buffer));
+  ASSERT_NE(buffer, nullptr);
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(alloca_signal, alloca_signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+
+  EXPECT_TRUE(iree_all_bits_set(
+      iree_hal_buffer_memory_type(buffer),
+      IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE));
+  EXPECT_TRUE(iree_all_bits_set(iree_hal_buffer_allowed_usage(buffer),
+                                IREE_HAL_BUFFER_USAGE_MAPPING_SCOPED));
+
+  iree_hal_buffer_mapping_t mapping;
+  IREE_ASSERT_OK(iree_hal_buffer_map_range(
+      buffer, IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_WRITE,
+      /*byte_offset=*/0, /*byte_length=*/8, &mapping));
+  memset(mapping.contents.data, 0, 8);
+  iree_hal_buffer_unmap_range(&mapping);
+
+  Ref<iree_hal_semaphore_t> dealloca_signal;
+  IREE_ASSERT_OK(
+      CreateSemaphore(test_device.base_device(), dealloca_signal.out()));
+  uint64_t dealloca_signal_value = 1;
+  iree_hal_semaphore_t* dealloca_signal_ptr = dealloca_signal.get();
+  const iree_hal_semaphore_list_t dealloca_signal_list =
+      MakeSemaphoreList(&dealloca_signal_ptr, &dealloca_signal_value);
+  IREE_ASSERT_OK(iree_hal_device_queue_dealloca(
+      test_device.base_device(), kQueueAffinity0,
+      iree_hal_semaphore_list_empty(), dealloca_signal_list, buffer,
+      IREE_HAL_DEALLOCA_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(dealloca_signal, dealloca_signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+  iree_hal_buffer_release(buffer);
+}
+
+TEST_F(HostQueuePendingTest, DefaultPoolServesHostLocalMappedAlloca) {
+  RunDefaultPoolServesHostLocalMappedAlloca(
+      &libhsa_, &topology_, host_allocator_, IREE_HAL_MEMORY_TYPE_NONE);
+}
+
+TEST_F(HostQueuePendingTest, DefaultPoolServesOptimalHostLocalMappedAlloca) {
+  RunDefaultPoolServesHostLocalMappedAlloca(
+      &libhsa_, &topology_, host_allocator_, IREE_HAL_MEMORY_TYPE_OPTIMAL);
 }
 
 static bool HostQueueHasPendingOps(iree_hal_amdgpu_host_queue_t* queue) {
