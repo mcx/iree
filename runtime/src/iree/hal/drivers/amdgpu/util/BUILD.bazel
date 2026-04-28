@@ -234,6 +234,16 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_library(
+    name = "device_clock",
+    srcs = ["device_clock.c"],
+    hdrs = ["device_clock.h"],
+    deps = [
+        ":kfd",
+        "//runtime/src/iree/base",
+    ],
+)
+
+iree_runtime_cc_library(
     name = "kfd",
     srcs = ["kfd.c"],
     hdrs = ["kfd.h"],
@@ -472,6 +482,17 @@ iree_runtime_cc_test(
     ],
     deps = [
         ":queue_primitives",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "device_clock_test",
+    srcs = ["device_clock_test.cc"],
+    deps = [
+        ":device_clock",
         "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",

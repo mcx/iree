@@ -172,8 +172,8 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   hsa_agent_t device_agent;
   // Ordinal of the GPU agent within the topology.
   iree_host_size_t device_ordinal;
-  // KFD GPU identifier used when querying per-device clock counters.
-  uint32_t kfd_gpu_uid;
+  // HSA driver identifier used when querying per-device clock counters.
+  uint32_t driver_uid;
   // PCI domain from HSA_AMD_AGENT_INFO_DOMAIN.
   uint32_t pci_domain;
   // PCI bus decoded from HSA_AMD_AGENT_INFO_BDFID.

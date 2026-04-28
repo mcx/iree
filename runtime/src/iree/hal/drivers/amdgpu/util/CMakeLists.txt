@@ -239,6 +239,19 @@ iree_cc_test(
 
 iree_cc_library(
   NAME
+    device_clock
+  HDRS
+    "device_clock.h"
+  SRCS
+    "device_clock.c"
+  DEPS
+    ::kfd
+    iree::base
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     kfd
   HDRS
     "kfd.h"
@@ -508,6 +521,18 @@ iree_cc_test(
     "nodocker"
   GROUP
     "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    device_clock_test
+  SRCS
+    "device_clock_test.cc"
+  DEPS
+    ::device_clock
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 iree_cc_test(

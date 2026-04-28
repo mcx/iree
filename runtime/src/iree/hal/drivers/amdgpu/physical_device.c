@@ -412,7 +412,7 @@ static iree_status_t iree_hal_amdgpu_physical_device_initialize_identity(
   IREE_RETURN_IF_ERROR(
       iree_hsa_agent_get_info(IREE_LIBHSA(libhsa), device_agent,
                               (hsa_agent_info_t)HSA_AMD_AGENT_INFO_DRIVER_UID,
-                              &out_physical_device->kfd_gpu_uid));
+                              &out_physical_device->driver_uid));
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_agent_pci_identity(
       libhsa, device_agent, out_physical_device));
   bool has_physical_device_uuid = false;

@@ -1730,7 +1730,7 @@ TEST_F(HostQueueCommandBufferTest,
   ASSERT_EQ(physical_device_count, sink.device_records.size());
   ASSERT_EQ(physical_device_count * queue_count_per_physical_device,
             sink.queue_records.size());
-  EXPECT_GE(sink.clock_correlations.size(), 2 * physical_device_count);
+  EXPECT_TRUE(sink.clock_correlations.empty());
 
   for (const auto& device_record : sink.device_records) {
     EXPECT_LT(device_record.physical_device_ordinal, physical_device_count);
@@ -1739,9 +1739,6 @@ TEST_F(HostQueueCommandBufferTest,
   for (const auto& queue_record : sink.queue_records) {
     EXPECT_LT(queue_record.physical_device_ordinal, physical_device_count);
     EXPECT_LT(queue_record.queue_ordinal, queue_count_per_physical_device);
-  }
-  for (const auto& clock_correlation : sink.clock_correlations) {
-    EXPECT_LT(clock_correlation.physical_device_ordinal, physical_device_count);
   }
 }
 
@@ -1899,7 +1896,7 @@ TEST_F(HostQueueCommandBufferTest,
 
   const iree_host_size_t event_capacity =
       test_device.logical_device()
-          ->profiling.event_streams.queue.stream.capacity;
+          ->profiling.event_streams.queue.stream.ring.capacity;
   ASSERT_GT(event_capacity, 0u);
   for (iree_host_size_t i = 0; i <= event_capacity; ++i) {
     iree_hal_profile_queue_event_t event =
@@ -1938,7 +1935,7 @@ TEST_F(HostQueueCommandBufferTest,
 
   const iree_host_size_t event_capacity =
       test_device.logical_device()
-          ->profiling.event_streams.memory.stream.capacity;
+          ->profiling.event_streams.memory.stream.ring.capacity;
   ASSERT_GT(event_capacity, 0u);
   iree_host_size_t recorded_count = 0;
   for (iree_host_size_t i = 0; i <= event_capacity; ++i) {

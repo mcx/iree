@@ -489,10 +489,11 @@ iree_hal_amdgpu_logical_device_sample_profile_clock_correlation(
         physical_device->device_ordinal);
   }
 
-  iree_hal_amdgpu_clock_counters_t counters = {0};
+  iree_hal_amdgpu_device_clock_counters_t counters = {0};
   const iree_time_t host_time_begin_ns = iree_time_now();
-  iree_status_t status = iree_hal_amdgpu_kfd_get_clock_counters(
-      logical_device->system->kfd_fd, physical_device->kfd_gpu_uid, &counters);
+  iree_status_t status = iree_hal_amdgpu_device_clock_source_sample(
+      &logical_device->system->device_clock_source, physical_device->driver_uid,
+      &counters);
   const iree_time_t host_time_end_ns = iree_time_now();
 
   if (iree_status_is_ok(status)) {
@@ -506,18 +507,18 @@ iree_hal_amdgpu_logical_device_sample_profile_clock_correlation(
         (uint32_t)physical_device->device_ordinal;
     out_record->sample_id =
         logical_device->profiling.next_clock_correlation_sample_id++;
-    out_record->device_tick = counters.gpu_clock_counter;
-    out_record->host_cpu_timestamp_ns = counters.cpu_clock_counter;
-    out_record->host_system_timestamp = counters.system_clock_counter;
-    out_record->host_system_frequency_hz = counters.system_clock_freq;
+    out_record->device_tick = counters.device_clock_counter;
+    out_record->host_cpu_timestamp_ns = counters.host_cpu_timestamp_ns;
+    out_record->host_system_timestamp = counters.host_system_timestamp;
+    out_record->host_system_frequency_hz = counters.host_system_frequency_hz;
     out_record->host_time_begin_ns = host_time_begin_ns;
     out_record->host_time_end_ns = host_time_end_ns;
   } else {
     status = iree_status_annotate_f(
         status,
         "sampling profile clock correlation for physical_device_ordinal=%zu "
-        "gpu_uid=%" PRIu32,
-        physical_device->device_ordinal, physical_device->kfd_gpu_uid);
+        "driver_uid=%" PRIu32,
+        physical_device->device_ordinal, physical_device->driver_uid);
   }
   return status;
 }
@@ -746,8 +747,12 @@ static iree_status_t iree_hal_amdgpu_logical_device_write_profile_metadata(
       &logical_device->profile_metadata, sink, session_id,
       logical_device->identifier, emit_executable_artifacts,
       &logical_device->profiling.metadata_cursor));
-  return iree_hal_amdgpu_logical_device_write_profile_clock_correlations(
-      logical_device, sink, session_id);
+  if (iree_hal_amdgpu_logical_device_profiling_needs_hsa_timestamps(
+          data_families)) {
+    return iree_hal_amdgpu_logical_device_write_profile_clock_correlations(
+        logical_device, sink, session_id);
+  }
+  return iree_ok_status();
 }
 
 static iree_status_t iree_hal_amdgpu_logical_device_write_profile_events(
@@ -2643,9 +2648,12 @@ static iree_status_t iree_hal_amdgpu_logical_device_profiling_flush(
       emit_executable_artifacts, &logical_device->profiling.metadata_cursor));
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_logical_device_write_profile_events(
       logical_device, sink, logical_device->profiling.session_id));
-  IREE_RETURN_IF_ERROR(
-      iree_hal_amdgpu_logical_device_write_profile_clock_correlations(
-          logical_device, sink, logical_device->profiling.session_id));
+  if (iree_hal_amdgpu_logical_device_profiling_needs_hsa_timestamps(
+          options->data_families)) {
+    IREE_RETURN_IF_ERROR(
+        iree_hal_amdgpu_logical_device_write_profile_clock_correlations(
+            logical_device, sink, logical_device->profiling.session_id));
+  }
   return iree_hal_amdgpu_profile_device_metrics_session_sample_and_write(
       logical_device->profiling.device_metrics_session, sink,
       logical_device->profiling.session_id, logical_device->identifier);
@@ -2686,7 +2694,9 @@ static iree_status_t iree_hal_amdgpu_logical_device_profiling_end(
     status = iree_hal_amdgpu_logical_device_write_profile_events(
         logical_device, sink, session_id);
   }
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) &&
+      iree_hal_amdgpu_logical_device_profiling_needs_hsa_timestamps(
+          data_families)) {
     status = iree_hal_amdgpu_logical_device_write_profile_clock_correlations(
         logical_device, sink, session_id);
   }

@@ -173,6 +173,7 @@ iree_cc_library(
     iree::hal::drivers::amdgpu::device::timestamp
     iree::hal::drivers::amdgpu::util::block_pool
     iree::hal::drivers::amdgpu::util::code_object_target
+    iree::hal::drivers::amdgpu::util::device_clock
     iree::hal::drivers::amdgpu::util::device_library
     iree::hal::drivers::amdgpu::util::hsaco_metadata
     iree::hal::drivers::amdgpu::util::info
