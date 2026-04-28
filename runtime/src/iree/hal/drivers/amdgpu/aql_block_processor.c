@@ -106,6 +106,10 @@ iree_hal_amdgpu_aql_block_processor_packet_control(
     const iree_hal_amdgpu_aql_block_processor_t* processor,
     uint32_t packet_index, iree_hsa_fence_scope_t minimum_acquire_scope,
     iree_hal_amdgpu_aql_block_processor_packet_flags_t packet_flags) {
+  // The replay hot path is intentionally additive: command recording has
+  // already encoded execution-barrier scopes in |packet_flags|, and submission
+  // policy only overlays wait, queue-kernarg, and terminal-signal visibility.
+  // Do not infer memory hazards here by walking command operands.
   const uint32_t logical_packet_index =
       processor->packets.index_base + packet_index;
   const bool has_barrier =

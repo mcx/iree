@@ -1049,6 +1049,10 @@ static iree_hsa_fence_scope_t
 iree_hal_amdgpu_aql_command_buffer_access_scope_fence_scope(
     iree_hal_access_scope_t access_scope) {
   if (access_scope == 0) return IREE_HSA_FENCE_SCOPE_NONE;
+  // Resolve HAL memory visibility to HSA fence scope while recording so replay
+  // can consume compact command flags without re-inspecting barrier operands.
+  // Same-agent device producer/consumer edges use AGENT; host/system-visible
+  // edges use SYSTEM; execution-only barriers carry no acquire/release scope.
   const iree_hal_access_scope_t system_scopes =
       IREE_HAL_ACCESS_SCOPE_HOST_READ | IREE_HAL_ACCESS_SCOPE_HOST_WRITE |
       IREE_HAL_ACCESS_SCOPE_MEMORY_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE;
