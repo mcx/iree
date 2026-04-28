@@ -82,6 +82,7 @@ typedef enum iree_hal_amdgpu_command_buffer_kernarg_strategy_e {
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_CUSTOM_DIRECT = 1,
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_INDIRECT = 2,
   IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PREPUBLISHED = 3,
+  IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_PATCHED_TEMPLATE = 4,
 } iree_hal_amdgpu_command_buffer_kernarg_strategy_t;
 
 // Binding reference kind constants embedded in command records.
@@ -210,11 +211,13 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   // Dynamic source binding table slot or static buffer ordinal. Must be zero
   // for raw static sources.
   uint32_t slot;
+  // Destination HAL ABI binding pointer ordinal for compact patch lists.
+  uint16_t target_binding_ordinal;
   // Source flags from
   // iree_hal_amdgpu_command_buffer_binding_source_flag_bits_t.
   uint8_t flags;
-  // Reserved bytes that must be zero in version 0.
-  uint8_t reserved0[3];
+  // Reserved byte that must be zero in version 0.
+  uint8_t reserved0;
 } iree_hal_amdgpu_command_buffer_binding_source_t;
 IREE_AMDGPU_STATIC_ASSERT(
     sizeof(iree_hal_amdgpu_command_buffer_binding_source_t) == 16,
@@ -251,6 +254,8 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   // Strategy-specific payload reference.
   // HAL/CUSTOM_DIRECT/INDIRECT: byte offset from this command record to
   // constants/implicit tail bytes.
+  // PATCHED_TEMPLATE: command-buffer rodata ordinal for the immutable kernarg
+  // template copied into queue-owned kernargs before dynamic binding patches.
   // PREPUBLISHED: byte offset from the command-buffer prepublished kernarg
   // storage to the final kernargs.
   uint32_t payload_reference;
@@ -258,8 +263,13 @@ typedef struct IREE_AMDGPU_ALIGNAS(8)
   uint16_t binding_count;
   // Total kernarg reservation size in 8-byte qwords.
   uint16_t kernarg_length_qwords;
-  // Tail payload size in 8-byte qwords.
-  uint16_t tail_length_qwords;
+  // Strategy-specific payload count.
+  union {
+    // Inline tail payload size in 8-byte qwords.
+    uint16_t tail_length_qwords;
+    // Number of dynamic binding patch records following this command.
+    uint16_t patch_source_count;
+  } payload;
   // Kernarg strategy from iree_hal_amdgpu_command_buffer_kernarg_strategy_t.
   uint8_t kernarg_strategy;
   // Dispatch flags from iree_hal_amdgpu_command_buffer_dispatch_flag_bits_t.

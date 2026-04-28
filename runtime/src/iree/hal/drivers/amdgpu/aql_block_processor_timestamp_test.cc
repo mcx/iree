@@ -75,7 +75,7 @@ static DirectDispatchBlock MakeDirectDispatchBlock() {
   block.dispatch_command.payload_reference = sizeof(block.dispatch_command);
   block.dispatch_command.kernarg_length_qwords =
       sizeof(block.tail) / sizeof(uint64_t);
-  block.dispatch_command.tail_length_qwords =
+  block.dispatch_command.payload.tail_length_qwords =
       sizeof(block.tail) / sizeof(uint64_t);
   block.dispatch_command.kernarg_strategy =
       IREE_HAL_AMDGPU_COMMAND_BUFFER_KERNARG_STRATEGY_CUSTOM_DIRECT;
