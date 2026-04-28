@@ -10,6 +10,7 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
 #include "iree/hal/api.h"
+#include "iree/hal/drivers/amdgpu/aql_prepublished_kernarg_storage.h"
 #include "iree/hal/drivers/amdgpu/aql_program_builder.h"
 #include "iree/hal/drivers/amdgpu/profile_metadata.h"
 
@@ -28,6 +29,8 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
     iree_hal_command_category_t command_categories,
     iree_hal_queue_affinity_t queue_affinity, iree_host_size_t binding_capacity,
     iree_host_size_t device_ordinal,
+    iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
+        prepublished_kernarg_storage,
     iree_hal_amdgpu_profile_metadata_registry_t* profile_metadata,
     iree_arena_block_pool_t* program_block_pool,
     iree_arena_block_pool_t* resource_set_block_pool,

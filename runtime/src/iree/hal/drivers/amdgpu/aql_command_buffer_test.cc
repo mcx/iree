@@ -29,6 +29,9 @@ using CommandBufferPtr =
 class AqlCommandBufferTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    IREE_ASSERT_OK(iree_hal_allocator_create_heap(
+        iree_make_cstring_view("aql_command_buffer_test"),
+        iree_allocator_system(), iree_allocator_system(), &device_allocator_));
     iree_hal_amdgpu_profile_metadata_initialize(iree_allocator_system(),
                                                 &profile_metadata_);
     IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_block_pool_initialize(
@@ -38,6 +41,7 @@ class AqlCommandBufferTest : public ::testing::Test {
   void TearDown() override {
     iree_arena_block_pool_deinitialize(&block_pool_);
     iree_hal_amdgpu_profile_metadata_deinitialize(&profile_metadata_);
+    iree_hal_allocator_release(device_allocator_);
   }
 
   CommandBufferPtr CreateCommandBufferWithMode(
@@ -53,8 +57,9 @@ class AqlCommandBufferTest : public ::testing::Test {
       iree_host_size_t binding_capacity = 0) {
     iree_hal_command_buffer_t* command_buffer = nullptr;
     IREE_EXPECT_OK(iree_hal_amdgpu_aql_command_buffer_create(
-        /*device_allocator=*/nullptr, mode, IREE_HAL_COMMAND_CATEGORY_ANY,
+        device_allocator_, mode, IREE_HAL_COMMAND_CATEGORY_ANY,
         IREE_HAL_QUEUE_AFFINITY_ANY, binding_capacity, /*device_ordinal=*/0,
+        iree_hal_amdgpu_aql_prepublished_kernarg_storage_disabled(),
         profile_metadata, &block_pool_, &block_pool_, iree_allocator_system(),
         &command_buffer));
     return CommandBufferPtr(command_buffer);
@@ -70,8 +75,13 @@ class AqlCommandBufferTest : public ::testing::Test {
   }
 
  private:
+  // Test allocator borrowed by command buffers for validation.
+  iree_hal_allocator_t* device_allocator_ = nullptr;
+  // Fixed block size used by command-buffer tests.
   iree_host_size_t block_size_ = 256;
+  // Program and resource-set block pool borrowed by test command buffers.
   iree_arena_block_pool_t block_pool_;
+  // Profile metadata registry borrowed by test command buffers.
   iree_hal_amdgpu_profile_metadata_registry_t profile_metadata_;
 };
 

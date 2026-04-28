@@ -498,10 +498,27 @@ static iree_status_t iree_hal_amdgpu_physical_device_query_global_memory_pools(
     iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t device_agent,
     hsa_amd_memory_pool_t* out_coarse_block_memory_pool,
     hsa_amd_memory_pool_t* out_fine_block_memory_pool) {
-  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_find_coarse_global_memory_pool(
-      libhsa, device_agent, out_coarse_block_memory_pool));
-  return iree_hal_amdgpu_find_fine_global_memory_pool(
-      libhsa, device_agent, out_fine_block_memory_pool);
+  iree_status_t status = iree_hal_amdgpu_find_coarse_global_memory_pool(
+      libhsa, device_agent, out_coarse_block_memory_pool);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_amdgpu_find_fine_global_memory_pool(
+        libhsa, device_agent, out_fine_block_memory_pool);
+  }
+  if (!iree_status_is_ok(status)) {
+    status = iree_status_annotate(
+        status, IREE_SV("AMDGPU physical device requires coarse and fine "
+                        "device-local global memory pools"));
+  }
+  return status;
+}
+
+static iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
+iree_hal_amdgpu_physical_device_select_prepublished_kernarg_storage(
+    hsa_amd_memory_pool_t fine_block_memory_pool) {
+  if (!fine_block_memory_pool.handle) {
+    return iree_hal_amdgpu_aql_prepublished_kernarg_storage_disabled();
+  }
+  return iree_hal_amdgpu_aql_prepublished_kernarg_storage_device_fine_host_coherent();
 }
 
 typedef struct iree_hal_amdgpu_physical_device_kernarg_ring_memory_t {
@@ -968,6 +985,11 @@ iree_status_t iree_hal_amdgpu_physical_device_initialize(
     status = iree_hal_amdgpu_physical_device_query_global_memory_pools(
         libhsa, device_agent, &coarse_block_memory_pool,
         &fine_block_memory_pool);
+  }
+  if (iree_status_is_ok(status)) {
+    out_physical_device->prepublished_kernarg_storage =
+        iree_hal_amdgpu_physical_device_select_prepublished_kernarg_storage(
+            fine_block_memory_pool);
   }
   if (iree_status_is_ok(status)) {
     status = iree_hal_amdgpu_physical_device_preallocate_host_pool(

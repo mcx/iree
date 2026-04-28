@@ -158,6 +158,8 @@ typedef struct iree_hal_amdgpu_aql_command_buffer_t {
   } static_buffers;
   // Device-visible storage containing prepublished static dispatch kernargs.
   struct {
+    // Cold-path storage strategy selected during command-buffer creation.
+    iree_hal_amdgpu_aql_prepublished_kernarg_storage_t storage;
     // Retained buffer containing all prepublished kernarg templates.
     iree_hal_buffer_t* buffer;
     // Device pointer to the first byte of |buffer|.
@@ -239,6 +241,12 @@ static bool iree_hal_amdgpu_aql_command_buffer_validates(
   (void)command_buffer;
   return false;
 #endif  // IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+}
+
+static bool iree_hal_amdgpu_aql_command_buffer_prepublish_enabled(
+    const iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
+  return command_buffer->prepublished_kernargs.storage.strategy !=
+         IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_STRATEGY_DISABLED;
 }
 
 static void iree_hal_amdgpu_aql_command_buffer_reset_resources(
@@ -600,6 +608,37 @@ iree_hal_amdgpu_aql_command_buffer_copy_prepublished_kernargs(
 }
 
 static iree_status_t
+iree_hal_amdgpu_aql_command_buffer_verify_prepublished_kernarg_storage(
+    const iree_hal_amdgpu_aql_command_buffer_t* command_buffer,
+    iree_hal_memory_type_t required_type, iree_hal_buffer_t* buffer) {
+  const iree_hal_memory_type_t actual_type =
+      iree_hal_buffer_memory_type(buffer);
+  if (IREE_LIKELY(iree_all_bits_set(actual_type, required_type))) {
+    return iree_ok_status();
+  }
+#if IREE_STATUS_MODE
+  iree_bitfield_string_temp_t required_temp;
+  iree_bitfield_string_temp_t actual_temp;
+  const iree_string_view_t required_string =
+      iree_hal_memory_type_format(required_type, &required_temp);
+  const iree_string_view_t actual_string =
+      iree_hal_memory_type_format(actual_type, &actual_temp);
+  return iree_make_status(
+      IREE_STATUS_FAILED_PRECONDITION,
+      "prepublished command-buffer kernarg strategy %u requires "
+      "memory_type=%.*s but allocation returned memory_type=%.*s",
+      command_buffer->prepublished_kernargs.storage.strategy,
+      (int)required_string.size, required_string.data, (int)actual_string.size,
+      actual_string.data);
+#else
+  return iree_make_status(
+      IREE_STATUS_FAILED_PRECONDITION,
+      "prepublished command-buffer kernarg allocation returned incompatible "
+      "memory type");
+#endif  // IREE_STATUS_MODE
+}
+
+static iree_status_t
 iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
     iree_hal_amdgpu_aql_command_buffer_t* command_buffer) {
   iree_host_size_t template_count = 0;
@@ -610,6 +649,13 @@ iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
           command_buffer, &template_count, &payload_length, &max_alignment));
   if (template_count == 0) {
     return iree_ok_status();
+  }
+  if (IREE_UNLIKELY(!iree_hal_amdgpu_aql_command_buffer_prepublish_enabled(
+          command_buffer))) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "command buffer recorded prepublished kernargs without a storage "
+        "strategy");
   }
   if (IREE_UNLIKELY(payload_length > UINT32_MAX)) {
     return iree_make_status(
@@ -640,12 +686,9 @@ iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, allocation_length);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, template_count);
 
-  iree_hal_buffer_params_t params = {0};
-  params.type =
-      IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL | IREE_HAL_MEMORY_TYPE_HOST_VISIBLE;
-  params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_UNIFORM_READ |
-                 IREE_HAL_BUFFER_USAGE_MAPPING;
+  iree_hal_buffer_params_t params =
+      command_buffer->prepublished_kernargs.storage.buffer_params;
+  params.queue_affinity = command_buffer->base.queue_affinity;
 
   iree_hal_buffer_t* template_buffer = NULL;
   iree_status_t status = iree_hal_allocator_allocate_buffer(
@@ -665,6 +708,11 @@ iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
     }
   }
   if (iree_status_is_ok(status)) {
+    status =
+        iree_hal_amdgpu_aql_command_buffer_verify_prepublished_kernarg_storage(
+            command_buffer, params.type, template_buffer);
+  }
+  if (iree_status_is_ok(status)) {
     status = iree_hal_buffer_map_range(
         template_buffer, IREE_HAL_MAPPING_MODE_SCOPED,
         IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE, /*byte_offset=*/0,
@@ -674,12 +722,6 @@ iree_hal_amdgpu_aql_command_buffer_materialize_prepublished_kernargs(
     memset(mapping.contents.data, 0, allocation_length);
     status = iree_hal_amdgpu_aql_command_buffer_copy_prepublished_kernargs(
         command_buffer, &mapping, device_base);
-  }
-  if (iree_status_is_ok(status) &&
-      !iree_all_bits_set(iree_hal_buffer_memory_type(template_buffer),
-                         IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
-    status = iree_hal_buffer_mapping_flush_range(&mapping, /*byte_offset=*/0,
-                                                 IREE_HAL_WHOLE_BUFFER);
   }
   if (mapping.buffer) {
     status = iree_status_join(status, iree_hal_buffer_unmap_range(&mapping));
@@ -709,11 +751,14 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
     iree_hal_command_category_t command_categories,
     iree_hal_queue_affinity_t queue_affinity, iree_host_size_t binding_capacity,
     iree_host_size_t device_ordinal,
+    iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
+        prepublished_kernarg_storage,
     iree_hal_amdgpu_profile_metadata_registry_t* profile_metadata,
     iree_arena_block_pool_t* program_block_pool,
     iree_arena_block_pool_t* resource_set_block_pool,
     iree_allocator_t host_allocator,
     iree_hal_command_buffer_t** out_command_buffer) {
+  IREE_ASSERT_ARGUMENT(device_allocator);
   IREE_ASSERT_ARGUMENT(out_command_buffer);
   *out_command_buffer = NULL;
 
@@ -744,6 +789,16 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
                             " exceeds uint32_t storage",
                             device_ordinal);
   }
+  switch (prepublished_kernarg_storage.strategy) {
+    case IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_STRATEGY_DISABLED:
+    case IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_STRATEGY_DEVICE_FINE_HOST_COHERENT:
+      break;
+    default:
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "unsupported prepublished command-buffer kernarg storage strategy %u",
+          prepublished_kernarg_storage.strategy);
+  }
 
   IREE_TRACE_ZONE_BEGIN(z0);
 
@@ -771,6 +826,7 @@ iree_status_t iree_hal_amdgpu_aql_command_buffer_create(
   command_buffer->block_pools.resource_set = resource_set_block_pool;
   command_buffer->profile.metadata = profile_metadata;
   command_buffer->device_ordinal = (uint32_t)device_ordinal;
+  command_buffer->prepublished_kernargs.storage = prepublished_kernarg_storage;
   iree_arena_initialize(program_block_pool, &command_buffer->recording_arena);
   iree_hal_amdgpu_aql_program_builder_initialize(program_block_pool,
                                                  &command_buffer->builder);
@@ -1955,7 +2011,8 @@ iree_hal_amdgpu_aql_command_buffer_calculate_dispatch_layout(
   // Prepublication is a reusable-command-buffer strategy for immutable
   // kernargs. It materializes static kernargs once at end() so replay avoids
   // queue-time kernarg reservation, binding patching, and block growth.
-  if (!iree_all_bits_set(command_buffer->base.mode,
+  if (iree_hal_amdgpu_aql_command_buffer_prepublish_enabled(command_buffer) &&
+      !iree_all_bits_set(command_buffer->base.mode,
                          IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT) &&
       !uses_indirect_parameters &&
       !iree_hal_amdgpu_aql_dispatch_plan_has_dynamic_bindings(plan)) {

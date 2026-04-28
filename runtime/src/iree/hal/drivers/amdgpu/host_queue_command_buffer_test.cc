@@ -1447,6 +1447,36 @@ TEST_F(HostQueueCommandBufferTest,
   }
 }
 
+TEST_F(HostQueueCommandBufferTest,
+       PrepublishedKernargsUseRecordedDeviceFineStorage) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+
+  iree_hal_amdgpu_logical_device_t* logical_device =
+      test_device.logical_device();
+  ASSERT_GT(logical_device->physical_device_count, 0u);
+  const iree_hal_amdgpu_aql_prepublished_kernarg_storage_t* storage =
+      &logical_device->physical_devices[0]->prepublished_kernarg_storage;
+
+  EXPECT_EQ(
+      storage->strategy,
+      IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_STRATEGY_DEVICE_FINE_HOST_COHERENT);
+  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.type,
+                                IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                                    IREE_HAL_MEMORY_TYPE_HOST_VISIBLE |
+                                    IREE_HAL_MEMORY_TYPE_HOST_COHERENT));
+  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.access,
+                                IREE_HAL_MEMORY_ACCESS_ALL));
+  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.usage,
+                                IREE_HAL_BUFFER_USAGE_DISPATCH_UNIFORM_READ |
+                                    IREE_HAL_BUFFER_USAGE_MAPPING));
+}
+
 TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);

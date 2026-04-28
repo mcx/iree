@@ -9,6 +9,7 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "iree/hal/drivers/amdgpu/aql_prepublished_kernarg_storage.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
 #include "iree/hal/drivers/amdgpu/host_queue_staging.h"
@@ -226,6 +227,9 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   // CPU-visible coarse-grained device-memory capability for this GPU.
   iree_hal_amdgpu_cpu_visible_device_coarse_memory_t
       cpu_visible_device_coarse_memory;
+  // Prepublished command-buffer kernarg storage capability for this GPU.
+  iree_hal_amdgpu_aql_prepublished_kernarg_storage_t
+      prepublished_kernarg_storage;
 
   // Fine-grained block pools for device memory blocks of various sizes.
   iree_hal_amdgpu_block_pools_t fine_block_pools;

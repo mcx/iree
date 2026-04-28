@@ -349,6 +349,14 @@ iree_status_t iree_hal_amdgpu_allocator_create(
     if (iree_status_is_ok(status)) {
       status = iree_hal_amdgpu_find_fine_global_memory_pool(
           libhsa, topology->gpu_agents[i], &device_fine_pool);
+      if (!iree_status_is_ok(status)) {
+        status = iree_status_annotate_f(
+            status,
+            "AMDGPU allocator requires fine-grained device-local memory for "
+            "host-coherent DEVICE_LOCAL|HOST_VISIBLE allocations on physical "
+            "device %" PRIhsz,
+            i);
+      }
     }
     if (iree_status_is_ok(status)) {
       status = iree_hal_amdgpu_allocator_query_pool_properties(

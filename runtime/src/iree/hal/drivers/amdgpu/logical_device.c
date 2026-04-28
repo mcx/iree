@@ -2146,9 +2146,12 @@ static iree_status_t iree_hal_amdgpu_logical_device_create_command_buffer(
       iree_hal_amdgpu_logical_device_normalize_command_buffer_affinity(
           logical_device, queue_affinity, &effective_queue_affinity,
           &device_ordinal));
+  const iree_hal_amdgpu_physical_device_t* physical_device =
+      logical_device->physical_devices[device_ordinal];
   return iree_hal_amdgpu_aql_command_buffer_create(
       iree_hal_device_allocator(base_device), mode, command_categories,
       effective_queue_affinity, binding_capacity, device_ordinal,
+      physical_device->prepublished_kernarg_storage,
       &logical_device->profile_metadata,
       &logical_device->host_block_pools.command_buffer,
       &logical_device->host_block_pools.small, logical_device->host_allocator,
