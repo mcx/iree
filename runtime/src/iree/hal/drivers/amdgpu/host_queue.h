@@ -173,8 +173,9 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   // Per-queue kernarg bump allocator backed by HSA kernarg-init memory.
   iree_hal_amdgpu_kernarg_ring_t kernarg_ring;
 
-  // Optional per-queue upload ring for device-visible control records.
-  // Initialized when a submission path first needs device-side fixup inputs.
+  // Per-queue upload ring for device-visible control records.
+  // Submission paths reserve from this only when they have queue-ordered
+  // metadata such as device-side fixup inputs.
   iree_hal_amdgpu_queue_upload_ring_t queue_upload_ring;
 
   // Optional per-AQL-slot PM4 IB buffer used by PM4-backed wait, transfer, and
@@ -568,6 +569,8 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
 // 64-byte blocks, at least 2x |aql_queue_capacity| to cover one tail-padding
 // gap at wrap. Submission admission proves space in both the AQL and kernarg
 // rings before publishing packets.
+// |upload_capacity| is the power-of-two byte capacity of the device-visible
+// control upload ring used for queue-ordered submission metadata.
 //
 // |vendor_packet_capabilities| describes the AQL/PM4 vendor-packet support
 // selected from the physical device ISA. Queues allocate dynamic PM4 IB slots
@@ -597,7 +600,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     iree_hal_amdgpu_staging_pool_t* staging_pool,
     iree_host_size_t device_ordinal, uint32_t aql_queue_capacity,
     uint32_t notification_capacity, uint32_t kernarg_capacity_in_blocks,
-    iree_allocator_t host_allocator, iree_hal_amdgpu_host_queue_t* out_queue);
+    uint32_t upload_capacity, iree_allocator_t host_allocator,
+    iree_hal_amdgpu_host_queue_t* out_queue);
 
 // Deinitializes the queue. Destroys all owned resources and stops the
 // completion thread.

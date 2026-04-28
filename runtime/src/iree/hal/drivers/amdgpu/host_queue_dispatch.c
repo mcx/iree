@@ -526,19 +526,19 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_direct_dispatch(
 
   if (uses_custom_direct_arguments) {
     iree_hal_amdgpu_device_dispatch_emplace_custom_kernargs(
-        plan->layout, constants.data, submission.kernel.kernarg_blocks->data);
+        plan->layout, constants.data, submission.kernel.kernargs.blocks->data);
   } else {
     iree_hal_amdgpu_device_dispatch_emplace_hal_kernargs(
         plan->kernel_args, config.workgroup_count,
         config.dynamic_workgroup_local_memory, plan->layout, binding_ptrs,
         (const uint32_t*)constants.data,
-        submission.kernel.kernarg_blocks->data);
+        submission.kernel.kernargs.blocks->data);
   }
   iree_hal_amdgpu_device_dispatch_emplace_packet(
       plan->kernel_args, config.workgroup_count,
       config.dynamic_workgroup_local_memory,
       &submission.dispatch_slot->dispatch,
-      submission.kernel.kernarg_blocks->data);
+      submission.kernel.kernargs.blocks->data);
   submission.dispatch_slot->dispatch.completion_signal =
       submission.dispatch_completion_signal;
   submission.dispatch_setup = submission.dispatch_slot->dispatch.setup;
@@ -708,13 +708,13 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_indirect_dispatch(
     profile_harvest_packet = iree_hal_amdgpu_aql_ring_packet(
         &queue->aql_ring, profile_harvest_packet_id);
   }
-  uint8_t* patch_kernarg_data = submission.kernarg_blocks[0].data;
-  uint8_t* dispatch_kernarg_data = submission.kernarg_blocks[1].data;
+  iree_hal_amdgpu_kernarg_block_t* kernarg_blocks = submission.kernargs.blocks;
+  uint8_t* patch_kernarg_data = kernarg_blocks[0].data;
+  uint8_t* dispatch_kernarg_data = kernarg_blocks[1].data;
   uint8_t* profile_harvest_kernarg_data = NULL;
   if (profile_dispatch_packet) {
     iree_hal_amdgpu_kernarg_block_t* profile_harvest_kernarg_blocks =
-        &submission.kernarg_blocks[patch_kernarg_block_count +
-                                   target_kernarg_block_count];
+        &kernarg_blocks[patch_kernarg_block_count + target_kernarg_block_count];
     profile_harvest_kernarg_data = profile_harvest_kernarg_blocks->data;
   }
   const uint32_t placeholder_workgroup_count[3] = {0, 0, 0};

@@ -1617,14 +1617,14 @@ class QueueBenchmark : public benchmark::Fixture {
             "capacity");
       }
       if (iree_status_is_ok(status)) {
-        std::memcpy(submission.kernel.kernarg_blocks->data,
+        std::memcpy(submission.kernel.kernargs.blocks->data,
                     pre_resolved_dispatch_kernargs_,
                     pre_resolved_dispatch_kernarg_length_);
         submission.dispatch_setup =
             iree_hal_amdgpu_host_queue_write_dispatch_packet_body(
                 &submission.dispatch_slot->dispatch,
                 &pre_resolved_dispatch_packet_template_,
-                submission.kernel.kernarg_blocks->data,
+                submission.kernel.kernargs.blocks->data,
                 submission.dispatch_completion_signal);
         iree_hal_amdgpu_host_queue_finish_dispatch_submission(
             host_queue, &resolution, signal_semaphore_list, operation_resources,

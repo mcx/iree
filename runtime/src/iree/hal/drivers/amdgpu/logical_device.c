@@ -138,6 +138,8 @@ IREE_API_EXPORT void iree_hal_amdgpu_logical_device_options_initialize(
       IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_NOTIFICATION_CAPACITY;
   out_options->host_queues.kernarg_capacity =
       IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_KERNARG_CAPACITY;
+  out_options->host_queues.upload_capacity =
+      IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_UPLOAD_CAPACITY;
 
   out_options->preallocate_pools = 1;
 }
@@ -269,16 +271,18 @@ static iree_status_t iree_hal_amdgpu_logical_device_options_verify(
   if (!iree_host_size_is_power_of_two(options->host_queues.aql_capacity) ||
       !iree_host_size_is_power_of_two(
           options->host_queues.notification_capacity) ||
-      !iree_host_size_is_power_of_two(options->host_queues.kernarg_capacity)) {
+      !iree_host_size_is_power_of_two(options->host_queues.kernarg_capacity) ||
+      !iree_host_size_is_power_of_two(options->host_queues.upload_capacity)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
-        z0, iree_make_status(
-                IREE_STATUS_OUT_OF_RANGE,
-                "host queue AQL, notification, and kernarg capacities must all "
-                "be powers of two (got aql=%u, notification=%u, "
-                "kernarg_blocks=%u)",
-                options->host_queues.aql_capacity,
-                options->host_queues.notification_capacity,
-                options->host_queues.kernarg_capacity));
+        z0, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                             "host queue AQL, notification, kernarg, and "
+                             "upload capacities must all "
+                             "be powers of two (got aql=%u, notification=%u, "
+                             "kernarg_blocks=%u, upload_bytes=%u)",
+                             options->host_queues.aql_capacity,
+                             options->host_queues.notification_capacity,
+                             options->host_queues.kernarg_capacity,
+                             options->host_queues.upload_capacity));
   }
   if (options->host_queues.kernarg_capacity / 2u <
       options->host_queues.aql_capacity) {
@@ -1119,6 +1123,8 @@ static void iree_hal_amdgpu_logical_device_translate_physical_options(
       options->host_queues.notification_capacity;
   out_options->host_queue_kernarg_capacity =
       options->host_queues.kernarg_capacity;
+  out_options->host_queue_upload_capacity =
+      options->host_queues.upload_capacity;
   out_options->force_wait_barrier_defer = options->force_wait_barrier_defer;
 }
 

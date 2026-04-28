@@ -62,14 +62,20 @@ typedef struct iree_hal_amdgpu_host_queue_kernel_submission_t {
   iree_hal_amdgpu_reclaim_entry_t* reclaim_entry;
   // Reclaim resource slots owned by |reclaim_entry|.
   iree_hal_resource_t** reclaim_resources;
-  // Queue-owned kernarg blocks reserved for this submission.
-  iree_hal_amdgpu_kernarg_block_t* kernarg_blocks;
+  // Queue-owned kernarg reservation for this submission.
+  struct {
+    // First kernarg block reserved for this submission, or NULL when unused.
+    iree_hal_amdgpu_kernarg_block_t* blocks;
+    // Kernarg ring write position to reclaim after this submission completes.
+    uint64_t write_position;
+  } kernargs;
   // First AQL packet id reserved for this submission.
   uint64_t first_packet_id;
-  // Kernarg ring write position to reclaim after this submission completes.
-  uint64_t kernarg_write_position;
-  // Queue upload ring write position to reclaim after completion.
-  uint64_t queue_upload_write_position;
+  // Queue-control upload reservation for this submission.
+  struct {
+    // Upload ring write position to reclaim after this submission completes.
+    uint64_t write_position;
+  } queue_upload;
   // Number of AQL packets reserved starting at |first_packet_id|.
   uint32_t packet_count;
   // Number of valid entries in |reclaim_resources|.
@@ -180,7 +186,7 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_kernel_submission(
 static inline void iree_hal_amdgpu_host_queue_publish_submission_kernargs(
     const iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_host_queue_kernel_submission_t* submission) {
-  if (submission->kernarg_blocks) {
+  if (submission->kernargs.blocks) {
     iree_hal_amdgpu_kernarg_ring_publish_host_writes(&queue->kernarg_ring);
   }
 }

@@ -348,7 +348,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     iree_hal_amdgpu_staging_pool_t* staging_pool,
     iree_host_size_t device_ordinal, uint32_t aql_queue_capacity,
     uint32_t notification_capacity, uint32_t kernarg_capacity_in_blocks,
-    iree_allocator_t host_allocator, iree_hal_amdgpu_host_queue_t* out_queue) {
+    uint32_t upload_capacity, iree_allocator_t host_allocator,
+    iree_hal_amdgpu_host_queue_t* out_queue) {
   IREE_ASSERT_ARGUMENT(libhsa);
   IREE_ASSERT_ARGUMENT(logical_device);
   IREE_ASSERT_ARGUMENT(proactor);
@@ -365,7 +366,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
 
   if (!iree_host_size_is_power_of_two(aql_queue_capacity) ||
       !iree_host_size_is_power_of_two(notification_capacity) ||
-      !iree_host_size_is_power_of_two(kernarg_capacity_in_blocks)) {
+      !iree_host_size_is_power_of_two(kernarg_capacity_in_blocks) ||
+      !iree_host_size_is_power_of_two(upload_capacity)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "all capacities must be powers of two");
   }
@@ -457,6 +459,20 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     status = iree_hal_amdgpu_kernarg_ring_initialize(libhsa, kernarg_memory,
                                                      kernarg_capacity_in_blocks,
                                                      &out_queue->kernarg_ring);
+  }
+
+  // Initialize the queue-control upload ring from the same host-visible memory
+  // policy as queue-owned kernargs. Existing submission paths reserve zero
+  // bytes, so this is only cold setup cost until device-side fixup uses it.
+  if (iree_status_is_ok(status)) {
+    const iree_hal_amdgpu_queue_upload_ring_memory_t upload_memory = {
+        .memory_pool = kernarg_memory->memory_pool,
+        .access_agents = kernarg_memory->access_agents,
+        .access_agent_count = kernarg_memory->access_agent_count,
+        .publication = kernarg_memory->publication,
+    };
+    status = iree_hal_amdgpu_queue_upload_ring_initialize(
+        libhsa, &upload_memory, upload_capacity, &out_queue->queue_upload_ring);
   }
 
   // Initialize the optional PM4 IB slot buffer. Capability-driven allocation

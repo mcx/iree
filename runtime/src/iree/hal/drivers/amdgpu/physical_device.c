@@ -269,6 +269,8 @@ void iree_hal_amdgpu_physical_device_options_initialize(
       IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_NOTIFICATION_CAPACITY;
   out_options->host_queue_kernarg_capacity =
       IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_KERNARG_CAPACITY;
+  out_options->host_queue_upload_capacity =
+      IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_UPLOAD_CAPACITY;
 
   out_options->default_pool.range_length =
       IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_POOL_RANGE_LENGTH_DEFAULT;
@@ -321,14 +323,17 @@ iree_status_t iree_hal_amdgpu_physical_device_options_verify(
   if (!iree_host_size_is_power_of_two(options->host_queue_aql_capacity) ||
       !iree_host_size_is_power_of_two(
           options->host_queue_notification_capacity) ||
-      !iree_host_size_is_power_of_two(options->host_queue_kernarg_capacity)) {
+      !iree_host_size_is_power_of_two(options->host_queue_kernarg_capacity) ||
+      !iree_host_size_is_power_of_two(options->host_queue_upload_capacity)) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
-        "host queue AQL, notification, and kernarg capacities must all be "
-        "powers of two (got aql=%u, notification=%u, kernarg_blocks=%u)",
+        "host queue AQL, notification, kernarg, and upload capacities must all "
+        "be powers of two (got aql=%u, notification=%u, kernarg_blocks=%u, "
+        "upload_bytes=%u)",
         options->host_queue_aql_capacity,
         options->host_queue_notification_capacity,
-        options->host_queue_kernarg_capacity);
+        options->host_queue_kernarg_capacity,
+        options->host_queue_upload_capacity);
   }
   if (options->host_queue_kernarg_capacity / 2u <
       options->host_queue_aql_capacity) {
@@ -408,6 +413,8 @@ static iree_status_t iree_hal_amdgpu_physical_device_initialize_identity(
       options->host_queue_notification_capacity;
   out_physical_device->host_queue_kernarg_capacity =
       options->host_queue_kernarg_capacity;
+  out_physical_device->host_queue_upload_capacity =
+      options->host_queue_upload_capacity;
 
   IREE_RETURN_IF_ERROR(
       iree_hsa_agent_get_info(IREE_LIBHSA(libhsa), device_agent,
@@ -1145,7 +1152,8 @@ iree_status_t iree_hal_amdgpu_physical_device_assign_frontier(
         &physical_device->file_staging_pool, physical_device->device_ordinal,
         physical_device->host_queue_aql_capacity,
         physical_device->host_queue_notification_capacity,
-        physical_device->host_queue_kernarg_capacity, host_allocator,
+        physical_device->host_queue_kernarg_capacity,
+        physical_device->host_queue_upload_capacity, host_allocator,
         &physical_device->host_queues[queue_ordinal]);
     if (iree_status_is_ok(status)) {
       physical_device->host_queue_count = queue_ordinal + 1;
