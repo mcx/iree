@@ -309,8 +309,8 @@ iree_runtime_cc_library(
     srcs = ["device_library.c"],
     hdrs = ["device_library.h"],
     deps = [
+        ":device_library_target",
         ":libhsa",
-        ":target_id",
         ":topology",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
@@ -320,11 +320,22 @@ iree_runtime_cc_library(
 )
 
 iree_runtime_cc_library(
+    name = "device_library_target",
+    srcs = ["device_library_target.c"],
+    hdrs = ["device_library_target.h"],
+    deps = [
+        ":target_id",
+        "//runtime/src/iree/base",
+    ],
+)
+
+iree_runtime_cc_library(
     name = "util",
     deps = [
         ":affinity",
         ":block_pool",
         ":device_library",
+        ":device_library_target",
         ":info",
         ":kfd",
         ":packet",
@@ -401,6 +412,18 @@ iree_runtime_cc_test(
         ":topology",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal/drivers/amdgpu/device:headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "device_library_target_test",
+    srcs = ["device_library_target_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    deps = [
+        ":device_library_target",
+        "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

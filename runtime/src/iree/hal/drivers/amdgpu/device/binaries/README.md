@@ -34,6 +34,22 @@ The generated files are checked in. Pre-commit runs
 `python build_tools/scripts/amdgpu_target_map.py --check` so CI catches drift
 between the Python map and the generated fragments.
 
+## Current Generic-Family Audit
+
+The current map intentionally includes generic code-object coverage for the
+modern families LLVM documents and the ROCm/TheRock selector vocabulary names:
+
+| Selector family | Exact targets | Code-object target |
+| --- | --- | --- |
+| `gfx9-4` CDNA | `gfx940`, `gfx941`, `gfx942`, `gfx950` | `gfx9-4-generic` |
+| `gfx11` RDNA/APU | `gfx1100`, `gfx1101`, `gfx1102`, `gfx1103`, `gfx1150`, `gfx1151`, `gfx1152`, `gfx1153`, `gfx1170`, `gfx1171`, `gfx1172` | `gfx11-generic` |
+| `gfx12` RDNA | `gfx1200`, `gfx1201` | `gfx12-generic` |
+| `gfx12.5` RDNA | `gfx1250`, `gfx1251` | `gfx12-5-generic` |
+
+Targets outside this table should fail selection loudly until LLVM documents
+their code-object compatibility and the embedded support library has been
+compiled for the required exact or generic processor.
+
 ## Adding An Architecture
 
 When a new AMDGPU architecture is supported:

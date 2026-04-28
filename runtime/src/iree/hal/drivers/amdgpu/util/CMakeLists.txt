@@ -327,8 +327,8 @@ iree_cc_library(
   SRCS
     "device_library.c"
   DEPS
+    ::device_library_target
     ::libhsa
-    ::target_id
     ::topology
     iree::base
     iree::base::internal
@@ -339,11 +339,25 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
+    device_library_target
+  HDRS
+    "device_library_target.h"
+  SRCS
+    "device_library_target.c"
+  DEPS
+    ::target_id
+    iree::base
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     util
   DEPS
     ::affinity
     ::block_pool
     ::device_library
+    ::device_library_target
     ::info
     ::kfd
     ::packet
@@ -426,6 +440,20 @@ iree_cc_test(
   LABELS
     "driver=amdgpu"
     "nodocker"
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
+    device_library_target_test
+  SRCS
+    "device_library_target_test.cc"
+  DEPS
+    ::device_library_target
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
   GROUP
     "iree-hal-drivers-amdgpu-tests"
 )
