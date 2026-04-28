@@ -90,6 +90,7 @@ iree_runtime_cc_library(
 iree_runtime_cc_library(
     name = "temp_file",
     testonly = True,
+    srcs = ["temp_file.cc"],
     hdrs = ["temp_file.h"],
     deps = [
         ":gtest",

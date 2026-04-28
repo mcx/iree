@@ -81,6 +81,8 @@ iree_cc_library(
     temp_file
   HDRS
     "temp_file.h"
+  SRCS
+    "temp_file.cc"
   DEPS
     ::gtest
     iree::base

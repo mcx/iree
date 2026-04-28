@@ -12,6 +12,7 @@
 
 #include "iree/async/file.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -42,11 +43,7 @@ class FileTest : public CtsTestBase<> {
   void TearDown() override {
     // Clean up any temp files created during the test.
     for (const auto& path : temp_paths_) {
-#if defined(IREE_PLATFORM_WINDOWS)
-      DeleteFileA(path.c_str());
-#else
-      unlink(path.c_str());
-#endif
+      EXPECT_TRUE(path.Remove()) << path.path();
     }
     CtsTestBase::TearDown();
   }
@@ -59,13 +56,24 @@ class FileTest : public CtsTestBase<> {
     IREE_EXPECT_OK(iree_io_file_contents_write(
         temp_path.path_view(), iree_make_const_byte_span(data, length),
         iree_allocator_system()));
-    temp_paths_.push_back(temp_path.path());
-    return temp_path.path();
+    std::string path = temp_path.path();
+    temp_paths_.push_back(std::move(temp_path));
+    return path;
   }
 
   // Creates an empty temp file and returns the path.
   std::string CreateEmptyTempFile() {
     return CreateTempFileWithContents("", 0);
+  }
+
+  // Removes a tracked temp file before the test recreates it.
+  bool RemoveTempFile(const std::string& path) {
+    auto path_it =
+        std::find_if(temp_paths_.begin(), temp_paths_.end(),
+                     [&path](const iree::testing::TempFilePath& temp_path) {
+                       return temp_path.path() == path;
+                     });
+    return path_it != temp_paths_.end() && path_it->Remove();
   }
 
   // Opens a temp file for read+write and imports it into the proactor.
@@ -109,7 +117,7 @@ class FileTest : public CtsTestBase<> {
   }
 
  private:
-  std::vector<std::string> temp_paths_;
+  std::vector<iree::testing::TempFilePath> temp_paths_;
 };
 
 //===----------------------------------------------------------------------===//
@@ -169,11 +177,7 @@ TEST_P(FileTest, OpenWithCreateCreatesNewFile) {
   // Use a unique path that doesn't exist.
   std::string path = CreateEmptyTempFile();
   // Remove it so the open+CREATE can recreate it.
-#if defined(IREE_PLATFORM_WINDOWS)
-  DeleteFileA(path.c_str());
-#else
-  unlink(path.c_str());
-#endif
+  ASSERT_TRUE(RemoveTempFile(path)) << path;
 
   iree_async_file_open_operation_t open_op;
   memset(&open_op, 0, sizeof(open_op));

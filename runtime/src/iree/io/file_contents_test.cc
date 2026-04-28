@@ -10,8 +10,6 @@
 
 #if IREE_FILE_IO_ENABLE
 
-#include <sys/stat.h>
-
 #include <cstring>
 #include <string>
 
@@ -25,11 +23,6 @@ namespace {
 
 using ::iree::testing::status::StatusIs;
 
-static bool FileExists(const char* path) {
-  struct stat stat_buf;
-  return stat(path, &stat_buf) == 0 ? true : false;
-}
-
 std::string GetUniqueContents(const char* unique_name,
                               iree_host_size_t padded_size) {
   std::string str = std::string("Test with name ") + unique_name + "\n";
@@ -42,7 +35,7 @@ TEST(FileContents, ReadWriteContentsPreload) {
   iree::testing::TempFilePath path("iree_file_contents_test");
 
   // File must not exist.
-  ASSERT_FALSE(FileExists(path.path().c_str()));
+  ASSERT_FALSE(path.Exists());
 
   // Generate file contents.
   auto write_contents = GetUniqueContents(kUniqueName, 32);
@@ -72,7 +65,7 @@ TEST(FileContents, ReadWriteContentsMmap) {
   iree::testing::TempFilePath path("iree_file_contents_test");
 
   // File must not exist.
-  ASSERT_FALSE(FileExists(path.path().c_str()));
+  ASSERT_FALSE(path.Exists());
 
   // Generate file contents.
   auto write_contents = GetUniqueContents(kUniqueName, 4096);

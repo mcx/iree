@@ -50,6 +50,12 @@ class TempFilePath {
     return iree_make_string_view(path_.data(), path_.size());
   }
 
+  // Returns true if the path currently names an existing file.
+  bool Exists() const;
+
+  // Removes the file at the generated path.
+  bool Remove() const;
+
   void Reset() { path_.clear(); }
 
  private:

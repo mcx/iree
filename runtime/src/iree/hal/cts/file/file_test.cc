@@ -13,6 +13,7 @@
 #include "iree/hal/cts/util/test_base.h"
 #include "iree/io/file_contents.h"
 #include "iree/io/file_handle.h"
+#include "iree/io/stream.h"
 #include "iree/testing/temp_file.h"
 
 namespace iree::hal::cts {
@@ -98,18 +99,18 @@ class FileTest : public CtsTestBase<> {
 
       if (native_handle_) {
         IREE_EXPECT_OK(iree_io_file_handle_flush(native_handle_));
-        iree_io_file_contents_t* native_contents = nullptr;
-        IREE_EXPECT_OK(iree_io_file_contents_read(native_path_.path_view(),
-                                                  iree_allocator_system(),
-                                                  &native_contents));
-        if (!native_contents) return contents;
-        EXPECT_LE(offset + length, native_contents->const_buffer.data_length);
-        if (offset + length <= native_contents->const_buffer.data_length) {
-          std::memcpy(contents.data(),
-                      native_contents->const_buffer.data + offset,
-                      static_cast<size_t>(length));
+        iree_io_stream_t* stream = nullptr;
+        IREE_EXPECT_OK(iree_io_stream_open(IREE_IO_STREAM_MODE_READABLE,
+                                           native_handle_, offset,
+                                           iree_allocator_system(), &stream));
+        if (stream) {
+          iree_host_size_t read_length = 0;
+          IREE_EXPECT_OK(
+              iree_io_stream_read(stream, static_cast<iree_host_size_t>(length),
+                                  contents.data(), &read_length));
+          EXPECT_EQ(length, read_length);
         }
-        iree_io_file_contents_free(native_contents);
+        iree_io_stream_release(stream);
         return contents;
       }
 

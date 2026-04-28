@@ -47,10 +47,13 @@ iree_hal_test_rounding_allocator_query_buffer_compatibility(
 
 static const iree_hal_allocator_vtable_t
     iree_hal_test_rounding_allocator_vtable = {
-        .destroy = iree_hal_test_rounding_allocator_destroy,
-        .host_allocator = iree_hal_test_rounding_allocator_host_allocator,
-        .query_buffer_compatibility =
-            iree_hal_test_rounding_allocator_query_buffer_compatibility,
+        /*.destroy=*/iree_hal_test_rounding_allocator_destroy,
+        /*.host_allocator=*/iree_hal_test_rounding_allocator_host_allocator,
+        /*.trim=*/NULL,
+        /*.query_statistics=*/NULL,
+        /*.query_memory_heaps=*/NULL,
+        /*.query_buffer_compatibility=*/
+        iree_hal_test_rounding_allocator_query_buffer_compatibility,
 };
 
 static iree_status_t iree_hal_test_rounding_allocator_create(
@@ -92,13 +95,15 @@ TEST(BufferViewUtilTest, GenerateBufferUsesLogicalViewSizeForGenerator) {
       iree_hal_test_rounding_allocator_create(host_allocator, &allocator));
 
   iree_hal_test_generate_buffer_state_t state = {
-      .expected_content_size = sizeof(float),
-      .actual_content_size = 0,
+      /*.expected_content_size=*/sizeof(float),
+      /*.actual_content_size=*/0,
   };
   iree_hal_dim_t shape[] = {1};
   iree_hal_buffer_params_t buffer_params = {
-      .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
-      .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+      /*.usage=*/IREE_HAL_BUFFER_USAGE_DEFAULT,
+      /*.access=*/0,
+      /*.type=*/IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+      /*.queue_affinity=*/0,
   };
   iree_hal_buffer_view_t* buffer_view = NULL;
   iree_status_t status = iree_hal_buffer_view_generate_buffer(
