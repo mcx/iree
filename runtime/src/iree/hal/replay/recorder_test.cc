@@ -6,26 +6,20 @@
 
 #include "iree/hal/replay/recorder.h"
 
-#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
-
-#if IREE_FILE_IO_ENABLE && \
-    (defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX))
-#include <stdlib.h>
-#include <unistd.h>
-#endif  // IREE_FILE_IO_ENABLE && (IREE_PLATFORM_ANDROID ||
-        // IREE_PLATFORM_LINUX)
 
 #include "iree/async/frontier_tracker.h"
 #include "iree/async/util/proactor_pool.h"
 #include "iree/hal/drivers/local_sync/sync_device.h"
 #include "iree/hal/replay/file_reader.h"
 #include "iree/hal/testing/mock_device.h"
+#include "iree/io/file_contents.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+#include "iree/testing/temp_file.h"
 
 namespace {
 
@@ -126,40 +120,12 @@ static iree_hal_replay_recorder_t* CreateHostAllocationRecorder(
 
 #if IREE_FILE_IO_ENABLE && \
     (defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX))
-class ScopedTempFile {
- public:
-  explicit ScopedTempFile(iree_const_byte_span_t contents) {
-    char path_template[] = "/tmp/iree_hal_replay_recorder_file_XXXXXX";
-    const int fd = mkstemp(path_template);
-    EXPECT_GE(fd, 0);
-    if (fd < 0) return;
-    iree_host_size_t total_written = 0;
-    while (total_written < contents.data_length) {
-      ssize_t written = write(fd, contents.data + total_written,
-                              contents.data_length - total_written);
-      if (written < 0 && errno == EINTR) continue;
-      EXPECT_GT(written, 0);
-      if (written <= 0) break;
-      total_written += (iree_host_size_t)written;
-    }
-    EXPECT_EQ(contents.data_length, total_written);
-    EXPECT_EQ(0, close(fd));
-    path_ = path_template;
-  }
-
-  ~ScopedTempFile() {
-    if (!path_.empty()) {
-      unlink(path_.c_str());
-    }
-  }
-
-  iree_string_view_t path_view() const {
-    return iree_make_string_view(path_.data(), path_.size());
-  }
-
- private:
-  std::string path_;
-};
+iree::testing::TempFilePath WriteTempFile(iree_const_byte_span_t contents) {
+  iree::testing::TempFilePath path("iree_hal_replay_recorder_file");
+  IREE_EXPECT_OK(iree_io_file_contents_write(path.path_view(), contents,
+                                             iree_allocator_system()));
+  return path;
+}
 #endif  // IREE_FILE_IO_ENABLE && (IREE_PLATFORM_ANDROID ||
         // IREE_PLATFORM_LINUX)
 
@@ -600,7 +566,7 @@ TEST(ReplayRecorderTest, ExternalFileFailPolicyRejectsFdBackedFiles) {
 #if IREE_FILE_IO_ENABLE && \
     (defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX))
   const uint8_t file_contents[4] = {0x00, 0x01, 0x02, 0x03};
-  ScopedTempFile source_file(
+  iree::testing::TempFilePath source_file = WriteTempFile(
       iree_make_const_byte_span(file_contents, sizeof(file_contents)));
 
   std::vector<uint8_t> storage(32768, 0);
@@ -645,7 +611,7 @@ TEST(ReplayRecorderTest, ExternalFileCaptureAllPolicyEmbedsFdBackedFiles) {
 #if IREE_FILE_IO_ENABLE && \
     (defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX))
   const uint8_t file_contents[4] = {0x00, 0x01, 0x02, 0x03};
-  ScopedTempFile source_file(
+  iree::testing::TempFilePath source_file = WriteTempFile(
       iree_make_const_byte_span(file_contents, sizeof(file_contents)));
 
   std::vector<uint8_t> storage(32768, 0);

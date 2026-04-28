@@ -20,13 +20,14 @@
 #include "iree/async/cts/util/test_base.h"
 #include "iree/async/operations/file.h"
 #include "iree/async/span.h"
+#include "iree/io/file_contents.h"
+#include "iree/testing/temp_file.h"
 
-// Platform headers for temp file creation.
+// Platform headers for native file import.
 #if defined(IREE_PLATFORM_WINDOWS)
 #include <windows.h>
 #else
 #include <fcntl.h>
-#include <stdlib.h>
 #include <unistd.h>
 #endif
 
@@ -54,31 +55,12 @@ class FileTest : public CtsTestBase<> {
   // The file is closed after writing; callers reopen it via file_open or
   // file_import as needed.
   std::string CreateTempFileWithContents(const void* data, size_t length) {
-#if defined(IREE_PLATFORM_WINDOWS)
-    char temp_dir[MAX_PATH] = {0};
-    GetTempPathA(MAX_PATH, temp_dir);
-    char temp_path[MAX_PATH] = {0};
-    GetTempFileNameA(temp_dir, "cts", 0, temp_path);
-    HANDLE handle = CreateFileA(temp_path, GENERIC_WRITE, 0, NULL,
-                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    EXPECT_NE(handle, INVALID_HANDLE_VALUE);
-    DWORD bytes_written = 0;
-    WriteFile(handle, data, (DWORD)length, &bytes_written, NULL);
-    CloseHandle(handle);
-    temp_paths_.push_back(temp_path);
-    return temp_path;
-#else
-    char temp_path[] = "/tmp/iree_cts_file_XXXXXX";
-    int fd = mkstemp(temp_path);
-    EXPECT_GE(fd, 0);
-    if (fd >= 0) {
-      ssize_t written = write(fd, data, length);
-      EXPECT_EQ(written, static_cast<ssize_t>(length));
-      close(fd);
-    }
-    temp_paths_.push_back(temp_path);
-    return temp_path;
-#endif
+    iree::testing::TempFilePath temp_path("iree_async_cts_file");
+    IREE_EXPECT_OK(iree_io_file_contents_write(
+        temp_path.path_view(), iree_make_const_byte_span(data, length),
+        iree_allocator_system()));
+    temp_paths_.push_back(temp_path.path());
+    return temp_path.path();
   }
 
   // Creates an empty temp file and returns the path.

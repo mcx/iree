@@ -19,6 +19,8 @@ iree_cc_library(
     iree::async
     iree::async::cts::util::registry
     iree::async::cts::util::test_base
+    iree::io::file_handle
+    iree::testing::temp_file
   TESTONLY
   ALWAYSLINK
   PUBLIC

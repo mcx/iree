@@ -173,6 +173,7 @@ iree_cc_test(
     iree::io::file_handle
     iree::testing::gtest
     iree::testing::gtest_main
+    iree::testing::temp_file
 )
 
 endif()
@@ -205,8 +206,10 @@ iree_cc_test(
     iree::hal
     iree::hal::drivers::local_sync::sync_driver
     iree::hal::testing::mock_device
+    iree::io::file_handle
     iree::testing::gtest
     iree::testing::gtest_main
+    iree::testing::temp_file
 )
 
 endif()
