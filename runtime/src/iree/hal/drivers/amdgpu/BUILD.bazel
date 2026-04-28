@@ -407,6 +407,23 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_test(
+    name = "executable_test",
+    srcs = ["executable_test.cc"],
+    group = "iree-hal-drivers-amdgpu-tests",
+    deps = [
+        ":amdgpu",
+        ":headers",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/base/internal/flatcc:building",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/schemas:amdgpu_executable_def_c_fbs",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
     name = "host_queue_command_buffer_test",
     srcs = [
         "host_queue_command_buffer_packet.h",

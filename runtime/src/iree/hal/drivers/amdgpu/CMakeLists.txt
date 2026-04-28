@@ -423,6 +423,25 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
+    executable_test
+  SRCS
+    "executable_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
+    iree::base::core_headers
+    iree::base::internal::flatcc::building
+    iree::hal
+    iree::schemas::amdgpu_executable_def_c_fbs
+    iree::testing::gtest
+    iree::testing::gtest_main
+  GROUP
+    "iree-hal-drivers-amdgpu-tests"
+)
+
+iree_cc_test(
+  NAME
     host_queue_command_buffer_test
   SRCS
     "host_queue_command_buffer_packet.h"
