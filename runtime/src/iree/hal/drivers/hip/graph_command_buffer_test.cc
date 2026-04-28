@@ -67,8 +67,10 @@ class HipGraphCommandBufferTest : public ::testing::Test {
   iree_hal_device_t* device_ = NULL;
 };
 
-TEST_F(HipGraphCommandBufferTest, RecordsMoreThanInitialNodeCapacity) {
+TEST_F(HipGraphCommandBufferTest,
+       RecordsAndRepeatedlyExecutesMoreThanInitialNodeCapacity) {
   constexpr uint32_t kFillNodeCount = 129;
+  constexpr uint64_t kExecutionCount = 16;
   iree_hal_allocator_t* allocator = iree_hal_device_allocator(device_);
 
   iree_hal_buffer_params_t buffer_params = {0};
@@ -105,6 +107,29 @@ TEST_F(HipGraphCommandBufferTest, RecordsMoreThanInitialNodeCapacity) {
     status = iree_hal_command_buffer_end(command_buffer);
   }
 
+  iree_hal_semaphore_t* semaphore = NULL;
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_semaphore_create(
+        device_, IREE_HAL_QUEUE_AFFINITY_ANY,
+        /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_DEFAULT, &semaphore);
+  }
+  for (uint64_t i = 1; i <= kExecutionCount && iree_status_is_ok(status); ++i) {
+    iree_hal_semaphore_list_t signal_semaphores = {
+        .count = 1,
+        .semaphores = &semaphore,
+        .payload_values = &i,
+    };
+    status = iree_hal_device_queue_execute(
+        device_, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        signal_semaphores, command_buffer,
+        iree_hal_buffer_binding_table_empty(), IREE_HAL_EXECUTE_FLAG_NONE);
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_semaphore_wait(semaphore, i, iree_infinite_timeout(),
+                                       IREE_ASYNC_WAIT_FLAG_NONE);
+    }
+  }
+
+  iree_hal_semaphore_release(semaphore);
   iree_hal_command_buffer_release(command_buffer);
   iree_hal_buffer_release(buffer);
 
