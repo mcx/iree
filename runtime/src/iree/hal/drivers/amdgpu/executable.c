@@ -91,7 +91,9 @@ static iree_status_t iree_hal_amdgpu_query_agent_isa_target(
 }
 
 static iree_status_t iree_hal_amdgpu_verify_isas_equal(
-    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_isa_t isa_a, hsa_isa_t isa_b) {
+    const iree_hal_amdgpu_libhsa_t* libhsa, iree_host_size_t agent_a_ordinal,
+    hsa_isa_t isa_a, iree_host_size_t agent_b_ordinal, hsa_isa_t isa_b,
+    iree_host_size_t isa_ordinal) {
   iree_hal_amdgpu_agent_isa_target_t target_a;
   IREE_RETURN_IF_ERROR(
       iree_hal_amdgpu_query_agent_isa_target(libhsa, isa_a, &target_a));
@@ -137,10 +139,13 @@ static iree_status_t iree_hal_amdgpu_verify_isas_equal(
     IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_compatibility_format(
         mismatch, sizeof(mismatch_reasons), mismatch_reasons,
         /*out_buffer_length=*/NULL));
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "GPU agent ISA targets do not match: `%s` != `%s` (mismatched %s)",
-        target_a_string, target_b_string, mismatch_reasons);
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "GPU agent[%" PRIhsz "] ISA[%" PRIhsz
+                            "] target `%s` does not match GPU agent[%" PRIhsz
+                            "] ISA[%" PRIhsz "] target `%s` (mismatched %s)",
+                            agent_a_ordinal, isa_ordinal, target_a_string,
+                            agent_b_ordinal, isa_ordinal, target_b_string,
+                            mismatch_reasons);
   }
   return iree_ok_status();
 }
@@ -183,8 +188,10 @@ iree_status_t iree_hal_amdgpu_verify_device_isa_commonality(
     }
     for (iree_host_size_t j = 0; j < expected_isas.count; ++j) {
       IREE_RETURN_AND_END_ZONE_IF_ERROR(
-          z0, iree_hal_amdgpu_verify_isas_equal(libhsa, expected_isas.values[j],
-                                                available_isas.values[j]));
+          z0, iree_hal_amdgpu_verify_isas_equal(
+                  libhsa, /*agent_a_ordinal=*/0, expected_isas.values[j],
+                  /*agent_b_ordinal=*/i, available_isas.values[j],
+                  /*isa_ordinal=*/j));
     }
   }
 
