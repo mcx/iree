@@ -76,6 +76,18 @@ iree_cc_library(
   PUBLIC
 )
 
+iree_cc_library(
+  NAME
+    temp_file
+  HDRS
+    "temp_file.h"
+  DEPS
+    ::gtest
+    iree::base
+  TESTONLY
+  PUBLIC
+)
+
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###
 
 iree_cc_library(

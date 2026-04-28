@@ -7,13 +7,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <random>
-#include <string>
+#include <utility>
 #include <vector>
 
 #include "iree/hal/cts/util/test_base.h"
 #include "iree/io/file_contents.h"
 #include "iree/io/file_handle.h"
+#include "iree/testing/temp_file.h"
 
 namespace iree::hal::cts {
 
@@ -52,14 +52,6 @@ void ReleaseAlignedAllocation(void* user_data,
   iree_allocator_free_aligned(iree_allocator_system(), user_data);
 }
 
-std::string MakeNativeTestFilePath() {
-  std::random_device random_device;
-  const uint64_t random_value =
-      (static_cast<uint64_t>(random_device()) << 32) | random_device();
-  return ::testing::TempDir() + "iree_hal_cts_file_" +
-         std::to_string(random_value);
-}
-
 }  // namespace
 
 class FileTest : public CtsTestBase<> {
@@ -89,7 +81,8 @@ class FileTest : public CtsTestBase<> {
       memory_contents_ = memory_contents;
     }
 
-    void SetNativeFile(std::string path, iree_io_file_handle_t* handle) {
+    void SetNativeFile(iree::testing::TempFilePath path,
+                       iree_io_file_handle_t* handle) {
       native_path_ = std::move(path);
       native_handle_ = handle;
     }
@@ -106,9 +99,9 @@ class FileTest : public CtsTestBase<> {
       if (native_handle_) {
         IREE_EXPECT_OK(iree_io_file_handle_flush(native_handle_));
         iree_io_file_contents_t* native_contents = nullptr;
-        IREE_EXPECT_OK(iree_io_file_contents_read(
-            iree_make_cstring_view(native_path_.c_str()),
-            iree_allocator_system(), &native_contents));
+        IREE_EXPECT_OK(iree_io_file_contents_read(native_path_.path_view(),
+                                                  iree_allocator_system(),
+                                                  &native_contents));
         if (!native_contents) return contents;
         EXPECT_LE(offset + length, native_contents->const_buffer.data_length);
         if (offset + length <= native_contents->const_buffer.data_length) {
@@ -130,7 +123,7 @@ class FileTest : public CtsTestBase<> {
       iree_io_file_handle_release(native_handle_);
       native_handle_ = nullptr;
       memory_contents_ = nullptr;
-      native_path_.clear();
+      native_path_.Reset();
     }
 
    private:
@@ -151,7 +144,7 @@ class FileTest : public CtsTestBase<> {
     // Native platform file handle backing native_file providers.
     iree_io_file_handle_t* native_handle_ = nullptr;
     // Path to the native platform file for inspection through IREE file APIs.
-    std::string native_path_;
+    iree::testing::TempFilePath native_path_;
   };
 
   template <typename Body>
@@ -308,9 +301,9 @@ class FileTest : public CtsTestBase<> {
   iree_status_t CreateNativeTestFile(
       iree_hal_memory_access_t access,
       const std::vector<uint8_t>& initial_contents, TestFile* out_file) {
-    std::string path = MakeNativeTestFilePath();
+    iree::testing::TempFilePath path("iree_hal_cts_file");
     IREE_RETURN_IF_ERROR(iree_io_file_contents_write(
-        iree_make_cstring_view(path.c_str()),
+        path.path_view(),
         iree_make_const_byte_span(initial_contents.data(),
                                   initial_contents.size()),
         iree_allocator_system()));
@@ -320,7 +313,7 @@ class FileTest : public CtsTestBase<> {
         IREE_IO_FILE_MODE_READ | IREE_IO_FILE_MODE_WRITE |
             IREE_IO_FILE_MODE_RANDOM_ACCESS | IREE_IO_FILE_MODE_SHARE_READ |
             IREE_IO_FILE_MODE_SHARE_WRITE,
-        iree_make_cstring_view(path.c_str()), iree_allocator_system(), &handle);
+        path.path_view(), iree_allocator_system(), &handle);
     if (iree_status_is_ok(status)) {
       status = iree_hal_file_import(
           device_, IREE_HAL_QUEUE_AFFINITY_ANY, access, handle,
