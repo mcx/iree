@@ -45,8 +45,9 @@ TEST(TargetIdTest, ParsesExactProcessor) {
   EXPECT_EQ(target_id.version.minor, 0u);
   EXPECT_EQ(target_id.version.stepping, 0u);
   EXPECT_TRUE(iree_string_view_equal(target_id.processor, IREE_SV("gfx1100")));
-  EXPECT_EQ(target_id.sramecc, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY);
-  EXPECT_EQ(target_id.xnack, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY);
+  EXPECT_EQ(target_id.sramecc,
+            IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED);
+  EXPECT_EQ(target_id.xnack, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED);
 }
 
 TEST(TargetIdTest, ParsesExactProcessorWithHexStepping) {
@@ -71,6 +72,22 @@ TEST(TargetIdTest, ParsesGenericProcessor) {
   EXPECT_EQ(target_id.version.major, 11u);
   EXPECT_EQ(target_id.version.minor, 0u);
   EXPECT_EQ(target_id.version.stepping, 0u);
+}
+
+TEST(TargetIdTest, ParsesKnownFeatureSupport) {
+  auto target_id = ParseTargetId("gfx942");
+  EXPECT_EQ(target_id.sramecc, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY);
+  EXPECT_EQ(target_id.xnack, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY);
+
+  target_id = ParseTargetId("gfx1030");
+  EXPECT_EQ(target_id.sramecc,
+            IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED);
+  EXPECT_EQ(target_id.xnack, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED);
+
+  target_id = ParseTargetId("gfx1013");
+  EXPECT_EQ(target_id.sramecc,
+            IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED);
+  EXPECT_EQ(target_id.xnack, IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY);
 }
 
 TEST(TargetIdTest, ParsesHsaIsaNameWithFeatureSuffixes) {

@@ -828,8 +828,9 @@ iree_hal_amdgpu_physical_device_initialize_vendor_packet_strategy(
     iree_hal_amdgpu_physical_device_t* out_physical_device) {
   iree_hal_amdgpu_target_id_t target_id;
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_agent_target_id(
-      libhsa, device_agent, sizeof(out_physical_device->target_id_processor),
-      out_physical_device->target_id_processor, &target_id));
+      libhsa, device_agent,
+      sizeof(out_physical_device->isa.target_id_processor),
+      out_physical_device->isa.target_id_processor, &target_id));
   iree_hal_amdgpu_gfxip_version_t gfxip_version = target_id.version;
 
   iree_hal_amdgpu_vendor_packet_capability_flags_t vendor_packet_capabilities =
@@ -840,8 +841,7 @@ iree_hal_amdgpu_physical_device_initialize_vendor_packet_strategy(
     wait_barrier_strategy = iree_hal_amdgpu_select_wait_barrier_strategy(
         vendor_packet_capabilities);
   }
-  out_physical_device->target_id = target_id;
-  out_physical_device->gfxip_version = gfxip_version;
+  out_physical_device->isa.target_id = target_id;
   out_physical_device->vendor_packet_capabilities = vendor_packet_capabilities;
   out_physical_device->wait_barrier_strategy = wait_barrier_strategy;
   return iree_ok_status();
@@ -940,7 +940,7 @@ iree_status_t iree_hal_amdgpu_physical_device_initialize(
     status =
         iree_hal_amdgpu_physical_device_initialize_cpu_visible_device_coarse_memory(
             libhsa, device_agent, coarse_block_memory_pool,
-            out_physical_device->gfxip_version, &system->topology,
+            out_physical_device->isa.target_id.version, &system->topology,
             &out_physical_device->cpu_visible_device_coarse_memory);
   }
 

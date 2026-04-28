@@ -92,27 +92,55 @@ static iree_status_t iree_hal_amdgpu_query_agent_isa_target(
 
 static iree_status_t iree_hal_amdgpu_verify_isas_equal(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_isa_t isa_a, hsa_isa_t isa_b) {
-  uint32_t name_length_a = 0;
-  IREE_RETURN_IF_ERROR(iree_hsa_isa_get_info_alt(
-      IREE_LIBHSA(libhsa), isa_a, HSA_ISA_INFO_NAME_LENGTH, &name_length_a));
-  uint32_t name_length_b = 0;
-  IREE_RETURN_IF_ERROR(iree_hsa_isa_get_info_alt(
-      IREE_LIBHSA(libhsa), isa_b, HSA_ISA_INFO_NAME_LENGTH, &name_length_b));
-  char name_a[64 + /*NUL*/ 1] = {0};
-  char name_b[64 + /*NUL*/ 1] = {0};
-  if (name_length_a > IREE_ARRAYSIZE(name_a) ||
-      name_length_b > IREE_ARRAYSIZE(name_b)) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "ISA name too long");
+  iree_hal_amdgpu_agent_isa_target_t target_a;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_query_agent_isa_target(libhsa, isa_a, &target_a));
+  iree_hal_amdgpu_agent_isa_target_t target_b;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_amdgpu_query_agent_isa_target(libhsa, isa_b, &target_b));
+
+  iree_hal_amdgpu_target_compatibility_t mismatch =
+      IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE;
+  if (target_a.target_id.kind != target_b.target_id.kind ||
+      target_a.target_id.version.major != target_b.target_id.version.major ||
+      target_a.target_id.version.minor != target_b.target_id.version.minor ||
+      target_a.target_id.version.stepping !=
+          target_b.target_id.version.stepping) {
+    mismatch |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_PROCESSOR;
   }
-  IREE_RETURN_IF_ERROR(iree_hsa_isa_get_info_alt(IREE_LIBHSA(libhsa), isa_a,
-                                                 HSA_ISA_INFO_NAME, &name_a));
-  IREE_RETURN_IF_ERROR(iree_hsa_isa_get_info_alt(IREE_LIBHSA(libhsa), isa_b,
-                                                 HSA_ISA_INFO_NAME, &name_b));
-  if (name_length_a != name_length_b ||
-      memcmp(name_a, name_b, name_length_a) != 0) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "ISAs do not match: `%s` != `%s`", name_a, name_b);
+  if ((target_a.target_id.kind == IREE_HAL_AMDGPU_TARGET_KIND_GENERIC ||
+       target_b.target_id.kind == IREE_HAL_AMDGPU_TARGET_KIND_GENERIC) &&
+      !iree_string_view_equal(target_a.target_id.processor,
+                              target_b.target_id.processor)) {
+    mismatch |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_FAMILY;
+  }
+  if (target_a.target_id.generic_version !=
+      target_b.target_id.generic_version) {
+    mismatch |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_GENERIC_VERSION;
+  }
+  if (target_a.target_id.sramecc != target_b.target_id.sramecc) {
+    mismatch |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_SRAMECC;
+  }
+  if (target_a.target_id.xnack != target_b.target_id.xnack) {
+    mismatch |= IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_MISMATCH_XNACK;
+  }
+  if (mismatch != IREE_HAL_AMDGPU_TARGET_COMPATIBILITY_COMPATIBLE) {
+    char target_a_string[128] = {0};
+    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_id_format(
+        &target_a.target_id, sizeof(target_a_string), target_a_string,
+        /*out_buffer_length=*/NULL));
+    char target_b_string[128] = {0};
+    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_id_format(
+        &target_b.target_id, sizeof(target_b_string), target_b_string,
+        /*out_buffer_length=*/NULL));
+    char mismatch_reasons[128] = {0};
+    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_target_compatibility_format(
+        mismatch, sizeof(mismatch_reasons), mismatch_reasons,
+        /*out_buffer_length=*/NULL));
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "GPU agent ISA targets do not match: `%s` != `%s` (mismatched %s)",
+        target_a_string, target_b_string, mismatch_reasons);
   }
   return iree_ok_status();
 }

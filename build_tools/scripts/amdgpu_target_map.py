@@ -64,6 +64,31 @@ EXACT_TARGET_CODE_OBJECTS = (
     ("gfx1251", "gfx12-5-generic"),
 )
 
+FEATURE_SRAMECC = "sramecc"
+FEATURE_XNACK = "xnack"
+
+# Feature support follows ROCr's ISA registry. A target absent from a feature
+# set does not support that feature; supported targets may still select an
+# explicit on/off mode at runtime.
+TARGET_FEATURE_SUPPORT = {
+    "gfx900": (FEATURE_XNACK,),
+    "gfx902": (FEATURE_XNACK,),
+    "gfx904": (FEATURE_XNACK,),
+    "gfx906": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx908": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx909": (FEATURE_XNACK,),
+    "gfx90c": (FEATURE_XNACK,),
+    "gfx90a": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx940": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx941": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx942": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx950": (FEATURE_SRAMECC, FEATURE_XNACK),
+    "gfx1010": (FEATURE_XNACK,),
+    "gfx1011": (FEATURE_XNACK,),
+    "gfx1012": (FEATURE_XNACK,),
+    "gfx1013": (FEATURE_XNACK,),
+}
+
 ALL_EXACT_TARGETS = object()
 
 TARGET_FAMILIES = (
@@ -192,6 +217,15 @@ def validate_target_map():
         raise ValueError("duplicate AMDGPU target families in target map")
 
     exact_set = set(exact)
+    feature_targets = set(TARGET_FEATURE_SUPPORT)
+    unknown_feature_targets = sorted(feature_targets - exact_set)
+    if unknown_feature_targets:
+        raise ValueError(
+            "target feature support references unknown exact targets: {}".format(
+                ", ".join(unknown_feature_targets)
+            )
+        )
+
     for family, targets in TARGET_FAMILIES:
         unknown_targets = sorted(set(family_targets(targets)) - exact_set)
         if unknown_targets:
@@ -343,10 +377,18 @@ def render_target_id_inl():
         "",
         "// clang-format off",
     ]
+    feature_flag_names = {
+        FEATURE_SRAMECC: "IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_SRAMECC",
+        FEATURE_XNACK: "IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_XNACK",
+    }
     for exact_target, code_object_target in EXACT_TARGET_CODE_OBJECTS:
+        features = TARGET_FEATURE_SUPPORT.get(exact_target, ())
+        feature_flags = " | ".join(feature_flag_names[feature] for feature in features)
+        if not feature_flags:
+            feature_flags = "IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_NONE"
         lines.append(
-            '{{IREE_SVL("{}"), IREE_SVL("{}")}},'.format(
-                exact_target, code_object_target
+            '{{IREE_SVL("{}"), IREE_SVL("{}"), {}}},'.format(
+                exact_target, code_object_target, feature_flags
             )
         )
     lines.append("")

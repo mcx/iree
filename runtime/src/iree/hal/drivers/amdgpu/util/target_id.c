@@ -6,11 +6,21 @@
 
 #include "iree/hal/drivers/amdgpu/util/target_id.h"
 
+typedef enum iree_hal_amdgpu_target_feature_support_bits_e {
+  IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_NONE = 0u,
+  IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_SRAMECC = 1u << 0,
+  IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_XNACK = 1u << 1,
+} iree_hal_amdgpu_target_feature_support_bits_t;
+typedef uint32_t iree_hal_amdgpu_target_feature_support_flags_t;
+
 typedef struct iree_hal_amdgpu_target_id_mapping_t {
   // Exact HSA ISA processor name.
   iree_string_view_t exact_processor;
   // Code-object processor selected for the exact processor.
   iree_string_view_t code_object_processor;
+  // Feature support flags from
+  // iree_hal_amdgpu_target_feature_support_bits_t.
+  iree_hal_amdgpu_target_feature_support_flags_t feature_support;
 } iree_hal_amdgpu_target_id_mapping_t;
 
 static const iree_hal_amdgpu_target_id_mapping_t
@@ -93,6 +103,38 @@ static bool iree_hal_amdgpu_parse_exact_processor(
     return true;
   }
   return false;
+}
+
+static const iree_hal_amdgpu_target_id_mapping_t*
+iree_hal_amdgpu_target_id_lookup_mapping(iree_string_view_t exact_processor) {
+  for (iree_host_size_t i = 0;
+       i < IREE_ARRAYSIZE(iree_hal_amdgpu_target_id_mappings); ++i) {
+    if (iree_string_view_equal(
+            exact_processor,
+            iree_hal_amdgpu_target_id_mappings[i].exact_processor)) {
+      return &iree_hal_amdgpu_target_id_mappings[i];
+    }
+  }
+  return NULL;
+}
+
+static void iree_hal_amdgpu_target_id_apply_known_feature_support(
+    iree_hal_amdgpu_target_id_t* target_id) {
+  if (target_id->kind != IREE_HAL_AMDGPU_TARGET_KIND_EXACT) return;
+  const iree_hal_amdgpu_target_id_mapping_t* mapping =
+      iree_hal_amdgpu_target_id_lookup_mapping(target_id->processor);
+  if (mapping == NULL) return;
+
+  if (target_id->sramecc == IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY &&
+      !iree_any_bit_set(mapping->feature_support,
+                        IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_SRAMECC)) {
+    target_id->sramecc = IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED;
+  }
+  if (target_id->xnack == IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_ANY &&
+      !iree_any_bit_set(mapping->feature_support,
+                        IREE_HAL_AMDGPU_TARGET_FEATURE_SUPPORT_XNACK)) {
+    target_id->xnack = IREE_HAL_AMDGPU_TARGET_FEATURE_STATE_UNSUPPORTED;
+  }
 }
 
 static bool iree_hal_amdgpu_parse_generic_processor(
@@ -265,6 +307,7 @@ IREE_API_EXPORT iree_status_t iree_hal_amdgpu_target_id_parse(
         feature, &out_target_id->sramecc, &out_target_id->xnack));
     feature_list = remaining_features;
   }
+  iree_hal_amdgpu_target_id_apply_known_feature_support(out_target_id);
   return iree_ok_status();
 }
 
@@ -348,17 +391,11 @@ iree_hal_amdgpu_target_id_format(const iree_hal_amdgpu_target_id_t* target_id,
 static bool iree_hal_amdgpu_target_id_lookup_code_object_processor(
     iree_string_view_t exact_processor,
     iree_string_view_t* out_code_object_processor) {
-  for (iree_host_size_t i = 0;
-       i < IREE_ARRAYSIZE(iree_hal_amdgpu_target_id_mappings); ++i) {
-    if (iree_string_view_equal(
-            exact_processor,
-            iree_hal_amdgpu_target_id_mappings[i].exact_processor)) {
-      *out_code_object_processor =
-          iree_hal_amdgpu_target_id_mappings[i].code_object_processor;
-      return true;
-    }
-  }
-  return false;
+  const iree_hal_amdgpu_target_id_mapping_t* mapping =
+      iree_hal_amdgpu_target_id_lookup_mapping(exact_processor);
+  if (mapping == NULL) return false;
+  *out_code_object_processor = mapping->code_object_processor;
+  return true;
 }
 
 IREE_API_EXPORT iree_status_t

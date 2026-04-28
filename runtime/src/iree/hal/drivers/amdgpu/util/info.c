@@ -84,6 +84,15 @@ iree_status_t iree_hal_amdgpu_system_info_query(
       "querying HSA_AMD_SYSTEM_INFO_SVM_ACCESSIBLE_BY_DEFAULT");
   out_info->svm_accessible_by_default = svm_accessible_by_default ? 1 : 0;
 
+  bool xnack_enabled = false;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0,
+      iree_hsa_system_get_info(IREE_LIBHSA(libhsa),
+                               HSA_AMD_SYSTEM_INFO_XNACK_ENABLED,
+                               &xnack_enabled),
+      "querying HSA_AMD_SYSTEM_INFO_XNACK_ENABLED");
+  out_info->xnack_enabled = xnack_enabled ? 1 : 0;
+
   bool dmabuf_supported = false;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0,

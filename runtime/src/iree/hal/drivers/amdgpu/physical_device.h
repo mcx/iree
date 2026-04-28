@@ -184,12 +184,13 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   uint32_t pci_function;
   // True when the PCI identity fields contain HSA-provided values.
   uint32_t has_pci_identity : 1;
-  // Storage backing |target_id.processor|.
-  char target_id_processor[64];
-  // Parsed target identity reported by the HSA agent.
-  iree_hal_amdgpu_target_id_t target_id;
-  // Parsed gfx ISA version reported by the HSA agent.
-  iree_hal_amdgpu_gfxip_version_t gfxip_version;
+  // HSA ISA identity selected for this GPU agent.
+  struct {
+    // Storage backing |target_id.processor|.
+    char target_id_processor[64];
+    // Parsed target identity, including XNACK/SRAMECC support and mode.
+    iree_hal_amdgpu_target_id_t target_id;
+  } isa;
   // Stable physical device UUID bytes reported by HSA when available.
   uint8_t physical_device_uuid[16];
   // True when |physical_device_uuid| contains a stable HSA device identifier.

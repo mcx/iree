@@ -474,7 +474,7 @@ static iree_status_t iree_hal_amdgpu_profile_counter_initialize_set(
       .name = iree_make_string_view(string_storage, set_name.size),
   };
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_profile_counter_initialize_selection(
-      selection, physical_device->gfxip_version, out_counter_set));
+      selection, physical_device->isa.target_id.version, out_counter_set));
   *inout_counter_storage += out_counter_set->counter_count;
   *inout_event_storage += out_counter_set->counter_count;
 

@@ -27,6 +27,9 @@ typedef struct iree_hal_amdgpu_system_info_t {
   // This is true on APUs and discrete GPUs with XNACK enabled.
   // Query of HSA_AMD_SYSTEM_INFO_SVM_ACCESSIBLE_BY_DEFAULT.
   uint32_t svm_accessible_by_default : 1;
+  // Whether the process is bound to XNACK-enabled execution.
+  // Query of HSA_AMD_SYSTEM_INFO_XNACK_ENABLED.
+  uint32_t xnack_enabled : 1;
   // Whether the dmabuf APIs are supported by the driver.
   // Query of HSA_AMD_SYSTEM_INFO_DMABUF_SUPPORTED.
   uint32_t dmabuf_supported : 1;
