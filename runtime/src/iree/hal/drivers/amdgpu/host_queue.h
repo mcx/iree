@@ -40,6 +40,8 @@ typedef struct iree_hal_amdgpu_host_queue_command_buffer_scratch_t
     iree_hal_amdgpu_host_queue_command_buffer_scratch_t;
 typedef struct iree_hal_amdgpu_profile_counter_sample_slot_t
     iree_hal_amdgpu_profile_counter_sample_slot_t;
+typedef struct iree_hal_amdgpu_profile_counter_range_slot_t
+    iree_hal_amdgpu_profile_counter_range_slot_t;
 typedef struct iree_hal_amdgpu_profile_counter_session_t
     iree_hal_amdgpu_profile_counter_session_t;
 typedef struct iree_hal_amdgpu_profile_trace_session_t
@@ -360,11 +362,29 @@ typedef struct iree_hal_amdgpu_host_queue_t {
     struct {
       // Borrowed hardware counter session active for this queue, or NULL.
       iree_hal_amdgpu_profile_counter_session_t* session;
-      // Host-side slot table pairing dispatch event slots with aqlprofile
-      // handles.
-      iree_hal_amdgpu_profile_counter_sample_slot_t* sample_slots;
-      // Number of counter sample slots associated with each dispatch event.
+      // Number of selected counter sets in |session|.
       uint32_t set_count;
+      // Dispatch-attributed counter sample storage.
+      struct {
+        // Host-side slot table pairing dispatch event slots with aqlprofile
+        // handles.
+        iree_hal_amdgpu_profile_counter_sample_slot_t* slots;
+      } dispatch_samples;
+      // Queue-range counter sample storage.
+      struct {
+        // Host-side slot table pairing range banks with aqlprofile handles.
+        iree_hal_amdgpu_profile_counter_range_slot_t* slots;
+        // Device-visible timing records for each range bank.
+        uint64_t* ticks;
+        // Byte length of |ticks|.
+        iree_host_size_t tick_storage_size;
+        // Bank currently capturing queue work.
+        uint32_t active_bank;
+        // Number of reusable range banks in |slots| and |ticks|.
+        uint32_t bank_count;
+        // True when a range bank has been started and must be stopped.
+        bool is_active;
+      } ranges;
     } counters;
     // Queue-local executable trace profile resources.
     struct {
