@@ -138,6 +138,8 @@ iree_cc_library(
     "profile_counters.h"
     "profile_device_metrics.c"
     "profile_device_metrics.h"
+    "profile_device_metrics_linux.c"
+    "profile_device_metrics_source.h"
     "profile_metadata.c"
     "profile_metadata.h"
     "profile_traces.c"
