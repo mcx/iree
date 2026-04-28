@@ -570,6 +570,15 @@ iree_hal_amdgpu_allocator_query_buffer_compatibility(
   if (import_compatible) {
     compatibility |= IREE_HAL_BUFFER_COMPATIBILITY_IMPORTABLE;
   }
+  if (iree_all_bits_set(placement.memory_type,
+                        IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
+                            IREE_HAL_MEMORY_TYPE_HOST_VISIBLE)) {
+    // Fine-grained GPU-local memory exists to support explicit coherent host
+    // access, but dispatches should prefer coarse-grained device-local memory.
+    // Generic generation helpers use this hint to stage host-produced data
+    // through a transfer instead of generating directly into dispatch inputs.
+    compatibility |= IREE_HAL_BUFFER_COMPATIBILITY_LOW_PERFORMANCE;
+  }
 
   return compatibility;
 }
