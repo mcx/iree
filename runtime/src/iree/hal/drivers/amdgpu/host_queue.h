@@ -589,8 +589,9 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
 // 64-byte blocks, at least 2x |aql_queue_capacity| to cover one tail-padding
 // gap at wrap. Submission admission proves space in both the AQL and kernarg
 // rings before publishing packets.
-// |upload_capacity| is the power-of-two byte capacity of the device-visible
-// control upload ring used for queue-ordered submission metadata.
+// |upload_capacity| is the byte capacity of the device-visible control upload
+// ring used for queue-ordered submission metadata. Zero disables the optional
+// upload ring; non-zero values must be powers of two.
 //
 // |vendor_packet_capabilities| describes the AQL/PM4 vendor-packet support
 // selected from the physical device ISA. Queues allocate dynamic PM4 IB slots

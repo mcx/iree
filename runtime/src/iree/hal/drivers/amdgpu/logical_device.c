@@ -272,13 +272,15 @@ static iree_status_t iree_hal_amdgpu_logical_device_options_verify(
       !iree_host_size_is_power_of_two(
           options->host_queues.notification_capacity) ||
       !iree_host_size_is_power_of_two(options->host_queues.kernarg_capacity) ||
-      !iree_host_size_is_power_of_two(options->host_queues.upload_capacity)) {
+      (options->host_queues.upload_capacity != 0 &&
+       !iree_host_size_is_power_of_two(options->host_queues.upload_capacity))) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                              "host queue AQL, notification, kernarg, and "
-                             "upload capacities must all "
-                             "be powers of two (got aql=%u, notification=%u, "
-                             "kernarg_blocks=%u, upload_bytes=%u)",
+                             "upload capacities must all be powers of two, "
+                             "with zero allowed for disabled upload capacity "
+                             "(got aql=%u, notification=%u, kernarg_blocks=%u, "
+                             "upload_bytes=%u)",
                              options->host_queues.aql_capacity,
                              options->host_queues.notification_capacity,
                              options->host_queues.kernarg_capacity,

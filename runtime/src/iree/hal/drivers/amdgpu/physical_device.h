@@ -100,8 +100,7 @@ typedef struct iree_hal_amdgpu_host_memory_pools_t
 #define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_KERNARG_CAPACITY \
   ((uint32_t)(IREE_HAL_AMDGPU_DEFAULT_KERNARG_RINGBUFFER_CAPACITY /         \
               sizeof(iree_hal_amdgpu_kernarg_block_t)))
-#define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_UPLOAD_CAPACITY \
-  (64 * 1024)
+#define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_HOST_QUEUE_UPLOAD_CAPACITY 0
 
 // Options controlling how a physical device is initialized.
 typedef struct iree_hal_amdgpu_physical_device_options_t {
@@ -132,7 +131,8 @@ typedef struct iree_hal_amdgpu_physical_device_options_t {
   uint32_t host_queue_notification_capacity;
   // Per-host-queue kernarg ring capacity in 64-byte blocks.
   uint32_t host_queue_kernarg_capacity;
-  // Per-host-queue device-visible control upload ring capacity in bytes.
+  // Per-host-queue device-visible control upload ring capacity in bytes. Zero
+  // disables the optional upload ring.
   uint32_t host_queue_upload_capacity;
 
   // Default queue-allocation pool policy.
@@ -272,7 +272,8 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   uint32_t host_queue_notification_capacity;
   // Per-host-queue kernarg ring capacity in 64-byte blocks.
   uint32_t host_queue_kernarg_capacity;
-  // Per-host-queue device-visible control upload ring capacity in bytes.
+  // Per-host-queue device-visible control upload ring capacity in bytes. Zero
+  // disables the optional upload ring.
   uint32_t host_queue_upload_capacity;
   // AMD vendor-packet capabilities selected from this GPU agent's ISA.
   iree_hal_amdgpu_vendor_packet_capability_flags_t vendor_packet_capabilities;

@@ -367,9 +367,10 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   if (!iree_host_size_is_power_of_two(aql_queue_capacity) ||
       !iree_host_size_is_power_of_two(notification_capacity) ||
       !iree_host_size_is_power_of_two(kernarg_capacity_in_blocks) ||
-      !iree_host_size_is_power_of_two(upload_capacity)) {
+      (upload_capacity != 0 &&
+       !iree_host_size_is_power_of_two(upload_capacity))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "all capacities must be powers of two");
+                            "all enabled capacities must be powers of two");
   }
   if (kernarg_capacity_in_blocks / 2u < aql_queue_capacity) {
     return iree_make_status(
@@ -461,10 +462,11 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
                                                      &out_queue->kernarg_ring);
   }
 
-  // Initialize the queue-control upload ring from the same host-visible memory
-  // policy as queue-owned kernargs. Existing submission paths reserve zero
-  // bytes, so this is only cold setup cost until device-side fixup uses it.
-  if (iree_status_is_ok(status)) {
+  // Initialize the optional queue-control upload ring from the same
+  // host-visible memory policy as queue-owned kernargs. A zero capacity keeps
+  // future device-side fixup storage opt-in and avoids charging every queue for
+  // an unused allocation.
+  if (iree_status_is_ok(status) && upload_capacity != 0) {
     const iree_hal_amdgpu_queue_upload_ring_memory_t upload_memory = {
         .memory_pool = kernarg_memory->memory_pool,
         .access_agents = kernarg_memory->access_agents,
