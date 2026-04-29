@@ -453,7 +453,9 @@ IREE_FLAG(
     "'command-region-events', 'counters', 'executable-metadata',\n"
     "'executable-traces'] or empty to disable profiling. HAL implementations\n"
     "may require additional flags in order to configure profiling support on\n"
-    "their devices.");
+    "their devices. Tooling may force VM-created command buffers to retain\n"
+    "metadata for modes that need command/dispatch attribution; leave this\n"
+    "empty for production timing runs.");
 IREE_FLAG(
     string, device_profiling_output, "",
     "Path for a raw IREE HAL profiling bundle. Required when\n"
@@ -486,7 +488,9 @@ IREE_FLAG_LIST(
     "Optional implementation-specific hardware counter name to capture. May "
     "be\n"
     "specified multiple times; the selected HAL driver decides which counter\n"
-    "names and combinations are supported.");
+    "names and combinations are supported. Some backends collect counters by\n"
+    "injecting profiling packets around selected dispatches, which perturbs\n"
+    "queue timing even though it enables per-dispatch attribution.");
 IREE_FLAG(
     int64_t, device_profiling_flush_interval_ms, 0,
     "Optional interval in milliseconds for a tooling-owned background thread\n"
@@ -830,7 +834,8 @@ static iree_status_t iree_hal_profiling_from_flags_stop_periodic_flush(
   iree_atomic_store(&profiling->flush_stop_requested, 1,
                     iree_memory_order_release);
   iree_notification_post(&profiling->flush_notification, IREE_ALL_WAITERS);
-  iree_thread_join(profiling->flush_thread);
+  // Final release joins the thread. Calling iree_thread_join before release
+  // would double-join pthread-backed threads, which is undefined behavior.
   iree_thread_release(profiling->flush_thread);
   profiling->flush_thread = NULL;
 
