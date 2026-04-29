@@ -132,9 +132,9 @@ TEST_F(HipGraphCommandBufferTest,
   }
   for (uint64_t i = 1; i <= kExecutionCount && iree_status_is_ok(status); ++i) {
     iree_hal_semaphore_list_t signal_semaphores = {
-        .count = 1,
-        .semaphores = &semaphore,
-        .payload_values = &i,
+        /*.count=*/1,
+        /*.semaphores=*/&semaphore,
+        /*.payload_values=*/&i,
     };
     status = iree_hal_device_queue_execute(
         device_, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
