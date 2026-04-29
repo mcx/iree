@@ -7,27 +7,19 @@
 #ifndef IREE_TESTING_TEMP_FILE_H_
 #define IREE_TESTING_TEMP_FILE_H_
 
-#include <cstdint>
-#include <random>
 #include <string>
 
 #include "iree/base/api.h"
-#include "iree/testing/gtest.h"
 
 namespace iree::testing {
 
 // Returns a unique file path under the active test temp directory.
 //
-// The returned path is not created and is not deleted by this helper. Test
-// runners own the temp directory lifetime, which keeps artifacts available for
-// debugging when the runner preserves its temp tree.
-inline std::string MakeTempFilePath(const char* stem, const char* suffix = "") {
-  std::random_device random_device;
-  const uint64_t random_value =
-      (static_cast<uint64_t>(random_device()) << 32) | random_device();
-  return ::testing::TempDir() + stem + "_" + std::to_string(random_value) +
-         suffix;
-}
+// The returned path is not created and is not deleted by this helper. The
+// containing temp directory is created if the test runner has not already done
+// so, while the runner still owns its lifetime and can preserve artifacts for
+// debugging.
+std::string MakeTempFilePath(const char* stem, const char* suffix = "");
 
 // Move-only generated temp path string.
 class TempFilePath {
