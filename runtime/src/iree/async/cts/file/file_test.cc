@@ -17,20 +17,13 @@
 #include <string>
 #include <vector>
 
+#include "iree/async/cts/file/native_file.h"
 #include "iree/async/cts/util/registry.h"
 #include "iree/async/cts/util/test_base.h"
 #include "iree/async/operations/file.h"
 #include "iree/async/span.h"
 #include "iree/io/file_contents.h"
 #include "iree/testing/temp_file.h"
-
-// Platform headers for native file import.
-#if defined(IREE_PLATFORM_WINDOWS)
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 
 namespace iree::async::cts {
 
@@ -80,39 +73,19 @@ class FileTest : public CtsTestBase<> {
   // Returns the imported file handle. The caller must submit a close operation
   // or release the file when done.
   iree_async_file_t* ImportTempFileForReadWrite(const std::string& path) {
-#if defined(IREE_PLATFORM_WINDOWS)
-    HANDLE handle =
-        CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
-                    NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-    EXPECT_NE(handle, INVALID_HANDLE_VALUE);
-    iree_async_primitive_t primitive =
-        iree_async_primitive_from_win32_handle((uintptr_t)handle);
-#else
-    int fd = open(path.c_str(), O_RDWR);
-    EXPECT_GE(fd, 0);
-    iree_async_primitive_t primitive = iree_async_primitive_from_fd(fd);
-#endif
     iree_async_file_t* file = nullptr;
-    IREE_EXPECT_OK(iree_async_file_import(proactor_, primitive, &file));
+    IREE_EXPECT_OK(ImportNativeFile(
+        proactor_, iree_make_cstring_view(path.c_str()),
+        kNativeFileAccessRead | kNativeFileAccessWrite, &file));
     return file;
   }
 
   // Opens a temp file for reading only and imports it into the proactor.
   iree_async_file_t* ImportTempFileForRead(const std::string& path) {
-#if defined(IREE_PLATFORM_WINDOWS)
-    HANDLE handle =
-        CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-    EXPECT_NE(handle, INVALID_HANDLE_VALUE);
-    iree_async_primitive_t primitive =
-        iree_async_primitive_from_win32_handle((uintptr_t)handle);
-#else
-    int fd = open(path.c_str(), O_RDONLY);
-    EXPECT_GE(fd, 0);
-    iree_async_primitive_t primitive = iree_async_primitive_from_fd(fd);
-#endif
     iree_async_file_t* file = nullptr;
-    IREE_EXPECT_OK(iree_async_file_import(proactor_, primitive, &file));
+    IREE_EXPECT_OK(ImportNativeFile(proactor_,
+                                    iree_make_cstring_view(path.c_str()),
+                                    kNativeFileAccessRead, &file));
     return file;
   }
 
