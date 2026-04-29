@@ -136,6 +136,8 @@ iree_cc_test(
   LABELS
     "driver=hip"
     "requires-gpu-amd"
+  RESOURCE_GROUP
+    hip_driver
 )
 
 iree_cc_test(
@@ -155,6 +157,8 @@ iree_cc_test(
   LABELS
     "driver=hip"
     "requires-gpu-amd"
+  RESOURCE_GROUP
+    hip_driver
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###
