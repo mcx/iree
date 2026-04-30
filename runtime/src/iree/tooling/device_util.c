@@ -450,7 +450,8 @@ IREE_FLAG(
     "HAL device profiling data families as a comma-separated list drawn from\n"
     "['queue-events', 'host-execution', 'device-queue-events',\n"
     "'dispatch-events', 'memory-events', 'device-metrics',\n"
-    "'command-region-events', 'counters', 'executable-metadata',\n"
+    "'command-region-events', 'counters', 'counter-ranges',\n"
+    "'executable-metadata',\n"
     "'executable-traces'] or empty to disable profiling. HAL implementations\n"
     "may require additional flags in order to configure profiling support on\n"
     "their devices. Tooling may force VM-created command buffers to retain\n"
@@ -488,9 +489,13 @@ IREE_FLAG_LIST(
     "Optional implementation-specific hardware counter name to capture. May "
     "be\n"
     "specified multiple times; the selected HAL driver decides which counter\n"
-    "names and combinations are supported. Some backends collect counters by\n"
-    "injecting profiling packets around selected dispatches, which perturbs\n"
-    "queue timing even though it enables per-dispatch attribution.");
+    "names and combinations are supported. Use "
+    "--device_profiling_mode=counters\n"
+    "for dispatch-scoped attribution, which may inject packets around "
+    "selected\n"
+    "dispatches and perturb queue timing. Use\n"
+    "--device_profiling_mode=counter-ranges for low-disturbance range "
+    "samples.");
 IREE_FLAG(
     int64_t, device_profiling_flush_interval_ms, 0,
     "Optional interval in milliseconds for a tooling-owned background thread\n"
@@ -662,6 +667,9 @@ static iree_status_t iree_hal_device_profiling_data_families_from_flags(
           IREE_HAL_DEVICE_PROFILING_DATA_COMMAND_REGION_EVENTS;
     } else if (iree_string_view_equal(family_part, IREE_SV("counters"))) {
       *out_data_families |= IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES;
+    } else if (iree_string_view_equal(family_part, IREE_SV("counter-ranges")) ||
+               iree_string_view_equal(family_part, IREE_SV("pmc-ranges"))) {
+      *out_data_families |= IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_RANGES;
     } else if (iree_string_view_equal(family_part,
                                       IREE_SV("executable-metadata"))) {
       *out_data_families |= IREE_HAL_DEVICE_PROFILING_DATA_EXECUTABLE_METADATA;
@@ -894,7 +902,8 @@ static iree_status_t iree_hal_begin_device_list_profiling_from_flags(
     if (counter_names.count != 0) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                               "--device_profiling_counter requires "
-                              "--device_profiling_mode=counters");
+                              "--device_profiling_mode=counters or "
+                              "--device_profiling_mode=counter-ranges");
     }
     if (strlen(FLAG_device_profiling_output) != 0) {
       return iree_make_status(
@@ -922,10 +931,12 @@ static iree_status_t iree_hal_begin_device_list_profiling_from_flags(
   }
   if (counter_names.count != 0 &&
       !iree_any_bit_set(options.data_families,
-                        IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES)) {
+                        IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_SAMPLES |
+                            IREE_HAL_DEVICE_PROFILING_DATA_COUNTER_RANGES)) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
-        "--device_profiling_counter requires --device_profiling_mode=counters");
+        "--device_profiling_counter requires --device_profiling_mode=counters "
+        "or --device_profiling_mode=counter-ranges");
   }
   if (options.data_families != IREE_HAL_DEVICE_PROFILING_DATA_NONE &&
       strlen(FLAG_device_profiling_output) == 0 && !statistics_requested) {
