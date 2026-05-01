@@ -90,7 +90,9 @@ iree_cc_library(
     "LLVMGPUTensorCoreVectorization.cpp"
     "LLVMGPUTileAndDistribute.cpp"
     "LLVMGPUVectorDistribute.cpp"
+    "LLVMGPUVectorFlattening.cpp"
     "LLVMGPUVectorLowering.cpp"
+    "LLVMGPUVectorMultiReductionLowering.cpp"
     "LLVMGPUVectorToGPU.cpp"
     "Passes.cpp"
     "ROCDLAnnotateKernelForTranslation.cpp"
@@ -177,6 +179,7 @@ iree_cc_library(
     MLIRVectorToLLVM
     MLIRVectorToSCF
     MLIRVectorTransforms
+    MLIRVectorUtils
     iree::compiler::Codegen::Common
     iree::compiler::Codegen::Common::GPU::CommonGPUPasses
     iree::compiler::Codegen::Common::GPU::GPUHeuristics
