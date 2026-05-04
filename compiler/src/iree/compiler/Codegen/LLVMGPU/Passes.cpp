@@ -867,7 +867,13 @@ void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
 }
 
 void addGPUSimpleDistributePassPipeline(OpPassManager &funcPassManager) {
-  tileAndBufferize(funcPassManager);
+  tileAndDistributeToWorkgroup(funcPassManager);
+  // OnlineAttentionOp has no bufferization path of its own. Decompose only on
+  // the generic Distribute fallback path after workgroup tiling.
+  funcPassManager.addPass(IREE::LinalgExt::createDecomposeAttentionPass());
+  funcPassManager.addPass(createConfigTrackingCanonicalizerPass());
+  funcPassManager.addPass(createCSEPass());
+  addBufferizePasses(funcPassManager);
 
   // Distribute linalg onto threads within the workgroup.
   funcPassManager.addPass(createLLVMGPUTileAndDistributePass(
